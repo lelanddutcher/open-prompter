@@ -40,6 +40,9 @@ OpenPrompter.xcodeproj/
 ## Source assets and scratch notes not part of the public repo
 Icon Exports/
 fonts/
+# …but DO ship the fonts that are bundled into the iOS app.
+!OpenPrompter/Resources/Fonts/
+!OpenPrompter/Resources/Fonts/**
 open prompter.ai
 Bluetooth Remote Research.md
 Xcode Scaffold.md

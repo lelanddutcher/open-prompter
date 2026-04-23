@@ -23,6 +23,11 @@ final class PrompterViewModel {
     var isPlaying: Bool = false
     var speed: Double
     var fontSize: Double
+    /// The user's currently selected body font for the prompter. Initialised
+    /// from `Prefs.prompterFont` and re-read when the `Settings` sheet is
+    /// dismissed (see `TeleprompterView`). Headings still render in the
+    /// brand monospace regardless of this value.
+    var prompterFont: PrompterFont
     var mirroredHorizontal: Bool
     var mirroredVertical: Bool = false
     var focus: Bool
@@ -63,8 +68,15 @@ final class PrompterViewModel {
         self.file = file
         self.speed = Prefs.defaultSpeed
         self.fontSize = Prefs.defaultFont
+        self.prompterFont = Prefs.prompterFont
         self.mirroredHorizontal = Prefs.mirrorDefault
         self.focus = Prefs.focusDefault
+    }
+
+    /// Re-read `Prefs.prompterFont` — call after the Settings sheet closes
+    /// so an open script picks up the new face without a reload.
+    func refreshPrompterFont() {
+        prompterFont = Prefs.prompterFont
     }
 
     // MARK: - Loading

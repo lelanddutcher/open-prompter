@@ -17,6 +17,7 @@ enum UbiquitousPrefsMirror {
     private static let mirroredKeys: [PrefKey] = [
         .defaultSpeed,
         .defaultFont,
+        .prompterFont,
         .mirrorDefault,
         .focusDefault,
         .aggressiveStripping,

@@ -14,6 +14,7 @@ import SwiftUI
 enum PrefKey: String, CaseIterable {
     case defaultSpeed = "pref.defaultSpeed"
     case defaultFont = "pref.defaultFont"
+    case prompterFont = "pref.prompterFont"
     case mirrorDefault = "pref.mirrorDefault"
     case focusDefault = "pref.focusDefault"
     case aggressiveStripping = "pref.aggressiveStripping"
@@ -27,6 +28,7 @@ enum PrefKey: String, CaseIterable {
         switch self {
         case .defaultSpeed: return 48.0        // pixels per second
         case .defaultFont: return 64.0         // points
+        case .prompterFont: return PrompterFont.default.rawValue
         case .mirrorDefault: return false
         case .focusDefault: return false
         case .aggressiveStripping: return true
@@ -71,6 +73,18 @@ enum Prefs {
     static var defaultFont: Double {
         get { defaults.double(forKey: PrefKey.defaultFont.rawValue) }
         set { defaults.set(newValue, forKey: PrefKey.defaultFont.rawValue) }
+    }
+
+    /// Raw value of the selected `PrompterFont`. Stored as `String` so we
+    /// can extend the enum without a migration. Reads always fall back to
+    /// `PrompterFont.default` if the stored value is missing or unknown.
+    static var prompterFont: PrompterFont {
+        get {
+            let raw = defaults.string(forKey: PrefKey.prompterFont.rawValue)
+                ?? PrompterFont.default.rawValue
+            return PrompterFont(rawValue: raw) ?? .default
+        }
+        set { defaults.set(newValue.rawValue, forKey: PrefKey.prompterFont.rawValue) }
     }
 
     static var mirrorDefault: Bool {
