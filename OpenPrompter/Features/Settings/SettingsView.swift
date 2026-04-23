@@ -14,10 +14,26 @@ struct SettingsView: View {
     @State private var defaultSpeed: Double = Prefs.defaultSpeed
     @State private var defaultFont: Double = Prefs.defaultFont
     @State private var mirrorDefault: Bool = Prefs.mirrorDefault
+    @State private var appearance: Prefs.Appearance = Prefs.appearance
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("appearance") {
+                    Picker("mode", selection: $appearance) {
+                        Text("dark").tag(Prefs.Appearance.dark)
+                        Text("light").tag(Prefs.Appearance.light)
+                        Text("system").tag(Prefs.Appearance.system)
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: appearance) { _, new in
+                        Prefs.appearance = new
+                    }
+                    Text("dark is best behind teleprompter glass. light is for the library and settings.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.dim)
+                }
+
                 Section("parsing") {
                     Toggle("aggressive markdown stripping", isOn: $aggressiveStripping)
                         .onChange(of: aggressiveStripping) { _, new in

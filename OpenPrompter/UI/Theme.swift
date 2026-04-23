@@ -8,27 +8,84 @@
 //  (standing in for JetBrains Mono across chrome, UI labels, script, and
 //  wordmark) and system sans (standing in for Inter across body copy).
 //
+//  Color tokens that carry a mode pair (bg, surface, fg, etc.) adapt
+//  automatically to the current `UITraitCollection.userInterfaceStyle`
+//  via `UIColor.dynamic`. Brand accents (green, red, amber) are fixed
+//  across modes — the brand reads the same in light and dark.
+//
 
 import SwiftUI
+import UIKit
+
+// MARK: - Dynamic color helper
+
+extension UIColor {
+    /// Build a `UIColor` that resolves to `dark` in dark mode and `light`
+    /// in light or unspecified mode. Used by Theme tokens so every
+    /// `Color.Theme.*` naturally inverts when the user picks light mode.
+    fileprivate static func dynamic(light: UIColor, dark: UIColor) -> UIColor {
+        UIColor { trait in
+            trait.userInterfaceStyle == .dark ? dark : light
+        }
+    }
+}
+
+private func rgb(_ r: Int, _ g: Int, _ b: Int) -> UIColor {
+    UIColor(red: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: 1)
+}
 
 enum Theme {
     // MARK: - Color tokens (from design-language.md §2)
+    //
+    // Dark is the canonical palette. Light inverts the neutrals while
+    // keeping the Open Green / Mirror Red / Amber accents untouched.
+    // Light-mode neutrals:
+    //   bg       = #F4F4F2 (Paper-tinted off-white)
+    //   surface  = #FFFFFF
+    //   surface2 = #ECECE6 (slightly darker gray for hairline contrast)
+    //   border   = #E6E6E0
+    //   fg       = #0A0A0B (Prompter Black inverted in as text)
+    //   muted    = #55554F
+    //   ghost    = #8F8F88
 
-    /// `#0A0A0B` — Prompter Black. The only true backdrop.
-    static let bg = Color(red: 0x0A / 255, green: 0x0A / 255, blue: 0x0B / 255)
-    /// `#131316` — Rig Gray. Cards, elevated surfaces.
-    static let surface = Color(red: 0x13 / 255, green: 0x13 / 255, blue: 0x16 / 255)
-    /// `#1D1D22` — Mount Gray. Dividers, inactive pills, input bg.
-    static let surface2 = Color(red: 0x1D / 255, green: 0x1D / 255, blue: 0x22 / 255)
-    /// `#26262C` — Default 1px hairline border.
-    static let border = Color(red: 0x26 / 255, green: 0x26 / 255, blue: 0x2C / 255)
+    /// Primary backdrop. Prompter Black in dark; Paper-tinted in light.
+    static let bg = Color(uiColor: UIColor.dynamic(
+        light: rgb(0xF4, 0xF4, 0xF2),
+        dark:  rgb(0x0A, 0x0A, 0x0B)
+    ))
+    /// Cards / elevated surfaces. Rig Gray in dark; near-white in light.
+    static let surface = Color(uiColor: UIColor.dynamic(
+        light: rgb(0xFF, 0xFF, 0xFF),
+        dark:  rgb(0x13, 0x13, 0x16)
+    ))
+    /// Dividers, inactive pills, input bg. Mount Gray in dark; soft gray in light.
+    static let surface2 = Color(uiColor: UIColor.dynamic(
+        light: rgb(0xEC, 0xEC, 0xE6),
+        dark:  rgb(0x1D, 0x1D, 0x22)
+    ))
+    /// 1px hairline border.
+    static let border = Color(uiColor: UIColor.dynamic(
+        light: rgb(0xE6, 0xE6, 0xE0),
+        dark:  rgb(0x26, 0x26, 0x2C)
+    ))
 
-    /// `#F4F4F2` — Paper. Primary text. Warm off-white.
-    static let fg = Color(red: 0xF4 / 255, green: 0xF4 / 255, blue: 0xF2 / 255)
-    /// `#B5B5B0` — Muted Paper. Secondary text.
-    static let muted = Color(red: 0xB5 / 255, green: 0xB5 / 255, blue: 0xB0 / 255)
-    /// `#6A6A65` — Ghost. Placeholders, disabled, tertiary labels.
-    static let ghost = Color(red: 0x6A / 255, green: 0x6A / 255, blue: 0x65 / 255)
+    /// Primary text. Paper in dark; Prompter Black in light.
+    static let fg = Color(uiColor: UIColor.dynamic(
+        light: rgb(0x0A, 0x0A, 0x0B),
+        dark:  rgb(0xF4, 0xF4, 0xF2)
+    ))
+    /// Secondary text.
+    static let muted = Color(uiColor: UIColor.dynamic(
+        light: rgb(0x55, 0x55, 0x4F),
+        dark:  rgb(0xB5, 0xB5, 0xB0)
+    ))
+    /// Placeholders, disabled, tertiary labels.
+    static let ghost = Color(uiColor: UIColor.dynamic(
+        light: rgb(0x8F, 0x8F, 0x88),
+        dark:  rgb(0x6A, 0x6A, 0x65)
+    ))
+
+    // Brand accents are locked — they're trademarks, not neutrals.
 
     /// `#3FEE7A` — Open Green. Primary accent. Live, CTA, success.
     static let green = Color(red: 0x3F / 255, green: 0xEE / 255, blue: 0x7A / 255)
