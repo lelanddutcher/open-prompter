@@ -30,7 +30,7 @@ struct ScriptVisitor: MarkupVisitor {
     }
 
     mutating func visitHeading(_ heading: Heading) -> String {
-        let plain = heading.plainText.trimmingCharacters(in: .whitespaces)
+        let plain = Self.plainText(of: heading).trimmingCharacters(in: CharacterSet.whitespaces)
         if rules.scaffoldLabel.hasMatch(in: plain) { return "" }
         if rules.droppedSectionHeading.hasMatch(in: plain) { return "" }
         // Return heading text as a plain line (no # markers, no emphasis).
@@ -48,19 +48,46 @@ struct ScriptVisitor: MarkupVisitor {
         // Drop AI-generated callouts specifically. Other callout kinds (note,
         // warning, tip, info, quote, etc.) are preserved as spoken content —
         // a plain `> quote` from the writer is real content, not cruft.
-        let plain = blockQuote.plainText.trimmingCharacters(in: .whitespaces)
+        let plain = Self.plainText(of: blockQuote).trimmingCharacters(in: CharacterSet.whitespaces)
         if plain.lowercased().hasPrefix("[!ai-generated]") {
             return ""
         }
-        // Strip the `[!kind]` marker on other callouts but keep their text.
-        let withoutMarker = stripCalloutMarker(plain)
-        return withoutMarker
+        // For non-AI callouts, re-emit children as spoken text so paragraph
+        // structure inside the blockquote is preserved. Strip the `[!kind]`
+        // marker if present on the first line.
+        var spoken = defaultVisit(blockQuote)
+        spoken = stripCalloutMarker(spoken)
+        return spoken
     }
 
     private func stripCalloutMarker(_ input: String) -> String {
         // Remove leading `[!anything]` at start of first line.
         let pattern = try! NSRegularExpression(pattern: "^\\[![^\\]]+\\]\\s*", options: [])
         return pattern.removingMatches(in: input)
+    }
+
+    /// Walk a Markup node's descendants and extract the plain text content,
+    /// flattening Text / Emphasis / Strong / InlineCode and dropping everything
+    /// else. swift-markdown 0.7.x doesn't expose a uniform `plainText` on
+    /// every Markup subtype, so this is our own helper.
+    private static func plainText(of markup: any Markup) -> String {
+        var pieces: [String] = []
+        for child in markup.children {
+            if let text = child as? Text {
+                pieces.append(text.string)
+            } else if let code = child as? InlineCode {
+                pieces.append(code.code)
+            } else if let linebreak = child as? LineBreak {
+                _ = linebreak
+                pieces.append(" ")
+            } else if let softbreak = child as? SoftBreak {
+                _ = softbreak
+                pieces.append(" ")
+            } else {
+                pieces.append(plainText(of: child))
+            }
+        }
+        return pieces.joined()
     }
 
     mutating func visitCodeBlock(_ codeBlock: CodeBlock) -> String {
