@@ -2,8 +2,8 @@
 //  PrompterTopBarView.swift
 //  OpenPrompter
 //
-//  Top-of-screen chrome. Persistent mirror state pill + reload banner +
-//  back/edit buttons. Outside the mirrored stage so it's always readable.
+//  Top-of-screen chrome. Back button + mirror state pill + edit button +
+//  reload banner. Outside the mirrored stage so it's always readable.
 //
 
 import SwiftUI
@@ -11,6 +11,7 @@ import SwiftUI
 struct PrompterTopBarView: View {
     @Environment(AppState.self) private var state
     var vm: PrompterViewModel
+    @State private var showEditor: Bool = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -43,11 +44,24 @@ struct PrompterTopBarView: View {
                         .foregroundStyle(Color.black)
                 }
             } else {
-                // Keep trailing width balanced with the leading chevron.
-                Color.clear.frame(width: 36, height: 32)
+                Button(action: { showEditor = true }) {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 13, weight: .bold))
+                        .frame(width: 36, height: 32)
+                        .background(Theme.controlBg, in: Capsule())
+                        .foregroundStyle(Theme.fg)
+                        .overlay(Capsule().stroke(Theme.controlBorder, lineWidth: 1))
+                }
+                .accessibilityLabel("Edit script")
             }
         }
         .padding(.horizontal, 10)
+        .sheet(isPresented: $showEditor) {
+            ScriptEditorSheet(file: vm.file) {
+                // onSaved — reload the parsed prompter content.
+                Task { await vm.reload() }
+            }
+        }
     }
 
     private var mirrorPillText: String {
