@@ -2,9 +2,10 @@
 //  PrompterControlsView.swift
 //  OpenPrompter
 //
-//  Bottom control bar. Compact tool-strip: primary actions row, speed slider,
-//  font slider + focus + jump. Sizes tuned to feel unobtrusive over text —
-//  shrinks further in `focus` mode.
+//  Bottom control strip. Monospaced labels, tight tracking, Rig Gray
+//  surfaces with hairline borders — per design-language.md §7.3, §7.6.
+//  Primary play = Open Green fill with ink-black glyph. Mirror ON swaps
+//  to Mirror Red and is the only place red appears.
 //
 
 import SwiftUI
@@ -12,10 +13,9 @@ import SwiftUI
 struct PrompterControlsView: View {
     var vm: PrompterViewModel
 
-    // MARK: - Sizing
     private let rowHeight: CGFloat = 40
-    private let buttonHeight: CGFloat = 42
-    private let iconButton: CGFloat = 38
+    private let buttonHeight: CGFloat = 44
+    private let iconButton: CGFloat = 40
     private let corner: CGFloat = 10
 
     var body: some View {
@@ -25,82 +25,111 @@ struct PrompterControlsView: View {
                 Button(action: { vm.toggleMirror() }) {
                     HStack(spacing: 6) {
                         Image(systemName: vm.mirroredHorizontal ? "rectangle.2.swap" : "rectangle")
-                            .font(.system(size: 13, weight: .bold))
-                        Text("Mirror")
-                            .font(.system(size: 14, weight: .bold))
+                            .font(.system(size: 12, weight: .bold))
+                        Text("MIRROR")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .tracking(1.0)
                     }
                     .frame(height: buttonHeight)
                     .frame(maxWidth: .infinity)
-                    .background(vm.mirroredHorizontal ? Theme.alert : Color(white: 0.15))
+                    .background(vm.mirroredHorizontal ? Theme.red : Theme.surface)
                     .foregroundStyle(Color.white)
-                    .clipShape(RoundedRectangle(cornerRadius: corner))
+                    .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: corner, style: .continuous)
+                            .stroke(vm.mirroredHorizontal ? Theme.red : Theme.border, lineWidth: 1)
+                    )
                 }
 
                 Button(action: { vm.togglePlay() }) {
-                    Label(vm.isPlaying ? "Pause" : "Play",
-                          systemImage: vm.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 15, weight: .bold))
-                        .frame(height: buttonHeight)
-                        .frame(maxWidth: .infinity)
-                        .background(vm.isPlaying ? Theme.accent : Color(white: 0.15))
-                        .foregroundStyle(vm.isPlaying ? Color.black : Theme.fg)
-                        .clipShape(RoundedRectangle(cornerRadius: corner))
+                    HStack(spacing: 6) {
+                        Image(systemName: vm.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 12, weight: .bold))
+                        Text(vm.isPlaying ? "PAUSE" : "PLAY")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .tracking(1.0)
+                    }
+                    .frame(height: buttonHeight)
+                    .frame(maxWidth: .infinity)
+                    .background(vm.isPlaying ? Theme.green : Theme.surface)
+                    .foregroundStyle(vm.isPlaying ? Color(red: 0.03, green: 0.09, blue: 0.05) : Theme.fg)
+                    .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: corner, style: .continuous)
+                            .stroke(vm.isPlaying ? Theme.green : Theme.border, lineWidth: 1)
+                    )
                 }
             }
 
             // Row 2 — speed
             HStack(spacing: 10) {
                 Text("SPEED \(Int(vm.speed))")
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(0.08 * 10)
-                    .foregroundStyle(Theme.dim)
-                    .frame(width: 76, alignment: .leading)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .tracking(1.0)
+                    .foregroundStyle(Theme.muted)
+                    .frame(width: 80, alignment: .leading)
                 Slider(
                     value: Binding(get: { vm.speed }, set: { vm.setSpeed($0) }),
                     in: 5...200,
                     step: 5
                 )
-                .tint(Theme.fg)
+                .tint(Theme.green)
             }
             .padding(.horizontal, 12)
             .frame(height: rowHeight)
-            .background(Theme.controlBg, in: RoundedRectangle(cornerRadius: corner))
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: corner, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: corner, style: .continuous)
+                    .stroke(Theme.border, lineWidth: 1)
+            )
 
             // Row 3 — font + focus + jump
             HStack(spacing: 8) {
                 Text("FONT \(Int(vm.fontSize))")
-                    .font(.system(size: 10, weight: .bold))
-                    .tracking(0.08 * 10)
-                    .foregroundStyle(Theme.dim)
-                    .frame(width: 68, alignment: .leading)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .tracking(1.0)
+                    .foregroundStyle(Theme.muted)
+                    .frame(width: 72, alignment: .leading)
                 Slider(
                     value: Binding(get: { vm.fontSize }, set: { vm.setFontSize($0) }),
                     in: 16...160,
                     step: 2
                 )
-                .tint(Theme.fg)
+                .tint(Theme.green)
 
                 Button(action: { vm.toggleFocus() }) {
                     Image(systemName: "eye.slash")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                         .frame(width: iconButton, height: iconButton)
-                        .background(Color(white: 0.15), in: RoundedRectangle(cornerRadius: 8))
+                        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .foregroundStyle(Theme.fg)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Theme.border, lineWidth: 1)
+                        )
                 }
                 .accessibilityLabel("Hide controls")
 
                 Button(action: { vm.jumpToStart() }) {
                     Image(systemName: "arrow.uturn.up")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                         .frame(width: iconButton, height: iconButton)
-                        .background(Color(white: 0.15), in: RoundedRectangle(cornerRadius: 8))
+                        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .foregroundStyle(Theme.fg)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Theme.border, lineWidth: 1)
+                        )
                 }
                 .accessibilityLabel("Jump to start")
             }
             .padding(.horizontal, 8)
             .frame(height: buttonHeight + 4)
-            .background(Theme.controlBg, in: RoundedRectangle(cornerRadius: corner))
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: corner, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: corner, style: .continuous)
+                    .stroke(Theme.border, lineWidth: 1)
+            )
         }
         .padding(.horizontal, 10)
     }

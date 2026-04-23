@@ -2,8 +2,9 @@
 //  Pill.swift
 //  OpenPrompter
 //
-//  Reusable pill chrome used for status indicators (Mirror ON, x/y progress).
-//  Dim by default, alert variant turns red.
+//  The "ghost pill" pattern from design-language.md §7.3. Mono label,
+//  uppercase, tight tracking, Surface bg + hairline border. Alert variant
+//  swaps in Mirror Red per §2.2 — the only place red may appear.
 //
 
 import SwiftUI
@@ -14,13 +15,13 @@ struct Pill: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 11, weight: .bold))
-            .tracking(0.10 * 11)
+            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+            .tracking(0.8)
+            .foregroundStyle(alert ? Color.white : Theme.muted)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(alert ? Theme.alert : Theme.controlBg)
-            .foregroundStyle(alert ? Color.white : Theme.dim)
+            .background(alert ? Theme.red : Theme.surface)
             .clipShape(Capsule())
-            .overlay(Capsule().stroke(alert ? Theme.alert : Theme.controlBorder, lineWidth: 1))
+            .overlay(Capsule().stroke(alert ? Theme.red : Theme.border, lineWidth: 1))
     }
 }

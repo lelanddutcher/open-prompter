@@ -152,7 +152,8 @@ struct TeleprompterView: View {
         switch block {
         case .heading(let level, let text):
             Text(text)
-                .font(.system(size: headingSize(level: level), weight: .heavy))
+                .font(.system(size: headingSize(level: level), weight: .heavy, design: .monospaced))
+                .tracking(-vm.fontSize * 0.02)
                 .foregroundStyle(Theme.fg)
                 .multilineTextAlignment(.center)
                 .lineSpacing(vm.fontSize * 0.2)
@@ -160,14 +161,15 @@ struct TeleprompterView: View {
 
         case .paragraph(let text):
             Text(text)
-                .font(.system(size: vm.fontSize, weight: .semibold))
+                .font(.system(size: vm.fontSize, weight: .regular, design: .monospaced))
+                .tracking(-vm.fontSize * 0.01)
                 .foregroundStyle(Theme.fg)
                 .multilineTextAlignment(.center)
-                .lineSpacing(vm.fontSize * 0.35)
+                .lineSpacing(vm.fontSize * 0.45)
                 .frame(maxWidth: .infinity, alignment: .center)
 
         case .bullet(let text):
-            listRow(marker: "•", text: text)
+            listRow(marker: "▸", text: text)
 
         case .numbered(let index, let text):
             listRow(marker: "\(index).", text: text)
@@ -178,20 +180,20 @@ struct TeleprompterView: View {
     private func listRow(marker: String, text: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: vm.fontSize * 0.35) {
             Text(marker)
-                .font(.system(size: vm.fontSize, weight: .bold))
-                .foregroundStyle(Theme.accent)
+                .font(.system(size: vm.fontSize, weight: .bold, design: .monospaced))
+                .foregroundStyle(Theme.green)
             Text(text)
-                .font(.system(size: vm.fontSize, weight: .semibold))
+                .font(.system(size: vm.fontSize, weight: .regular, design: .monospaced))
+                .tracking(-vm.fontSize * 0.01)
                 .foregroundStyle(Theme.fg)
                 .multilineTextAlignment(.leading)
-                .lineSpacing(vm.fontSize * 0.35)
+                .lineSpacing(vm.fontSize * 0.4)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, vm.fontSize * 0.25)
     }
 
     private func headingSize(level: Int) -> CGFloat {
-        // H1 → 1.45×, H2 → 1.25×, H3+ → 1.1×. Caps at the font slider maximum.
         let multiplier: CGFloat
         switch level {
         case 1: multiplier = 1.45

@@ -2,8 +2,9 @@
 //  LibraryView.swift
 //  OpenPrompter
 //
-//  Lists markdown files from the chosen folder, sorted by modified-date.
-//  Tap a row to open the prompter. Pull-to-refresh forces a re-scan.
+//  Lists markdown files from the chosen folder. Mono nav title ("scripts"
+//  lowercase per §1 voice spine), ghost path-style empty state, hairline
+//  row separators — aligned with design-language.md §7.4.
 //
 
 import SwiftUI
@@ -22,7 +23,7 @@ struct LibraryView: View {
                     ForEach(state.watcher.files) { file in
                         LibraryRow(file: file)
                             .listRowBackground(Theme.bg)
-                            .listRowSeparatorTint(Theme.dim.opacity(0.2))
+                            .listRowSeparatorTint(Theme.border)
                             .onTapGesture {
                                 state.open(file)
                                 Haptics.tap()
@@ -33,20 +34,20 @@ struct LibraryView: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .background(Theme.bg)
-            .navigationTitle("Scripts")
+            .navigationTitle("scripts")
             .navigationBarTitleDisplayMode(.inline)
             .refreshable {
-                // NSMetadataQuery auto-updates, but pulling feels better for
-                // users who want to force a re-scan.
                 try? await Task.sleep(nanoseconds: 500_000_000)
             }
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    BrandGlyph(size: 22)
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button("Change Folder", systemImage: "folder") {
                             state.returnToPicker()
                         }
-                        // v1.1: Settings
                     } label: {
                         Image(systemName: "ellipsis.circle")
                             .foregroundStyle(Theme.fg)
@@ -60,12 +61,22 @@ struct LibraryView: View {
     private var emptyState: some View {
         VStack(spacing: 12) {
             Spacer().frame(height: 60)
+            HStack(spacing: 4) {
+                Text("$").foregroundStyle(Theme.green)
+                Text("ls ").foregroundStyle(Theme.ghost)
+                Text("~/scripts").foregroundStyle(Theme.muted)
+            }
+            .font(.system(size: 13, weight: .semibold, design: .monospaced))
+            .tracking(0.5)
+
             Image(systemName: "doc.text")
-                .font(.system(size: 48))
-                .foregroundStyle(Theme.dim)
+                .font(.system(size: 42))
+                .foregroundStyle(Theme.ghost)
+                .padding(.top, 8)
+
             Text(loadingText)
-                .font(.system(size: Theme.sizeBody + 1, weight: .medium))
-                .foregroundStyle(Theme.dim)
+                .font(.system(size: 15))
+                .foregroundStyle(Theme.muted)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
         }

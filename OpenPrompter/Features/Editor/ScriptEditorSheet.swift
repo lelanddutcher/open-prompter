@@ -2,19 +2,22 @@
 //  ScriptEditorSheet.swift
 //  OpenPrompter
 //
-//  Edit the raw markdown of the currently-open script. Reads via
-//  FileCoordinatorReader, writes via FileCoordinatorReader.writeAsync,
-//  and calls `onSaved` so the prompter can reparse and refresh.
-//
-//  This is intentionally a thin editor. Most users will prefer editing
-//  on their Mac; this handles typo fixes and quick line changes on-device.
+//  Edit the raw markdown of the currently-open script. Accepts a
+//  `cachedSource` from the prompter VM so the sheet opens instantly with
+//  the text already on-screen, and an `initialOffset` into that source so
+//  we can teleport the cursor to the section the user was reading. Writes
+//  back via FileCoordinatorReader.writeAsync; onSaved lets the prompter
+//  reparse and refresh.
 //
 
 import SwiftUI
+import UIKit
 
 struct ScriptEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     let file: ScriptFile
+    let cachedSource: String?
+    let initialOffset: Int
     let onSaved: () -> Void
 
     @State private var text: String = ""
@@ -23,6 +26,7 @@ struct ScriptEditorSheet: View {
     @State private var isSaving: Bool = false
     @State private var error: String?
     @State private var confirmDiscard: Bool = false
+    @State private var pendingFocusOffset: Int?
 
     private var hasChanges: Bool { text != original }
 
@@ -34,37 +38,34 @@ struct ScriptEditorSheet: View {
                 if isLoading {
                     ProgressView().tint(Theme.fg)
                 } else if let error, text.isEmpty {
-                    // Fatal read error — no text to edit.
                     VStack(spacing: 10) {
                         Image(systemName: "exclamationmark.triangle")
                             .font(.system(size: 36))
                         Text("Couldn't open this file.")
-                            .font(.system(size: Theme.sizeButton, weight: .bold))
+                            .font(.system(size: 16, weight: .bold))
                         Text(error)
-                            .font(.system(size: Theme.sizePill))
-                            .foregroundStyle(Theme.dim)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Theme.muted)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 24)
                     }
                     .foregroundStyle(Theme.fg)
                 } else {
                     VStack(spacing: 0) {
-                        TextEditor(text: $text)
-                            .font(.system(.body, design: .monospaced))
-                            .foregroundStyle(Theme.fg)
-                            .scrollContentBackground(.hidden)
-                            .background(Theme.bg)
-                            .padding(.horizontal, 12)
-                            .padding(.top, 8)
+                        TeleportingTextEditor(
+                            text: $text,
+                            focusOffset: $pendingFocusOffset
+                        )
+                        .background(Theme.bg)
 
                         if let error {
                             Text(error)
-                                .font(.system(size: Theme.sizePill))
-                                .foregroundStyle(Theme.alert)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(Theme.red)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Theme.alert.opacity(0.08))
+                                .background(Theme.red.opacity(0.08))
                         }
                     }
                 }
@@ -83,13 +84,13 @@ struct ScriptEditorSheet: View {
                         Task { await save() }
                     } label: {
                         if isSaving {
-                            ProgressView().tint(Theme.accent)
+                            ProgressView().tint(Theme.green)
                         } else {
                             Text("Save").bold()
                         }
                     }
                     .disabled(!hasChanges || isSaving)
-                    .foregroundStyle(hasChanges ? Theme.accent : Theme.dim)
+                    .foregroundStyle(hasChanges ? Theme.green : Theme.muted)
                 }
             }
             .task { await load() }
@@ -112,11 +113,23 @@ struct ScriptEditorSheet: View {
     private func load() async {
         isLoading = true
         defer { isLoading = false }
+
+        // Fast path: the prompter VM already holds the raw text, so we can
+        // render the editor without an extra coordinated read round-trip.
+        if let cached = cachedSource {
+            text = cached
+            original = cached
+            error = nil
+            pendingFocusOffset = initialOffset
+            return
+        }
+
         do {
             let contents = try await FileCoordinatorReader.readAsync(file.url)
             text = contents
             original = contents
             error = nil
+            pendingFocusOffset = initialOffset
         } catch {
             self.error = error.localizedDescription
         }
@@ -133,6 +146,68 @@ struct ScriptEditorSheet: View {
             dismiss()
         } catch {
             self.error = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - UITextView bridge with jump-to-offset
+
+/// Wraps `UITextView` so we can scroll the cursor to a specific character
+/// offset on first appearance — SwiftUI's `TextEditor` has no hook for this.
+private struct TeleportingTextEditor: UIViewRepresentable {
+    @Binding var text: String
+    @Binding var focusOffset: Int?
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> UITextView {
+        let tv = UITextView()
+        tv.delegate = context.coordinator
+        tv.backgroundColor = .clear
+        tv.textColor = UIColor(Theme.fg)
+        tv.font = UIFont.monospacedSystemFont(ofSize: 15, weight: .regular)
+        tv.tintColor = UIColor(Theme.green)
+        tv.keyboardDismissMode = .interactive
+        tv.alwaysBounceVertical = true
+        tv.autocorrectionType = .no
+        tv.autocapitalizationType = .none
+        tv.smartQuotesType = .no
+        tv.smartDashesType = .no
+        tv.textContainerInset = UIEdgeInsets(top: 12, left: 12, bottom: 24, right: 12)
+        return tv
+    }
+
+    func updateUIView(_ tv: UITextView, context: Context) {
+        if tv.text != text {
+            tv.text = text
+        }
+        if let offset = focusOffset {
+            DispatchQueue.main.async {
+                applyFocus(tv, offset: offset)
+                self.focusOffset = nil
+            }
+        }
+    }
+
+    private func applyFocus(_ tv: UITextView, offset rawOffset: Int) {
+        let bounded = max(0, min(rawOffset, (tv.text as NSString).length))
+        let range = NSRange(location: bounded, length: 0)
+        tv.selectedRange = range
+        if let position = tv.position(from: tv.beginningOfDocument, offset: bounded),
+           let rect = tv.textRange(from: position, to: position).map({ tv.firstRect(for: $0) }),
+           rect.origin.y.isFinite {
+            // Put the jumped-to position about a third of the way down.
+            let target = max(0, rect.origin.y - tv.bounds.height * 0.3)
+            tv.setContentOffset(CGPoint(x: 0, y: target), animated: false)
+        }
+    }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        let parent: TeleportingTextEditor
+        init(_ parent: TeleportingTextEditor) { self.parent = parent }
+
+        func textViewDidChange(_ textView: UITextView) {
+            parent.text = textView.text
         }
     }
 }
