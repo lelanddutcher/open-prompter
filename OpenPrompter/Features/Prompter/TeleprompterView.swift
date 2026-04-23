@@ -15,6 +15,15 @@ struct TeleprompterView: View {
     @State private var vm: PrompterViewModel
     @State private var changeWatcher: Task<Void, Never>? = nil
 
+    // Prompter font pref is read live via @AppStorage so picker changes in
+    // Settings propagate instantly — even to an already-open prompter view.
+    // Stored VM state would go stale because Settings is presented modally
+    // from the library, not the prompter.
+    @AppStorage(PrefKey.prompterFont.rawValue) private var prompterFontRaw: String = PrompterFont.default.rawValue
+    private var prompterFont: PrompterFont {
+        PrompterFont(rawValue: prompterFontRaw) ?? .default
+    }
+
     init(file: ScriptFile) {
         _vm = State(initialValue: PrompterViewModel(file: file))
     }
@@ -170,7 +179,7 @@ struct TeleprompterView: View {
 
         case .paragraph(let text):
             Text(text)
-                .font(vm.prompterFont.swiftUIFont(size: vm.fontSize, weight: .regular))
+                .font(prompterFont.swiftUIFont(size: vm.fontSize, weight: .regular))
                 .tracking(bodyTracking)
                 .foregroundStyle(Theme.fg)
                 .multilineTextAlignment(.center)
@@ -195,7 +204,7 @@ struct TeleprompterView: View {
                 .font(.system(size: vm.fontSize, weight: .bold, design: .monospaced))
                 .foregroundStyle(Theme.green)
             Text(text)
-                .font(vm.prompterFont.swiftUIFont(size: vm.fontSize, weight: .regular))
+                .font(prompterFont.swiftUIFont(size: vm.fontSize, weight: .regular))
                 .tracking(bodyTracking)
                 .foregroundStyle(Theme.fg)
                 .multilineTextAlignment(.leading)
@@ -209,7 +218,7 @@ struct TeleprompterView: View {
     /// spacing). Proportional body fonts already sit at their designed
     /// spacing, so zero out tracking for anything other than Brand Mono.
     private var bodyTracking: CGFloat {
-        switch vm.prompterFont {
+        switch prompterFont {
         case .brandMono: return -vm.fontSize * 0.01
         default:         return 0
         }
