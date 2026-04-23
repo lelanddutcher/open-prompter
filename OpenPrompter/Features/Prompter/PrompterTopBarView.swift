@@ -33,13 +33,19 @@ struct PrompterTopBarView: View {
     var body: some View {
         HStack(spacing: 8) {
             Button(action: { state.closeScript() }) {
+                // 44pt outer hit target per Apple HIG; inner capsule is
+                // drawn at the visual size we want (36×32) so the chrome
+                // stays compact without shrinking the tap area.
                 Image(systemName: "chevron.left")
                     .font(.system(size: 13, weight: .bold))
                     .frame(width: 36, height: 32)
                     .background(Theme.surface, in: Capsule())
                     .foregroundStyle(Theme.fg)
                     .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
+            .accessibilityLabel("Back to library")
 
             // Sync status chip — shows when the file on disk was last
             // edited (via its mtime), so the author can confirm an iCloud
@@ -59,12 +65,15 @@ struct PrompterTopBarView: View {
             Spacer(minLength: 6)
 
             Button(action: { showEditor = true }) {
+                // 44pt outer hit target; inner capsule stays compact.
                 Image(systemName: "pencil")
                     .font(.system(size: 13, weight: .bold))
                     .frame(width: 36, height: 32)
                     .background(Theme.surface, in: Capsule())
                     .foregroundStyle(Theme.fg)
                     .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
             .accessibilityLabel("Edit script")
         }

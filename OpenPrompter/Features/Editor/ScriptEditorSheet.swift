@@ -105,7 +105,9 @@ struct ScriptEditorSheet: View {
                 Text("Unsaved edits will be lost.")
             }
         }
-        .preferredColorScheme(.dark)
+        // Inherit the app-level appearance (dark default, user may pick
+        // light or system in Settings). The editor is chrome, not the
+        // reading surface — no glass-glare reason to force dark.
     }
 
     // MARK: - Actions

@@ -34,11 +34,13 @@ targets:
         excludes:
           - OpenPrompter.entitlements
           - Resources/Info.plist
+          - Resources/PrivacyInfo.xcprivacy
     resources:
       - path: OpenPrompter/Resources/welcome.md
       - path: OpenPrompter/Resources/demo-everything.md
       - path: OpenPrompter/Resources/Assets.xcassets
       - path: OpenPrompter/Resources/Fonts
+      - path: OpenPrompter/Resources/PrivacyInfo.xcprivacy
     info:
       path: OpenPrompter/Resources/Info.plist
       properties:

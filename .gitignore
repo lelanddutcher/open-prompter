@@ -40,6 +40,7 @@ OpenPrompter.xcodeproj/
 ## Source assets and scratch notes not part of the public repo
 Icon Exports/
 fonts/
+Open Prompter.icon/
 # …but DO ship the fonts that are bundled into the iOS app.
 !OpenPrompter/Resources/Fonts/
 !OpenPrompter/Resources/Fonts/**

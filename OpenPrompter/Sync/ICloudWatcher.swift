@@ -102,12 +102,13 @@ final class ICloudWatcher {
     func stop() {
         pollTask?.cancel()
         pollTask = nil
+        // Cancel the DispatchSource. The cancel handler (registered in
+        // start()) owns the close(dirFD) — don't double-close here,
+        // because DispatchSource.cancel() is async and the fd might get
+        // reused before the handler fires, which would leave us closing
+        // an unrelated file descriptor.
         dirSource?.cancel()
         dirSource = nil
-        if dirFD >= 0 {
-            close(dirFD)
-            dirFD = -1
-        }
         isRunning = false
         scopeURL = nil
         knownMtimes.removeAll()

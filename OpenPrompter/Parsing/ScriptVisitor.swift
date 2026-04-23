@@ -62,9 +62,14 @@ struct ScriptVisitor: MarkupVisitor {
 
     private func stripCalloutMarker(_ input: String) -> String {
         // Remove leading `[!anything]` at start of first line.
-        let pattern = try! NSRegularExpression(pattern: "^\\[![^\\]]+\\]\\s*", options: [])
-        return pattern.removingMatches(in: input)
+        Self.calloutMarker.removingMatches(in: input)
     }
+
+    // Hoisted so we don't rebuild the regex on every blockquote visit in a
+    // large document. Same pattern, evaluated once at type-load time.
+    private static let calloutMarker: NSRegularExpression = {
+        try! NSRegularExpression(pattern: "^\\[![^\\]]+\\]\\s*", options: [])
+    }()
 
     /// Walk a Markup node's descendants and extract the plain text content,
     /// flattening Text / Emphasis / Strong / InlineCode and dropping everything

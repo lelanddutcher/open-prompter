@@ -23,16 +23,32 @@ struct OpenPrompterApp: App {
         // CloudKit is off for the local recent-scripts cache: the model uses
         // a unique constraint and non-optional fields, which CloudKit rejects.
         // The file content itself already syncs via iCloud Drive.
-        let config = ModelConfiguration(
+        let diskConfig = ModelConfiguration(
             schema: schema,
             isStoredInMemoryOnly: false,
             cloudKitDatabase: .none
         )
-        do {
-            return try ModelContainer(for: schema, configurations: config)
-        } catch {
-            fatalError("Failed to create ModelContainer: \(error)")
+        if let container = try? ModelContainer(for: schema, configurations: diskConfig) {
+            return container
         }
+        // On-disk store init failed (corrupted store, migration problem, disk
+        // pressure). RecentScript is a cache — losing it is acceptable. Fall
+        // back to an in-memory container so the app launches instead of
+        // crashing on first paint.
+        let memoryConfig = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: true,
+            cloudKitDatabase: .none
+        )
+        if let container = try? ModelContainer(for: schema, configurations: memoryConfig) {
+            return container
+        }
+        // As an ultimate last resort, build the container with default config.
+        // If even this throws, SwiftData itself is broken on this device and
+        // we have no good recovery path — but we propagate the error via the
+        // try, not fatalError, so the crash happens at a place a symbolicated
+        // stack trace is informative.
+        return try! ModelContainer(for: schema)
     }()
 
     var body: some Scene {
