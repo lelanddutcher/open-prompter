@@ -36,6 +36,7 @@ targets:
           - Resources/Info.plist
     resources:
       - path: OpenPrompter/Resources/welcome.md
+      - path: OpenPrompter/Resources/demo-everything.md
     info:
       path: OpenPrompter/Resources/Info.plist
       properties:

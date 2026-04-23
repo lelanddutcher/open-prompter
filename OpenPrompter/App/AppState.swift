@@ -82,6 +82,20 @@ final class AppState {
         }
     }
 
+    /// Jump straight into the prompter with the bundled demo script.
+    /// Useful for first-run exploration without requiring folder selection,
+    /// and as a test harness for the markdown parsing pipeline.
+    func openDemoScript() {
+        guard let url = Bundle.main.url(forResource: "demo-everything", withExtension: "md") else {
+            userFacingError = "Demo script is missing from the app bundle."
+            return
+        }
+        let name = url.lastPathComponent
+        let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .now
+        let file = ScriptFile(id: url, name: name, mtime: mtime, downloadState: .current)
+        route = .prompter(file)
+    }
+
     // MARK: - Folder adoption
 
     /// Track whether we currently hold an active security scope so every

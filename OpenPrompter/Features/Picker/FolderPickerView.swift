@@ -45,6 +45,15 @@ struct FolderPickerView: View {
                     .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
             }
             .padding(.horizontal, 24)
+
+            Button(action: { state.openDemoScript() }) {
+                Text("Try the demo script")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+                    .foregroundStyle(Theme.dim)
+            }
+            .padding(.horizontal, 24)
             .padding(.bottom, 24)
         }
         .background(Theme.bg)
