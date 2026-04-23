@@ -108,6 +108,12 @@ struct TeleprompterView: View {
             }
         }
         .statusBarHidden()
+        // The teleprompter reading view is ALWAYS dark, regardless of the
+        // user's appearance preference. A bright screen behind teleprompter
+        // glass creates glare and washes the reflection. The Settings
+        // appearance pref only controls the library/settings/picker chrome.
+        .environment(\.colorScheme, .dark)
+        .preferredColorScheme(.dark)
     }
 
     @ViewBuilder

@@ -19,7 +19,8 @@ enum UbiquitousPrefsMirror {
         .defaultFont,
         .mirrorDefault,
         .focusDefault,
-        .aggressiveStripping
+        .aggressiveStripping,
+        .appearance
     ]
 
     private static var observerToken: NSObjectProtocol?

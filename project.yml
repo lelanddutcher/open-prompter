@@ -55,7 +55,6 @@ targets:
         LSSupportsOpeningDocumentsInPlace: true
         UIRequiresFullScreen: false
         UIStatusBarHidden: true
-        UIUserInterfaceStyle: Dark
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft

@@ -21,6 +21,7 @@ enum PrefKey: String, CaseIterable {
     case onboardingCompleted = "pref.onboardingCompleted"
     case coachMarkPlayShown = "pref.coachMarkPlayShown"
     case coachMarkMirrorShown = "pref.coachMarkMirrorShown"
+    case appearance = "pref.appearance"
 
     var defaultValue: Any {
         switch self {
@@ -33,12 +34,24 @@ enum PrefKey: String, CaseIterable {
         case .onboardingCompleted: return false
         case .coachMarkPlayShown: return false
         case .coachMarkMirrorShown: return false
+        case .appearance: return Prefs.Appearance.dark.rawValue
         }
     }
 }
 
 enum Prefs {
     private static let defaults: UserDefaults = .standard
+
+    /// User-facing appearance preference for the library/settings/picker UI.
+    /// The teleprompter reading view itself is pinned to dark regardless of
+    /// this choice — a bright screen behind teleprompter glass creates glare.
+    enum Appearance: String, CaseIterable, Identifiable {
+        case system
+        case light
+        case dark
+
+        var id: String { rawValue }
+    }
 
     static func register() {
         var initial: [String: Any] = [:]
@@ -93,5 +106,14 @@ enum Prefs {
     static var coachMarkMirrorShown: Bool {
         get { defaults.bool(forKey: PrefKey.coachMarkMirrorShown.rawValue) }
         set { defaults.set(newValue, forKey: PrefKey.coachMarkMirrorShown.rawValue) }
+    }
+
+    static var appearance: Appearance {
+        get {
+            let raw = defaults.string(forKey: PrefKey.appearance.rawValue)
+                ?? Appearance.dark.rawValue
+            return Appearance(rawValue: raw) ?? .dark
+        }
+        set { defaults.set(newValue.rawValue, forKey: PrefKey.appearance.rawValue) }
     }
 }
