@@ -16,6 +16,7 @@ struct LibraryView: View {
     @State private var isCreating: Bool = false
     @State private var newScriptName: String = ""
     @State private var createError: String?
+    @State private var showSettings: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -70,6 +71,9 @@ struct LibraryView: View {
                         .accessibilityLabel("New script")
 
                         Menu {
+                            Button("Settings", systemImage: "gearshape") {
+                                showSettings = true
+                            }
                             Button("Change Folder", systemImage: "folder") {
                                 state.returnToPicker()
                             }
@@ -96,6 +100,9 @@ struct LibraryView: View {
                 Button("OK") { createError = nil }
             } message: { err in
                 Text(err)
+            }
+            .sheet(isPresented: $showSettings) {
+                SettingsView()
             }
         }
     }
