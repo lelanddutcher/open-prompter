@@ -33,6 +33,13 @@
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<false/>
 	</dict>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string/>
+		<key>UIImageName</key>
+		<string/>
+	</dict>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>UIRequiresFullScreen</key>

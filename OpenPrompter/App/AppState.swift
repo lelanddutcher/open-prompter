@@ -52,6 +52,13 @@ final class AppState {
     init() {
         Prefs.register()
         resolveBookmarkAndStart()
+        // Debug-only: launch flag `-autoDemo 1` opens the demo prompter
+        // immediately, bypassing folder pick. Used by simulator runs.
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-autoDemo") {
+            openDemoScript()
+        }
+        #endif
     }
 
     // MARK: - Navigation actions
