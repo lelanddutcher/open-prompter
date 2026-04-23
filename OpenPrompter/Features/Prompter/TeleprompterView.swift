@@ -151,6 +151,9 @@ struct TeleprompterView: View {
     private func blockView(for block: ScriptBlock) -> some View {
         switch block {
         case .heading(let level, let text):
+            // Headings stay in the brand monospace so they still feel
+            // like script section markers, regardless of which body font
+            // the user has picked.
             Text(text)
                 .font(.system(size: headingSize(level: level), weight: .heavy, design: .monospaced))
                 .tracking(-vm.fontSize * 0.02)
@@ -161,8 +164,8 @@ struct TeleprompterView: View {
 
         case .paragraph(let text):
             Text(text)
-                .font(.system(size: vm.fontSize, weight: .regular, design: .monospaced))
-                .tracking(-vm.fontSize * 0.01)
+                .font(vm.prompterFont.swiftUIFont(size: vm.fontSize, weight: .regular))
+                .tracking(bodyTracking)
                 .foregroundStyle(Theme.fg)
                 .multilineTextAlignment(.center)
                 .lineSpacing(vm.fontSize * 0.45)
@@ -179,18 +182,31 @@ struct TeleprompterView: View {
     @ViewBuilder
     private func listRow(marker: String, text: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: vm.fontSize * 0.35) {
+            // Bullet markers stay monospace so numbers / arrows line up
+            // regardless of the body font. It's a structural element,
+            // not part of the reading line.
             Text(marker)
                 .font(.system(size: vm.fontSize, weight: .bold, design: .monospaced))
                 .foregroundStyle(Theme.green)
             Text(text)
-                .font(.system(size: vm.fontSize, weight: .regular, design: .monospaced))
-                .tracking(-vm.fontSize * 0.01)
+                .font(vm.prompterFont.swiftUIFont(size: vm.fontSize, weight: .regular))
+                .tracking(bodyTracking)
                 .foregroundStyle(Theme.fg)
                 .multilineTextAlignment(.leading)
                 .lineSpacing(vm.fontSize * 0.4)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, vm.fontSize * 0.25)
+    }
+
+    /// Negative tracking works for monospace (tightens the loose default
+    /// spacing). Proportional body fonts already sit at their designed
+    /// spacing, so zero out tracking for anything other than Brand Mono.
+    private var bodyTracking: CGFloat {
+        switch vm.prompterFont {
+        case .brandMono: return -vm.fontSize * 0.01
+        default:         return 0
+        }
     }
 
     private func headingSize(level: Int) -> CGFloat {

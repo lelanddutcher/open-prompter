@@ -14,6 +14,7 @@ struct SettingsView: View {
     @State private var defaultSpeed: Double = Prefs.defaultSpeed
     @State private var defaultFont: Double = Prefs.defaultFont
     @State private var mirrorDefault: Bool = Prefs.mirrorDefault
+    @State private var prompterFont: String = Prefs.prompterFont.rawValue
 
     var body: some View {
         NavigationStack {
@@ -47,6 +48,23 @@ struct SettingsView: View {
 
                     Toggle("mirror on by default", isOn: $mirrorDefault)
                         .onChange(of: mirrorDefault) { _, new in Prefs.mirrorDefault = new }
+                }
+
+                Section("prompter font") {
+                    Picker("font", selection: $prompterFont) {
+                        ForEach(PrompterFont.allCases) { font in
+                            Text(font.displayName).tag(font.rawValue)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .onChange(of: prompterFont) { _, new in
+                        if let value = PrompterFont(rawValue: new) {
+                            Prefs.prompterFont = value
+                        }
+                    }
+                    Text(PrompterFont(rawValue: prompterFont)?.designerNote ?? "")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.dim)
                 }
 
                 Section("about") {
