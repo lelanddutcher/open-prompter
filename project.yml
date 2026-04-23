@@ -71,9 +71,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.openprompter.ios
         TARGETED_DEVICE_FAMILY: "1"
-        CODE_SIGNING_ALLOWED: NO
-        CODE_SIGN_IDENTITY: ""
         CODE_SIGN_ENTITLEMENTS: OpenPrompter/OpenPrompter.entitlements
+        CODE_SIGN_STYLE: Automatic
     dependencies:
       - package: swift-markdown
         product: Markdown
@@ -89,8 +88,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.openprompter.ios.tests
         TARGETED_DEVICE_FAMILY: "1"
-        CODE_SIGNING_ALLOWED: NO
-        CODE_SIGN_IDENTITY: ""
+        CODE_SIGN_STYLE: Automatic
     dependencies:
       - target: OpenPrompter
 
