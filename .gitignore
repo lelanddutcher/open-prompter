@@ -1,0 +1,35 @@
+# Xcode
+
+## User settings
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+
+## Generated files
+DerivedData/
+build/
+.build/
+.swiftpm/
+
+## CocoaPods
+Pods/
+
+## Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Editor
+*.swp
+*.swo
+.vscode/
+.idea/
+
+## Keep project.yml — don't ignore
+## Regenerate .xcodeproj from project.yml via `xcodegen generate`
+OpenPrompter.xcodeproj/
