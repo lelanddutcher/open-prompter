@@ -105,7 +105,7 @@ final class PrompterViewModel {
     }
 
     func setFontSize(_ value: Double) {
-        fontSize = max(32, min(160, value))
+        fontSize = max(16, min(160, value))
     }
 
     func jumpToStart() {

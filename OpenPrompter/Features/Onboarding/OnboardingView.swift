@@ -19,23 +19,23 @@ struct OnboardingView: View {
             TabView(selection: $page) {
                 slide(
                     index: 0,
-                    title: "open prompter",
-                    body: "a free teleprompter for the markdown files you already have.",
-                    subdued: "no account. no subscription. no paste."
+                    title: "Open Prompter",
+                    body: "A free teleprompter for the markdown files you already have.",
+                    subdued: "No account. No subscription. No paste."
                 )
 
                 slide(
                     index: 1,
-                    title: "what's a markdown file?",
-                    body: "a plain text file with a .md extension. obsidian, bear, ia writer, vs code, even textedit can open one.",
-                    subdued: "universal, human-readable, yours forever. open prompter reads them as-is."
+                    title: "What's a Markdown File?",
+                    body: "A plain text file with a .md extension. Obsidian, Bear, iA Writer, VS Code, and even TextEdit can open one.",
+                    subdued: "Universal, human-readable, yours forever. Open Prompter reads them as-is."
                 )
 
                 slide(
                     index: 2,
-                    title: "how it syncs",
-                    body: "edit on your mac, the file shows up here. usually within a minute, depending on your sync service.",
-                    subdued: "icloud is fastest. dropbox and google drive take longer. if you're in a hurry, pull down on the script list to refresh."
+                    title: "How It Syncs",
+                    body: "Edit on your Mac and the file shows up here, usually within a minute depending on your sync service.",
+                    subdued: "iCloud is fastest. Dropbox and Google Drive take longer. If you're in a hurry, pull down on the script list to refresh."
                 )
             }
             #if os(iOS)
@@ -54,8 +54,8 @@ struct OnboardingView: View {
 
             // Advance / finish button
             Button(action: advance) {
-                Text(page < 2 ? "Next" : "Pick my folder")
-                    .font(.system(size: 17, weight: .bold))
+                Text(page < 2 ? "Next" : "Pick My Folder")
+                    .font(.system(size: Theme.sizeButton, weight: .bold))
                     .frame(maxWidth: .infinity)
                     .frame(height: 56)
                     .background(Theme.fg)
@@ -81,15 +81,15 @@ struct OnboardingView: View {
         VStack(spacing: 20) {
             Spacer()
             Text(title)
-                .font(.system(size: 32, weight: .bold))
+                .font(.system(size: Theme.sizeDisplay, weight: .bold))
                 .foregroundStyle(Theme.fg)
                 .multilineTextAlignment(.center)
             Text(body)
-                .font(.system(size: 20, weight: .medium))
+                .font(.system(size: Theme.sizeButton + 2, weight: .medium))
                 .foregroundStyle(Theme.fg.opacity(0.9))
                 .multilineTextAlignment(.center)
             Text(subdued)
-                .font(.system(size: 15, weight: .regular))
+                .font(.system(size: Theme.sizeBody, weight: .regular))
                 .foregroundStyle(Theme.dim)
                 .multilineTextAlignment(.center)
             Spacer()

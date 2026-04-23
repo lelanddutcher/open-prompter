@@ -20,12 +20,12 @@ struct LibraryRow: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(file.displayName)
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.system(size: Theme.sizeButton, weight: .semibold))
                     .foregroundStyle(Theme.fg)
                     .lineLimit(1)
 
                 Text(relativeDate)
-                    .font(.system(size: 13, weight: .regular))
+                    .font(.system(size: Theme.sizePill, weight: .regular))
                     .foregroundStyle(Theme.dim)
             }
 
@@ -37,7 +37,7 @@ struct LibraryRow: View {
                     .font(.system(size: 18))
             }
         }
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
         .padding(.horizontal, 16)
         .contentShape(Rectangle())
     }

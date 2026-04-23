@@ -57,7 +57,11 @@ struct StrippingRules: Sendable {
                 options: [.caseInsensitive]
             ),
             scaffoldLabel: try! NSRegularExpression(
-                pattern: "^(hook type|pillar|template|version [ab]|footnotes|reference images|topic waterfall|related|sources?)\\s*:?\\s*$",
+                // Match at the start of a line. The label can stand alone
+                // ("Template") or be followed by a colon + any content
+                // ("Template: Problem → DIY Solution"). Both forms are
+                // treated as scaffolding to strip.
+                pattern: "^(hook type|pillar|template|version [ab]|footnotes|reference images|topic waterfall|related|sources?)(\\s*:|\\s*$)",
                 options: [.caseInsensitive]
             )
         )

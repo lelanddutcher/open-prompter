@@ -2,21 +2,52 @@
 //  ParsedScript.swift
 //  OpenPrompter
 //
-//  The cleaned, spoken-text output of the markdown parsing pipeline.
-//  Value type. Hashable so SwiftUI views can use it as an id.
+//  Structured, spoken-text output of the markdown parsing pipeline.
+//  Preserves block type so the prompter can render headings, bullets,
+//  and paragraphs with distinct typography. Also exposes a flat
+//  `paragraphs` / `bodyText` view for callers that just want the text.
 //
 
 import Foundation
 
+enum ScriptBlock: Equatable, Hashable, Sendable, Identifiable {
+    case heading(level: Int, text: String)
+    case paragraph(String)
+    case bullet(String)
+    case numbered(index: Int, text: String)
+
+    var id: String {
+        switch self {
+        case .heading(let level, let text): return "h\(level)-\(text)"
+        case .paragraph(let text): return "p-\(text)"
+        case .bullet(let text): return "b-\(text)"
+        case .numbered(let i, let text): return "n\(i)-\(text)"
+        }
+    }
+
+    var text: String {
+        switch self {
+        case .heading(_, let text): return text
+        case .paragraph(let text): return text
+        case .bullet(let text): return text
+        case .numbered(_, let text): return text
+        }
+    }
+}
+
 struct ParsedScript: Equatable, Hashable, Sendable {
-    let paragraphs: [String]
+    let blocks: [ScriptBlock]
+
+    var paragraphs: [String] {
+        blocks.map(\.text)
+    }
 
     var bodyText: String {
         paragraphs.joined(separator: "\n\n")
     }
 
     var isEmpty: Bool {
-        paragraphs.isEmpty
+        blocks.isEmpty
     }
 
     var wordCount: Int {
@@ -25,5 +56,5 @@ struct ParsedScript: Equatable, Hashable, Sendable {
         }
     }
 
-    static let empty = ParsedScript(paragraphs: [])
+    static let empty = ParsedScript(blocks: [])
 }

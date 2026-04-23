@@ -35,9 +35,11 @@ final class DemoMarkdownTests: XCTestCase {
 
     func testAICalloutFullyStripped() {
         let body = parsed.bodyText.lowercased()
-        XCTAssertFalse(body.contains("ai-generated"),
+        // The marker itself — not the raw words "ai-generated" which
+        // legitimately appear in the "### 2. ai-generated callouts" heading.
+        XCTAssertFalse(body.contains("[!ai-generated]"),
                        "AI callout marker leaked into spoken text")
-        XCTAssertFalse(body.contains("first paragraph"),
+        XCTAssertFalse(body.contains("this entire callout block"),
                        "First AI callout paragraph leaked")
         XCTAssertFalse(body.contains("second paragraph still inside"),
                        "Second AI callout paragraph leaked")
@@ -104,11 +106,11 @@ final class DemoMarkdownTests: XCTestCase {
 
     func testMarkdownMarkersStripped() {
         // Emphasis markers removed, content kept.
-        XCTAssertFalse(parsed.bodyText.contains("**bold"))
-        XCTAssertFalse(parsed.bodyText.contains("*italic"))
+        XCTAssertFalse(parsed.bodyText.contains("**Bold"))
+        XCTAssertFalse(parsed.bodyText.contains("*Italic"))
         // Backticks from inline code removed.
-        XCTAssertFalse(parsed.bodyText.contains("`MIT`"))
-        XCTAssertFalse(parsed.bodyText.contains("`NSMetadataQuery`"))
+        XCTAssertFalse(parsed.bodyText.contains("`code spans`"))
+        XCTAssertFalse(parsed.bodyText.contains("`inline code`"))
     }
 
     func testWikilinkBracketsStripped() {
@@ -119,11 +121,11 @@ final class DemoMarkdownTests: XCTestCase {
     // MARK: - Should-Keep Assertions
 
     func testHeroParagraphKept() {
-        XCTAssertTrue(parsed.bodyText.contains("if you can read this sentence cleanly"))
+        XCTAssertTrue(parsed.bodyText.contains("If you can read this sentence cleanly"))
     }
 
     func testWhyThisExistsKept() {
-        XCTAssertTrue(parsed.bodyText.contains("every teleprompter app on the store"))
+        XCTAssertTrue(parsed.bodyText.contains("Every teleprompter app on the App Store"))
     }
 
     func testWikilinkDisplayTextKept() {
@@ -132,16 +134,16 @@ final class DemoMarkdownTests: XCTestCase {
     }
 
     func testBoldTextSurvives() {
-        XCTAssertTrue(parsed.bodyText.contains("bold text survives"))
+        XCTAssertTrue(parsed.bodyText.contains("Bold text stays bold"))
     }
 
     func testItalicTextSurvives() {
-        XCTAssertTrue(parsed.bodyText.contains("italic also survives"))
+        XCTAssertTrue(parsed.bodyText.contains("Italic also survives"))
     }
 
     func testInlineCodeWordKept() {
-        XCTAssertTrue(parsed.bodyText.contains("MIT"))
-        XCTAssertTrue(parsed.bodyText.contains("NSMetadataQuery"))
+        XCTAssertTrue(parsed.bodyText.contains("MIT licensed"))
+        XCTAssertTrue(parsed.bodyText.contains("code spans"))
     }
 
     func testRegularBlockquoteSurvives() {
@@ -151,15 +153,15 @@ final class DemoMarkdownTests: XCTestCase {
 
     func testNonAICalloutTextSurvives() {
         // [!note] and [!quote] markers stripped, text preserved.
-        XCTAssertTrue(parsed.bodyText.contains("this should appear with the marker stripped"))
-        XCTAssertTrue(parsed.bodyText.contains("the right teleprompter is the one"))
+        XCTAssertTrue(parsed.bodyText.contains("This is a note callout"))
+        XCTAssertTrue(parsed.bodyText.contains("The right teleprompter is the one"))
     }
 
     func testListItemsKept() {
         // List markers dropped but items flow into spoken text.
-        XCTAssertTrue(parsed.bodyText.contains("free forever"))
-        XCTAssertTrue(parsed.bodyText.contains("mit licensed"))
-        XCTAssertTrue(parsed.bodyText.contains("pick your folder once"))
+        XCTAssertTrue(parsed.bodyText.contains("Free forever"))
+        XCTAssertTrue(parsed.bodyText.contains("MIT licensed"))
+        XCTAssertTrue(parsed.bodyText.contains("Pick your folder once"))
     }
 
     func testEmojiAndUnicodePreserved() {
@@ -167,7 +169,7 @@ final class DemoMarkdownTests: XCTestCase {
     }
 
     func testCloseParagraphKept() {
-        XCTAssertTrue(parsed.bodyText.contains("if you made it this far"))
+        XCTAssertTrue(parsed.bodyText.contains("If you made it this far"))
     }
 
     // MARK: - Structure

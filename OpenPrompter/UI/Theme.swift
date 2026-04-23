@@ -26,6 +26,15 @@ enum Theme {
     static let pillRadius: CGFloat = 999
     static let controlGap: CGFloat = 8
 
+    // MARK: - Type scale
+
+    static let sizeLabelSm: CGFloat = 12    // all-caps micro labels
+    static let sizePill: CGFloat = 13       // pills, small captions
+    static let sizeBody: CGFloat = 15       // regular UI labels
+    static let sizeButton: CGFloat = 17     // primary button labels
+    static let sizeTitle: CGFloat = 22      // screen titles
+    static let sizeDisplay: CGFloat = 32    // onboarding display
+
     // MARK: - Durations
 
     static let mirrorAnim: Double = 0.14

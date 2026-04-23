@@ -33,7 +33,7 @@ struct LibraryView: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .background(Theme.bg)
-            .navigationTitle("scripts")
+            .navigationTitle("Scripts")
             .navigationBarTitleDisplayMode(.inline)
             .refreshable {
                 // NSMetadataQuery auto-updates, but pulling feels better for
@@ -43,7 +43,7 @@ struct LibraryView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        Button("Change folder", systemImage: "folder") {
+                        Button("Change Folder", systemImage: "folder") {
                             state.returnToPicker()
                         }
                         // v1.1: Settings
@@ -64,7 +64,7 @@ struct LibraryView: View {
                 .font(.system(size: 48))
                 .foregroundStyle(Theme.dim)
             Text(loadingText)
-                .font(.system(size: 16, weight: .medium))
+                .font(.system(size: Theme.sizeBody + 1, weight: .medium))
                 .foregroundStyle(Theme.dim)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
@@ -74,10 +74,10 @@ struct LibraryView: View {
 
     private var loadingText: String {
         if !state.watcher.isRunning {
-            return "folder not connected. tap the menu to pick one."
+            return "Folder not connected. Tap the menu to pick one."
         }
         if state.watcher.files.isEmpty {
-            return "no markdown files yet. try adding a .md file to your folder on your mac."
+            return "No markdown files yet. Try adding a .md file to your folder on your Mac."
         }
         return ""
     }

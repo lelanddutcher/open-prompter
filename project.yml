@@ -90,6 +90,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: app.openprompter.ios.tests
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - target: OpenPrompter
 

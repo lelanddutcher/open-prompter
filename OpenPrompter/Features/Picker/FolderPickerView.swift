@@ -16,18 +16,18 @@ struct FolderPickerView: View {
         VStack(spacing: 16) {
             Spacer()
 
-            Text("open prompter")
-                .font(.system(size: 28, weight: .bold))
+            Text("Open Prompter")
+                .font(.system(size: Theme.sizeDisplay, weight: .bold))
                 .foregroundStyle(Theme.fg)
 
-            Text("pick a folder with your markdown scripts.")
-                .font(.system(size: 16, weight: .regular))
+            Text("Pick a folder with your markdown scripts.")
+                .font(.system(size: Theme.sizeBody + 1, weight: .regular))
                 .foregroundStyle(Theme.dim)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
 
-            Text("icloud drive, your obsidian vault, or anywhere the files app can reach.")
-                .font(.system(size: 14, weight: .regular))
+            Text("iCloud Drive, your Obsidian vault, or anywhere the Files app can reach.")
+                .font(.system(size: Theme.sizeBody - 1, weight: .regular))
                 .foregroundStyle(Theme.dim.opacity(0.8))
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
@@ -36,8 +36,8 @@ struct FolderPickerView: View {
             Spacer()
 
             Button(action: { showPicker = true }) {
-                Text("Pick folder")
-                    .font(.system(size: 17, weight: .bold))
+                Text("Pick Folder")
+                    .font(.system(size: Theme.sizeButton, weight: .bold))
                     .frame(maxWidth: .infinity)
                     .frame(height: 56)
                     .background(Theme.fg)
@@ -47,8 +47,8 @@ struct FolderPickerView: View {
             .padding(.horizontal, 24)
 
             Button(action: { state.openDemoScript() }) {
-                Text("Try the demo script")
-                    .font(.system(size: 15, weight: .semibold))
+                Text("Try the Demo Script")
+                    .font(.system(size: Theme.sizeBody, weight: .semibold))
                     .frame(maxWidth: .infinity)
                     .frame(height: 44)
                     .foregroundStyle(Theme.dim)

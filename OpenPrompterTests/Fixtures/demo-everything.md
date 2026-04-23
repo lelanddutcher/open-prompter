@@ -1,6 +1,6 @@
 ---
 author: open-prompter
-title: open prompter — the demo script
+title: Open Prompter — The Demo Script
 created: 2026-04-23
 tags:
   - demo
@@ -8,55 +8,115 @@ tags:
   - everything-markdown
 ---
 
-# welcome to open prompter
+# Welcome to Open Prompter
 
-this is the demo script. it's stuffed with every markdown construct i could think of so you can see what survives, what gets stripped, and what ends up on camera.
+This is the demo script. It uses every markdown construct the parser knows about — **bold**, *italic*, `inline code`, wikilinks, bullets, numbered lists, headings, blockquotes, and callouts — so you can see exactly how each one appears on camera.
 
-if you can read this sentence cleanly, the parser is working.
+If you can read this sentence cleanly, the parser is working.
 
-## why this exists
+## Why This Exists
 
-every teleprompter app on the store wants a subscription to unlock **mirror mode**. most want your script uploaded to *their* cloud. a few want both.
+Every teleprompter app on the App Store wants a subscription to unlock **Mirror mode**. Most want your script uploaded to *their* cloud. A few want both.
 
-open prompter reads the markdown file you already have, from icloud drive or your obsidian vault, and that's the whole app. free, open source, `MIT` licensed.
+Open Prompter reads the markdown file you already have, from iCloud Drive or your Obsidian vault, and that's the whole app. Free, open source, MIT licensed.
+
+## Heading Sizes
+
+### This Is a Level-3 Heading
+
+Level-3 headings render slightly larger than body text so they feel like a chapter break without dominating the screen.
+
+#### Level-4 Heading
+
+Level 4 and below fall to the smallest heading size. Use them for sub-points inside a section.
+
+## Lists
+
+Unordered bullets show up with a bullet marker on the left:
+
+- Free forever
+- MIT licensed
+- No account required
+- Works with any markdown file
+
+Ordered lists show the number you wrote:
+
+1. Pick your folder once
+2. Tap a script
+3. Hit Play
+4. Mirror the text if you're using a rig
+
+## Emphasis
+
+**Bold text stays bold** when read aloud — the markers vanish, the weight stays in the rendered output. *Italic also survives.* ***Both together*** nests cleanly. Inline `code spans` drop the backticks so you can pronounce the word naturally on camera.
+
+## Wikilinks
+
+Obsidian-style wikilinks resolve to their display text. [[Clip Sweeper|the storage tool]] becomes "the storage tool," and a bare [[Open Prompter]] becomes "Open Prompter." The brackets never appear on screen.
+
+## Regular Blockquotes
+
+> This is a real quoted line the writer wanted in the script. It's NOT an AI callout, so it stays. The parser strips the leading `>` character and reads it as normal narration.
+
+## Callouts That Aren't AI
+
+> [!note]
+> This is a note callout. It appears on camera with the `[!note]` marker stripped but the content preserved. All non-AI callout types (`[!note]`, `[!warning]`, `[!tip]`, `[!quote]`) behave this way.
+
+> [!quote]
+> "The right teleprompter is the one that doesn't fight you."
+
+## Numbers and Symbols
+
+Numbers render as-is: $250, 10GbE, 4K. Unicode like “smart quotes,” em-dashes, and ellipses… come through intact. Emoji like 📱 and ✅ render exactly as they do on your Mac.
+
+## A Mixed Paragraph
+
+Here's a long paragraph with varied punctuation, numbers ($250, 10GbE, 4K), parenthetical asides (like this one), and mid-sentence **emphasis** that should flow naturally when read aloud. The goal is to verify that whitespace is collapsed correctly — multiple   spaces become one, and line wraps in the source become a single space in the output.
 
 ---
 
-## what the parser strips
+## What the Parser Strips
 
-### 1. yaml frontmatter
+A handful of things get removed automatically so you don't read them on camera. Everything below this heading demonstrates a stripping rule.
 
-the `---`-delimited block at the top of this file.
+### YAML Frontmatter
 
-### 2. ai-generated callouts
+The `---`-delimited block at the top of this file. You never hear the word "author" or "tags" during playback.
+
+### AI-Generated Callouts
 
 > [!ai-generated]
-> this entire callout block should NOT appear on screen. it's a multi-paragraph ai note.
+> This entire callout block should NOT appear on screen. It's a multi-paragraph AI note.
 >
-> second paragraph still inside the callout — also hidden.
+> Second paragraph still inside the callout — also hidden.
 >
-> third paragraph, same story.
+> Third paragraph, same story. The parser eats the whole block cleanly, not just the first line.
 
-you should read this sentence after the callout just fine.
+You should read this sentence after the callout just fine.
 
-### 3. visual direction brackets
+### Visual Direction Brackets
 
 [B-roll: wide shot of the rig]
-[Screen record: the app running on iphone]
+[Screen record: the app running on iPhone]
 [Text on screen: "mirror is free"]
-[insert archival footage]
+[insert archival footage of old teleprompters]
 [Cut to: close-up of the phone]
+[Open with: creator facing camera]
 
-the brackets above vanish.
+The brackets above vanish. The sentence after them should land on camera intact.
 
-### 4. footnote markers
+### Footnote Markers and Definitions
 
-you can drop footnotes[^1] in the middle of a line[^sources] and they disappear silently.
+You can drop footnotes[^1] in the middle of a line[^sources] and they disappear silently.
 
-[^1]: this definition should never be spoken aloud.
-[^sources]: a bigger footnote with multiple sentences. still dropped.
+The definitions at the bottom of this file[^1] also get stripped out wholesale[^bigger].
 
-### 5. scaffolding sections
+[^1]: This definition should never be spoken aloud.
+[^sources]: A bigger footnote with multiple sentences. Still dropped.
+[^bigger]: A third one with nested **formatting** and a [link](https://example.com). Dropped too.
+
+### Scaffolding Sections
 
 ---
 
@@ -66,98 +126,57 @@ you can drop footnotes[^1] in the middle of a line[^sources] and they disappear 
 
 ---
 
-those three scaffold lines above don't get spoken.
+Those three scaffold lines above don't get spoken. Neither does the section below.
 
 ## Footnotes
 
-this entire section is dropped because it starts with "Footnotes."
+This entire section is dropped because it starts with the heading "Footnotes."
+
+Any content here is invisible.
 
 ## Reference Images
 
-| shot | source |
+| Shot | Source |
 | --- | --- |
-| hero | clipsweeper.com/screenshot.png |
+| Hero | clipsweeper.com/screenshot.png |
+| Demo | openprompter.app/preview.mp4 |
+
+Tables get stripped too. You won't hear pipes.
 
 ## Topic Waterfall
 
-this section is also dropped by pattern match on its heading.
+This section is also dropped by pattern match on its heading.
 
 ---
 
-## what the parser keeps
+## Code Blocks and Raw HTML
 
-### bold and italic
-
-**bold text survives** as plain speech. *italic also survives.* ***even both together.***
-
-### wikilinks
-
-[[Clip Sweeper|the storage tool]] becomes "the storage tool," and a bare [[Open Prompter]] becomes "Open Prompter."
-
-### inline code
-
-when i say `NSMetadataQuery` is an ios api, the backticks drop.
-
-### regular blockquotes
-
-> this is a real quoted line the writer wanted in the script. it's NOT an ai callout, so it stays.
-
-### links
-
-a [link to openprompter.app](https://openprompter.app) becomes the visible text.
-
-### lists
-
-- free forever
-- mit licensed
-- no account required
-
-ordered:
-
-1. pick your folder once
-2. tap a script
-3. hit play
-
-### horizontal rules and sections
-
----
-
-the `---` above ends a section.
-
-### callouts that aren't ai-generated
-
-> [!note]
-> this should appear with the marker stripped.
-
-> [!quote]
-> "the right teleprompter is the one that doesn't fight you."
-
-### code fences
+Code fences get stripped entirely:
 
 ```swift
+// This code should never reach the prompter.
 let x = 1
 print(x)
 ```
 
-you should read this line immediately after the code fence.
+You should read this line immediately after the code fence.
 
-### html blocks
+<div>Inline HTML blocks are also dropped.</div>
 
-<div>inline html blocks are dropped.</div>
+You should not read anything from that div. This sentence survives.
 
-you should not read that tag.
+### Task Lists
 
-### task lists
+- [ ] A task that isn't done
+- [x] A task that's done
+- [ ] Open Prompter v1 shipped
 
-- [ ] a task that's not done
-- [x] a task that's done
-
-### emoji and unicode
-
-emoji like 📱 and unicode quotes like "these" and ellipses… render as-is.
+The `[ ]` and `[x]` markers drop; the task descriptions read as normal bullets.
 
 ---
 
-## the close
+## The Close
 
-if you made it this far, the parser is working.
+If you made it this far, the parser is working. Every bracketed cue, every scaffold heading, every footnote marker, every table, every code fence — gone. What's left is the part you actually say on camera.
+
+Now swipe back, pick your own folder, and shoot something.

@@ -53,10 +53,13 @@ final class MarkdownCleanerTests: XCTestCase {
     func testStripsBRollAndScreenRecordBrackets() throws {
         let raw = try loadFixture("script-with-broll")
         let parsed = MarkdownCleaner.clean(text: raw)
-        XCTAssertFalse(parsed.bodyText.lowercased().contains("b-roll"))
-        XCTAssertFalse(parsed.bodyText.lowercased().contains("screen record"))
+        // Check for the bracketed cue payload rather than bare substrings —
+        // words like "B-Roll" legitimately appear in the section heading.
+        XCTAssertFalse(parsed.bodyText.lowercased().contains("wide shot of the rig"))
+        XCTAssertFalse(parsed.bodyText.lowercased().contains("showing the app"))
         XCTAssertFalse(parsed.bodyText.lowercased().contains("[insert"))
-        XCTAssertFalse(parsed.bodyText.lowercased().contains("text on screen"))
+        XCTAssertFalse(parsed.bodyText.lowercased().contains("[text on screen"))
+        XCTAssertFalse(parsed.bodyText.lowercased().contains("[b-roll"))
         XCTAssertTrue(parsed.bodyText.contains("first spoken line"))
         XCTAssertTrue(parsed.bodyText.contains("second spoken line"))
     }
@@ -90,8 +93,9 @@ final class MarkdownCleanerTests: XCTestCase {
     // MARK: - Word count
 
     func testWordCountMatchesBody() {
+        // "hello world." (2) + "here is another line." (4) = 6 whitespace-separated tokens.
         let parsed = MarkdownCleaner.clean(text: "hello world.\n\nhere is another line.")
-        XCTAssertEqual(parsed.wordCount, 7)
+        XCTAssertEqual(parsed.wordCount, 6)
     }
 
     // MARK: - Wikilinks (Obsidian-specific)

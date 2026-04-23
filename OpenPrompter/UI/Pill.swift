@@ -14,10 +14,10 @@ struct Pill: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 13, weight: .bold))
-            .tracking(0.05 * 13)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 6)
+            .font(.system(size: 11, weight: .bold))
+            .tracking(0.10 * 11)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
             .background(alert ? Theme.alert : Theme.controlBg)
             .foregroundStyle(alert ? Color.white : Theme.dim)
             .clipShape(Capsule())
