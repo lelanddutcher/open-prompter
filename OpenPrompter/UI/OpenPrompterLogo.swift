@@ -8,8 +8,12 @@
 //  viewBox is 702×603. Everything is rendered procedurally in one `Canvas`
 //  so the whole mark scales to a single coordinate system.
 //
-//  Accessibility: respects `UIAccessibility.isReduceMotionEnabled` — when
-//  on, the logo renders in the open, reading-position state with no loop.
+//  Accessibility: `animated: false` renders the static open state for
+//  splash screens, icons, and print. The animation deliberately does NOT
+//  honor `accessibilityReduceMotion` — subtle eye drift + blink is a
+//  branded mark, not vestibular motion, and several users reported the
+//  logo appearing frozen on-device because Reduce Motion was inherited
+//  from system defaults while the simulator had it off.
 //
 
 import SwiftUI
@@ -28,15 +32,11 @@ struct OpenPrompterLogo: View {
     /// Eye + stem accent. Open Green per design-language.md.
     var accent: Color = Color(red: 0x3F / 255, green: 0xEE / 255, blue: 0x7A / 255)
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private var shouldAnimate: Bool { animated && !reduceMotion }
-
     var body: some View {
-        TimelineView(.animation(paused: !shouldAnimate)) { ctx in
+        TimelineView(.animation(paused: !animated)) { ctx in
             let t = ctx.date.timeIntervalSinceReferenceDate
-            let eyeOffset = shouldAnimate ? readingOffset(at: t) : Self.staticEyeOffset
-            let blink = shouldAnimate ? blinkAmount(at: t) : 1.0
+            let eyeOffset = animated ? readingOffset(at: t) : Self.staticEyeOffset
+            let blink = animated ? blinkAmount(at: t) : 1.0
 
             Canvas { g, size in
                 let vbW: CGFloat = 702, vbH: CGFloat = 603
