@@ -110,7 +110,7 @@ struct OnboardingView: View {
                 .foregroundStyle(Theme.ghost)
 
             if isWordmark {
-                Wordmark(size: 28)
+                OpenPrompterWordmark(height: 38)
             } else {
                 Text(title)
                     .font(.system(size: 30, weight: .heavy, design: .monospaced))

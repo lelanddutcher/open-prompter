@@ -37,6 +37,7 @@ targets:
     resources:
       - path: OpenPrompter/Resources/welcome.md
       - path: OpenPrompter/Resources/demo-everything.md
+      - path: OpenPrompter/Resources/Assets.xcassets
     info:
       path: OpenPrompter/Resources/Info.plist
       properties:
@@ -77,6 +78,7 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_ENTITLEMENTS: OpenPrompter/OpenPrompter.entitlements
         CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     dependencies:
       - package: swift-markdown
         product: Markdown

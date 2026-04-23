@@ -17,7 +17,7 @@ struct FolderPickerView: View {
         VStack(spacing: 0) {
             Spacer()
 
-            Wordmark(size: 24)
+            OpenPrompterWordmark(height: 32)
                 .padding(.bottom, 8)
 
             HStack(spacing: 4) {

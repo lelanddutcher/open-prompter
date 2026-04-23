@@ -41,7 +41,7 @@ struct LibraryView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    BrandGlyph(size: 22)
+                    OpenPrompterLogo(height: 24)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
