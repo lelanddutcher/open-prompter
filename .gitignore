@@ -33,3 +33,13 @@ Thumbs.db
 ## Keep project.yml — don't ignore
 ## Regenerate .xcodeproj from project.yml via `xcodegen generate`
 OpenPrompter.xcodeproj/
+
+## Claude Code internal state
+.claude/
+
+## Source assets and scratch notes not part of the public repo
+Icon Exports/
+fonts/
+open prompter.ai
+Bluetooth Remote Research.md
+Xcode Scaffold.md

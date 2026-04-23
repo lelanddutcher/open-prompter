@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <style>
+      .cls-1 {
+        fill: #fff;
+      }
+
+      .cls-2 {
+        fill: #3fee7a;
+        font-family: JetBrainsMono-ExtraBold, 'JetBrains Mono';
+        font-size: 421.35px;
+        font-weight: 700;
+      }
+
+      .cls-3 {
+        fill: #010;
+      }
+    </style>
+  </defs>
+  <g id="Layer_2" data-name="Layer 2">
+    <rect class="cls-3" width="1024" height="1024"/>
+  </g>
+  <g id="Layer_1" data-name="Layer 1">
+    <path class="cls-1" d="M161,273.5v495c0,19.88,16.12,36,36,36h63v-63h0c-19.88,0-36-16.12-36-36v-396c0-19.88,16.12-36,36-36h0v-63h-63c-19.88,0-36,16.12-36,36v27Z"/>
+    <path class="cls-1" d="M863,282.5v498.23c0,18.1-14.67,32.77-32.77,32.77h-63c-1.78,0-3.23-1.45-3.23-3.23v-56.54c0-1.78,1.45-3.23,3.23-3.23h0c18.1,0,32.77-14.67,32.77-32.77v-402.46c0-18.1-14.67-32.77-32.77-32.77h0c-1.78,0-3.23-1.45-3.23-3.23v-56.54c0-1.78,1.45-3.23,3.23-3.23h63c18.1,0,32.77,14.67,32.77,32.77v30.23Z"/>
+    <text class="cls-2" transform="translate(260 611)"><tspan x="0" y="0">op</tspan></text>
+  </g>
+</svg>
