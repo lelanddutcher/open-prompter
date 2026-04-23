@@ -22,6 +22,14 @@ struct PrompterTopBarView: View {
         return f
     }()
 
+    // Fallback short-date formatter for files modified more than a week ago,
+    // where relative phrasing ("2w AGO") is less scannable than "APR 21".
+    private static let shortDate: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d"
+        return f
+    }()
+
     var body: some View {
         HStack(spacing: 8) {
             Button(action: { state.closeScript() }) {
@@ -33,9 +41,11 @@ struct PrompterTopBarView: View {
                     .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
             }
 
-            // Sync status chip — shows last time the script was loaded
-            // from disk. `reloadAvailable` flips it to an actionable
-            // button that triggers the reparse.
+            // Sync status chip — shows when the file on disk was last
+            // edited (via its mtime), so the author can confirm an iCloud
+            // sync from their Mac has arrived. `reloadAvailable` flips the
+            // chip amber with a "RELOAD" action when the watcher sees a
+            // newer mtime than what's currently loaded in the prompter.
             syncChip
 
             Spacer(minLength: 6)
@@ -98,18 +108,34 @@ struct PrompterTopBarView: View {
                 .background(Theme.surface, in: Capsule())
                 .overlay(Capsule().stroke(Theme.amber.opacity(0.6), lineWidth: 1))
             }
-        } else if let synced = vm.lastSyncedAt {
-            LiveChip(status: .live, label: "SYNCED · \(syncLabel(for: synced))")
+        } else if let mtime = vm.fileMTime {
+            // File has an on-disk modification date — show when the author
+            // last saved it. This is what the user glances at to confirm
+            // a freshly-edited version has landed from iCloud.
+            LiveChip(status: .live, label: "EDITED · \(syncLabel(for: mtime))")
         } else if vm.isLoading {
             LiveChip(status: .syncing, label: "LOADING…", pulse: true)
+        } else {
+            // Bundled demo or other file with no mtime metadata — the
+            // "last edited" story doesn't apply, so fall back to a neutral
+            // ready state that identifies the file without lying about time.
+            LiveChip(status: .live, label: "READY · \(vm.file.displayName.uppercased())")
         }
     }
 
-    private func syncLabel(for synced: Date) -> String {
-        let delta = now.timeIntervalSince(synced)
+    /// Human-readable "time since edit" for the green chip.
+    /// - < 15s: "NOW"
+    /// - < 7 days: RelativeDateTimeFormatter abbreviated ("30S AGO", "12M AGO", "3H AGO", "2D AGO")
+    /// - >= 7 days: short date ("APR 21") — relative phrasing stops being scannable past a week
+    private func syncLabel(for mtime: Date) -> String {
+        let delta = now.timeIntervalSince(mtime)
         if delta < 15 { return "NOW" }
+        let week: TimeInterval = 7 * 24 * 60 * 60
+        if delta >= week {
+            return Self.shortDate.string(from: mtime).uppercased()
+        }
         return Self.relative
-            .localizedString(for: synced, relativeTo: now)
+            .localizedString(for: mtime, relativeTo: now)
             .uppercased()
     }
 

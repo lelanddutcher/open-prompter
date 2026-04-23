@@ -40,8 +40,16 @@ final class PrompterViewModel {
     // MARK: - Sync state
 
     var reloadAvailable: Bool = false
-    /// Timestamp of the most recent successful read. Drives the sync chip.
+    /// Timestamp of the most recent successful read. Kept for diagnostics;
+    /// the sync chip uses `fileMTime` instead so it reflects when the file
+    /// was actually edited on disk rather than when the app last read it.
     var lastSyncedAt: Date?
+    /// Modification date of the script file on disk, captured at the end of
+    /// each successful read. Drives the "EDITED · Xm AGO" sync chip so the
+    /// user sees when the author last saved the file, not when the watcher
+    /// last polled. `nil` when the file has no metadata (e.g. a bundled
+    /// demo script) — the chip falls back to a "READY" state in that case.
+    var fileMTime: Date?
 
     // MARK: - Auto-scroll
 
@@ -73,6 +81,13 @@ final class PrompterViewModel {
             self.rawText = text
             self.parsed = parsedResult
             self.lastSyncedAt = .now
+            // Capture the on-disk modification date so the top-bar chip can
+            // show when the file was last edited (not when we last read it).
+            // Bundled resources sometimes lack this key — the chip handles
+            // a nil value by falling back to a neutral READY state.
+            self.fileMTime = try? file.url
+                .resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate
         } catch {
             self.loadError = error.localizedDescription
         }
