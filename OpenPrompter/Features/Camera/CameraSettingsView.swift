@@ -13,20 +13,24 @@
 import SwiftUI
 
 struct CameraSettingsView: View {
-    @State private var styleRaw: String = Prefs.cameraStyle
-    @State private var facingFront: Bool = Prefs.cameraFacingFront
-    @State private var pipSizeRaw: String = Prefs.cameraPipSize
-    @State private var pipCornerRaw: String = Prefs.cameraPipCornerLast
-    @State private var debugTallyOn: Bool
+    // @AppStorage so the pickers self-heal when the user touches the same
+    // prefs from outside Settings (e.g. via the chip in the prompter).
+    @AppStorage(PrefKey.cameraStyle.rawValue) private var styleRaw: String = "off"
+    @AppStorage(PrefKey.cameraFacingFront.rawValue) private var facingFront: Bool = true
+    @AppStorage(PrefKey.cameraPipSize.rawValue) private var pipSizeRaw: String = "medium"
+    @AppStorage(PrefKey.cameraPipCornerLast.rawValue) private var pipCornerRaw: String = "topCenter"
 
     /// Recording-state model. Optional — Settings doesn't need a real
-    /// `RecordingState` to render the toggle UI (it just toggles the local
-    /// `debugTallyOn`); callers wire the actual flag inside the prompter.
-    private let recordingState: RecordingState?
+    /// `RecordingState` to render the toggle UI; callers wire the actual
+    /// flag inside the prompter. When supplied, the toggle binds directly
+    /// to `state.isRecording` (the type is `@Observable`) so no local
+    /// mirror state is needed.
+    @Bindable private var recordingStateOrPlaceholder: RecordingState
+    private let hasRecordingState: Bool
 
     init(recordingState: RecordingState? = nil) {
-        self.recordingState = recordingState
-        _debugTallyOn = State(initialValue: recordingState?.isRecording ?? false)
+        self.recordingStateOrPlaceholder = recordingState ?? RecordingState()
+        self.hasRecordingState = recordingState != nil
     }
 
     var body: some View {
@@ -38,20 +42,11 @@ struct CameraSettingsView: View {
                     }
                 }
                 .pickerStyle(.menu)
-                .onChange(of: styleRaw) { _, new in
-                    Prefs.cameraStyle = new
-                }
                 Text("picture-in-picture floats a small camera tile over the prompter. behind text fills the screen with the camera and overlays the script.")
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.dim)
 
-                Picker("default camera", selection: Binding(
-                    get: { facingFront },
-                    set: { newValue in
-                        facingFront = newValue
-                        Prefs.cameraFacingFront = newValue
-                    }
-                )) {
+                Picker("default camera", selection: $facingFront) {
                     Text("front").tag(true)
                     Text("rear").tag(false)
                 }
@@ -63,9 +58,6 @@ struct CameraSettingsView: View {
                     }
                 }
                 .pickerStyle(.menu)
-                .onChange(of: pipSizeRaw) { _, new in
-                    Prefs.cameraPipSize = new
-                }
 
                 Picker("pip starting corner", selection: $pipCornerRaw) {
                     ForEach(PipCorner.allCases, id: \.rawValue) { corner in
@@ -73,25 +65,15 @@ struct CameraSettingsView: View {
                     }
                 }
                 .pickerStyle(.menu)
-                .onChange(of: pipCornerRaw) { _, new in
-                    Prefs.cameraPipCornerLast = new
-                }
                 Text("the tile remembers wherever you last dropped it; this is the first-launch default.")
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.dim)
 
-                if let state = recordingState {
-                    Toggle("debug: force tally light on", isOn: Binding(
-                        get: { state.isRecording },
-                        set: { newValue in
-                            // Sync both directions so the local @State view
-                            // updates if the toggle is hit elsewhere.
-                            if newValue != state.isRecording {
-                                state.isRecording = newValue
-                            }
-                            debugTallyOn = newValue
-                        }
-                    ))
+                if hasRecordingState {
+                    Toggle(
+                        "debug: force tally light on",
+                        isOn: $recordingStateOrPlaceholder.isRecording
+                    )
                     Text("flips the recording-state flag for design validation. real recording arrives in feature 2.")
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.dim)

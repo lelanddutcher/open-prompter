@@ -40,7 +40,11 @@ struct PipTile: View {
     /// Live-drag offset relative to the snapped center. Reset on drag end.
     @State private var dragOffset: CGSize = .zero
     /// True while the tile is hidden off-screen waiting for a chevron tap.
-    /// Two-finger swipe down sets this; chevron tap clears it.
+    /// Strong-flick-down sets this; chevron tap or VoiceOver action clears
+    /// it. Per-session by design — the chevron tab IS the within-session
+    /// restore. To dismiss the tile permanently, the user picks `.off` in
+    /// the chip or Settings; we don't persist `hidden` because re-entering
+    /// the prompter from Library should give the user their tile back.
     @State private var hidden: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion: Bool
@@ -112,12 +116,17 @@ struct PipTile: View {
         )
         .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 4)
         .position(tileCenter)
-        // Single tap → promote (handled by parent). Wrap before the more
-        // specific gestures so they win on simultaneous recognition.
-        .onTapGesture(count: 1) { onPromote?() }
+        // Gesture ordering matters: SwiftUI evaluates `onTapGesture`
+        // modifiers from outside-in, and a `count: 1` recognized first
+        // commits before SwiftUI ever waits for the second tap. Apply the
+        // higher-count gesture first (closer to the view) so single taps
+        // get the chance to be recognized as the start of a double tap.
         // Double-tap → cycle preset sizes. Reduce-motion drops the spring;
         // the size still changes, just instantly.
         .onTapGesture(count: 2) { cycleSize() }
+        // Single tap → promote (handled by parent). Currently `onPromote`
+        // is unwired — Feature 2 adds the layout reorg that listens here.
+        .onTapGesture(count: 1) { onPromote?() }
         // Drag → live track + spring snap on release.
         .gesture(
             DragGesture()
@@ -178,11 +187,19 @@ struct PipTile: View {
             y: anchor.y + value.translation.height
         )
 
-        // If the user flicked downward with significant velocity, treat that
-        // as the "two-finger swipe down to hide" gesture even if it was just
-        // one finger — both reach the same outcome.
-        if value.predictedEndTranslation.height > viewport.height * 0.5,
-           value.predictedEndTranslation.height > abs(value.predictedEndTranslation.width) {
+        // If the user flicked downward strongly, treat that as the
+        // "two-finger swipe down to hide" gesture — single finger reaches
+        // the same outcome. The threshold is intentionally aggressive to
+        // avoid stealing fast scroll attempts that happen to start on the
+        // tile: predicted end ≥ 70% of viewport height, AND actual
+        // translation ≥ 200pt (so the user clearly intended to throw the
+        // tile and didn't just accidentally swipe), AND the motion is more
+        // vertical than horizontal.
+        let predicted = value.predictedEndTranslation
+        let actual = value.translation
+        if predicted.height > viewport.height * 0.7,
+           actual.height > 200,
+           predicted.height > abs(predicted.width) {
             dragOffset = .zero
             hideTile()
             return

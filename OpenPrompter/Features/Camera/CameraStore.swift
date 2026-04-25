@@ -201,14 +201,21 @@ final class CameraStore {
     /// Configure inputs (front or rear camera) and start the session. The
     /// blocking `startRunning()` runs on `sessionQueue`; we await its completion
     /// so the @MainActor caller can flip UI state once the session is live.
+    ///
+    /// `facingFront` is read once on the main actor before we hop to the
+    /// session queue. Earlier versions of this code reached back to main
+    /// via `DispatchQueue.main.sync` from inside the queue block, which is
+    /// a latent deadlock if anything ever dispatches main → sessionQueue
+    /// synchronously. Pre-snapshotting closes that hole.
     private func start() async {
         if suppressDeviceWork {
             isSessionRunning = true
             return
         }
+        let position: AVCaptureDevice.Position = facingFront ? .front : .back
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             sessionQueue.async {
-                self.configureInputsLocked()
+                self.configureInputsLocked(position: position)
                 if !self.session.isRunning {
                     self.session.startRunning()
                 }
@@ -248,9 +255,12 @@ final class CameraStore {
     }
 
     /// Swap the camera input without tearing down the whole session — used
-    /// by long-press to flip front/rear.
+    /// by long-press to flip front/rear. `facingFront` is snapshotted on
+    /// the main actor before hopping to `sessionQueue`, same pattern as
+    /// `start()`.
     private func reconfigureInput() async {
         if suppressDeviceWork { return }
+        let position: AVCaptureDevice.Position = facingFront ? .front : .back
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             sessionQueue.async {
                 self.session.beginConfiguration()
@@ -258,23 +268,23 @@ final class CameraStore {
                     self.session.removeInput(existing)
                     self.currentInput = nil
                 }
-                self.configureInputsLocked()
+                self.configureInputsLocked(position: position)
                 self.session.commitConfiguration()
                 continuation.resume()
             }
         }
     }
 
-    /// Build and attach the camera input for the current `facingFront`. Must
-    /// be called inside a `beginConfiguration` block (or equivalent — this
-    /// is invoked from `start()` and `reconfigureInput()` both of which set
-    /// up configuration brackets around the call).
+    /// Build and attach the camera input for the supplied position. Must
+    /// be called inside a `beginConfiguration` block (or equivalent —
+    /// `start()` and `reconfigureInput()` both set up configuration
+    /// brackets around the call).
     ///
-    /// Resolves the desired camera position from the @MainActor-isolated
-    /// `facingFront` via a synchronous helper, then attaches the matching
-    /// `AVCaptureDeviceInput`.
-    nonisolated private func configureInputsLocked() {
-        let position = currentDesiredPositionLocked()
+    /// `position` is supplied by the caller (snapshotted on the main actor
+    /// before the queue hop) so this function does no actor-crossing work
+    /// of its own — eliminating any chance of a main-thread deadlock from
+    /// inside the session queue.
+    nonisolated private func configureInputsLocked(position: AVCaptureDevice.Position) {
         guard let device = AVCaptureDevice.default(
             .builtInWideAngleCamera,
             for: .video,
@@ -293,24 +303,6 @@ final class CameraStore {
             // will draw black and the UI will still function (e.g. the user
             // can switch back to .off without crashing).
         }
-    }
-
-    /// Helper that resolves the desired camera position from the @MainActor-
-    /// owned `facingFront`. Called from inside `sessionQueue` blocks; we use
-    /// `DispatchQueue.main.sync` only here because the value is a single Bool
-    /// that the main actor mutates atomically. Avoids capturing `self`'s
-    /// state by value in two places.
-    nonisolated private func currentDesiredPositionLocked() -> AVCaptureDevice.Position {
-        var front = true
-        if Thread.isMainThread {
-            // Already on main — read directly (this happens in unit tests)
-            front = MainActor.assumeIsolated { self.facingFront }
-        } else {
-            DispatchQueue.main.sync {
-                front = MainActor.assumeIsolated { self.facingFront }
-            }
-        }
-        return front ? .front : .back
     }
 
     // MARK: - Persistence

@@ -41,6 +41,7 @@ struct TeleprompterView: View {
     // session — these flags drive overlay composition.
     @AppStorage(PrefKey.cameraStyle.rawValue) private var cameraStyleRaw: String = "off"
     @AppStorage(PrefKey.coachMarkCameraStyleShown.rawValue) private var coachMarkShown: Bool = false
+    @AppStorage(PrefKey.labsCameraStyle.rawValue) private var labsCameraStyleEnabled: Bool = false
     @State private var showCameraDeniedBanner: Bool = false
     @State private var showCameraIntroBanner: Bool = false
 
@@ -306,9 +307,15 @@ struct TeleprompterView: View {
         .task {
             await appState.cameraStore.resume()
         }
-        .onChange(of: cameraStyleRaw) { _, _ in
-            // Settings or chip changed the style — drain any pending
-            // permission-denied banner cue from the store and surface it.
+        .onChange(of: appState.cameraStore.pendingPermissionDeniedBanner) { _, isPending in
+            // Drive the "camera access is off" banner directly off the
+            // store flag, not off `cameraStyleRaw`. The denial path snaps
+            // the chosen style back to `.off`, which is identical to the
+            // prior value when the user picked .pip from .off — so an
+            // `onChange(of: cameraStyleRaw)` would never fire and the
+            // banner would be silently swallowed. This observation runs
+            // exactly when the store flips the flag, regardless of style.
+            guard isPending else { return }
             if appState.cameraStore.consumePermissionDenialBanner() {
                 withAnimation(.easeInOut(duration: 0.18)) {
                     showCameraDeniedBanner = true
@@ -472,18 +479,11 @@ struct TeleprompterView: View {
 
     /// Show the camera chip in the bottom-bar area whenever Labs is on or
     /// the user has already picked a non-`.off` style. Mirrors the gating
-    /// logic in `SettingsView` so the two surfaces line up.
+    /// logic in `SettingsView` so the two surfaces line up. Reads via
+    /// `@AppStorage` so a Settings flip propagates without re-mounting.
+    /// `Prefs.register()` seeds the right `#if DEBUG` default.
     private var showCameraChip: Bool {
-        let labsOn: Bool = {
-            #if DEBUG
-            return UserDefaults.standard.object(forKey: PrefKey.labsCameraStyle.rawValue) == nil
-                ? true
-                : UserDefaults.standard.bool(forKey: PrefKey.labsCameraStyle.rawValue)
-            #else
-            return UserDefaults.standard.bool(forKey: PrefKey.labsCameraStyle.rawValue)
-            #endif
-        }()
-        return labsOn || cameraStyle != .off
+        labsCameraStyleEnabled || cameraStyle != .off
     }
 
     /// Scrim opacity for `.behind` mode. 0.55 by default (per V2 Design 01
