@@ -10,6 +10,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppState.self) private var appState
     @State private var aggressiveStripping: Bool = Prefs.aggressiveStripping
     @State private var defaultSpeed: Double = Prefs.defaultSpeed
     @State private var defaultFont: Double = Prefs.defaultFont
@@ -17,6 +18,17 @@ struct SettingsView: View {
     @State private var vMirrorDefault: Bool = Prefs.vMirrorDefault
     @State private var appearance: Prefs.Appearance = Prefs.appearance
     @State private var prompterFont: String = Prefs.prompterFont.rawValue
+
+    /// Labs entries gate in-progress features. Default is DEBUG-only on, see
+    /// `Prefs.swift` for the per-build default. The Labs section at the
+    /// bottom of Settings exposes each flag with a master toggle.
+    @AppStorage(PrefKey.labsBluetoothRemote.rawValue) private var labsBluetoothRemote: Bool = {
+        #if DEBUG
+        return true
+        #else
+        return false
+        #endif
+    }()
 
     var body: some View {
         NavigationStack {
@@ -107,6 +119,16 @@ struct SettingsView: View {
                         .foregroundStyle(Theme.dim)
                 }
 
+                // Remote Control (Feature 7). Behind the labs flag — shipped
+                // off by default in Release until the feature graduates from
+                // Labs. The whole subview lives in RemoteControlSettingsView.
+                if labsBluetoothRemote {
+                    RemoteControlSettingsView(
+                        bindings: appState.remoteBindings,
+                        monitor: appState.keyboardMonitor
+                    )
+                }
+
                 Section("about") {
                     Link(destination: URL(string: "https://openprompter.app")!) {
                         Label("openprompter.app", systemImage: "safari")
@@ -118,6 +140,16 @@ struct SettingsView: View {
                         Label("privacy policy", systemImage: "hand.raised")
                     }
                     Text("open prompter · MIT · made by @lelanddutcher")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.dim)
+                }
+
+                // Labs — opt-in toggles for in-progress features. First entry
+                // is Bluetooth remote (Feature 7). Pattern: each flag is a
+                // single toggle with copy explaining what's still being built.
+                Section("labs") {
+                    Toggle("bluetooth remote", isOn: $labsBluetoothRemote)
+                    Text("in-progress: keyboard, presenter, and media-key control with user-remappable bindings. surface a remote control section above when on.")
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.dim)
                 }

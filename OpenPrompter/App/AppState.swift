@@ -34,6 +34,19 @@ final class AppState {
 
     let watcher = ICloudWatcher()
 
+    // MARK: - Remote control (Feature 7)
+
+    /// App-wide store of (RemoteKey → RemoteEvent) bindings. Settings opens
+    /// from the library — outside any prompter session — so the binding
+    /// editor needs an instance that exists before/after the prompter view
+    /// has been on screen. The active prompter session reads through to
+    /// this same instance.
+    let remoteBindings = RemoteBindingStore()
+
+    /// `GCKeyboard.coalesced` presence indicator, used by Settings and the
+    /// (future) prompter top-bar chip.
+    let keyboardMonitor = KeyboardConnectionMonitor()
+
     // MARK: - Banner
 
     enum BannerKind: Equatable {

@@ -33,6 +33,13 @@ enum ScriptBlock: Equatable, Hashable, Sendable, Identifiable {
         case .numbered(_, let text): return text
         }
     }
+
+    /// True if this block is a markdown heading. Used by remote-driven
+    /// section navigation (Feature 7) to find the next/previous H1/H2.
+    var isHeading: Bool {
+        if case .heading = self { return true }
+        return false
+    }
 }
 
 struct ParsedScript: Equatable, Hashable, Sendable {

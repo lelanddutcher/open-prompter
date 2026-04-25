@@ -57,6 +57,27 @@ final class PrompterViewModel {
     var contentHeight: CGFloat = 0
     var viewportHeight: CGFloat = 0
 
+    /// Scroll offset captured at the moment the user pressed play on the
+    /// current take. Used by `jumpToStartOfTake()` (Feature 7's novel
+    /// `jumpToStart` remote action) to return the scroll position to the
+    /// exact spot a take began — useful for retake workflows where you
+    /// flubbed the line and want to reset without losing your place.
+    ///
+    /// Semantics: every transition from `paused → playing` resets this
+    /// to the current scroll offset. Pausing in the middle of a take and
+    /// resuming creates a NEW start position. Each unbroken playback span
+    /// is its own "take." See `Roadmap V2.md` §7.
+    private(set) var playStartScrollOffset: CGFloat = 0
+
+    // MARK: - Remote control
+
+    /// Shared bus for remote events. The prompter view starts a Task that
+    /// `for await`s this and forwards each event to `handleRemoteEvent(_:)`.
+    /// Bus is per-session — sources that activate while the prompter is on
+    /// screen publish into this bus, and the consumer task ends when the
+    /// prompter view goes away.
+    let remoteBus = RemoteEventBus()
+
     // MARK: - Init
 
     init(file: ScriptFile) {
@@ -159,9 +180,15 @@ final class PrompterViewModel {
     // MARK: - Playback actions
 
     func togglePlay() {
+        let willStart = !isPlaying
         isPlaying.toggle()
         if !isPlaying {
             scroller.resetTick()
+        } else if willStart {
+            // Capture the take-start offset on every paused → playing
+            // transition. The user may pause and resume mid-script; each
+            // resume is a new take and gets its own start position.
+            playStartScrollOffset = scroller.offset
         }
         Haptics.tap()
     }
@@ -189,7 +216,23 @@ final class PrompterViewModel {
     }
 
     func jumpToStart() {
+        // Existing on-screen "Jump to start" button — semantically the top of
+        // the script, i.e. RESTART. Kept named jumpToStart for backward
+        // compatibility with the controls view; the remote event vocabulary
+        // disambiguates with `restart` vs `jumpToStartOfTake`.
         scroller.seek(to: 0, maxOffset: maxScrollOffset)
+    }
+
+    /// Top of the script. Same effect as `jumpToStart()` but exposed under
+    /// a name that matches the remote `RemoteEvent.restart` case for clarity.
+    func restart() { jumpToStart() }
+
+    /// Novel Feature 7 action: return scroll to the offset captured when
+    /// the user last pressed play. Doesn't pause — keeps playing if the
+    /// prompter was already playing, so a "I flubbed that line" retake
+    /// workflow is one button press.
+    func jumpToStartOfTake() {
+        scroller.seek(to: playStartScrollOffset, maxOffset: maxScrollOffset)
     }
 
     func jumpBackward() {
@@ -198,6 +241,70 @@ final class PrompterViewModel {
 
     func jumpForward() {
         scroller.seek(to: scroller.offset + viewportHeight * 0.5, maxOffset: maxScrollOffset)
+    }
+
+    /// Bump the scroll speed by 5 pts/s, clamped to the slider range.
+    func speedUp()   { setSpeed(speed + 5) }
+    /// Cut the scroll speed by 5 pts/s, clamped to the slider range.
+    func speedDown() { setSpeed(speed - 5) }
+
+    /// Move scroll to the next H1/H2 heading below the eye-line. Treats the
+    /// fractional layout (block index / count of total height) the same way
+    /// `currentBlockIndex` does — good enough for the "navigate by section"
+    /// remote action without standing up a full per-block measurement pass.
+    func nextSection() {
+        guard !parsed.blocks.isEmpty, contentHeight > 0 else { return }
+        let currentIdx = currentBlockIndex
+        if let nextIdx = parsed.blocks.indices
+            .first(where: { $0 > currentIdx && parsed.blocks[$0].isHeading })
+        {
+            seekToBlockIndex(nextIdx)
+        }
+    }
+
+    /// Mirror of `nextSection()` going up. If we're already at or above the
+    /// first heading, snap to the top.
+    func prevSection() {
+        guard !parsed.blocks.isEmpty, contentHeight > 0 else { return }
+        let currentIdx = currentBlockIndex
+        if let prevIdx = parsed.blocks.indices
+            .reversed()
+            .first(where: { $0 < currentIdx && parsed.blocks[$0].isHeading })
+        {
+            seekToBlockIndex(prevIdx)
+        } else {
+            scroller.seek(to: 0, maxOffset: maxScrollOffset)
+        }
+    }
+
+    private func seekToBlockIndex(_ idx: Int) {
+        let count = max(parsed.blocks.count, 1)
+        let frac = Double(idx) / Double(count)
+        let target = CGFloat(frac) * contentHeight
+        scroller.seek(to: target, maxOffset: maxScrollOffset)
+    }
+
+    /// Single dispatch point for `RemoteEvent`s coming off the bus. The
+    /// view layer subscribes to the bus and forwards every event here.
+    /// Mapping is exhaustive so a new event-vocab case becomes a compile
+    /// error, not a silent no-op.
+    func handleRemoteEvent(_ event: RemoteEvent) {
+        switch event {
+        case .playPause:    togglePlay()
+        case .scrollUp:     jumpBackward()
+        case .scrollDown:   jumpForward()
+        case .scrollLeft:   jumpBackward()
+        case .scrollRight:  jumpForward()
+        case .speedUp:      speedUp()
+        case .speedDown:    speedDown()
+        case .jumpBackward: jumpBackward()
+        case .jumpForward:  jumpForward()
+        case .mirrorToggle: toggleMirror()
+        case .restart:      restart()
+        case .nextSection:  nextSection()
+        case .prevSection:  prevSection()
+        case .jumpToStart:  jumpToStartOfTake()
+        }
     }
 
     var maxScrollOffset: CGFloat {

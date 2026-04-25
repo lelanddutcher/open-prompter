@@ -15,6 +15,25 @@ struct TeleprompterView: View {
     @State private var vm: PrompterViewModel
     @State private var changeWatcher: Task<Void, Never>? = nil
 
+    // Bluetooth-remote sources. Keyboard handler lives on the view so we can
+    // hand it directly to `.onKeyPress`; media + volume are owned by the VM
+    // because their lifecycle ties to the prompter's appearance, not the
+    // current focus state. They're constructed in `.task` once we have the
+    // shared binding store from AppState.
+    @State private var keyboardSource: KeyboardEventSource?
+    @State private var mediaSource: MediaCommandSource?
+    @State private var volumeSource: VolumeEventSource?
+    /// SwiftUI focus binding for the keyboard event source. Must be true
+    /// while the prompter is the active scene or `.onKeyPress` will not
+    /// fire. Defaults to true on appear and resets to false on disappear.
+    @FocusState private var prompterFocused: Bool
+
+    // Live-read prefs that gate which sources are active. UserDefaults-backed
+    // so a Settings change applies on the next prompter open without a
+    // manual rebuild of the view model.
+    @AppStorage(PrefKey.remoteEnabled.rawValue) private var remoteEnabled: Bool = true
+    @AppStorage(PrefKey.useVolumeButtons.rawValue) private var useVolumeButtons: Bool = false
+
     // Prompter font pref is read live via @AppStorage so picker changes in
     // Settings propagate instantly — even to an already-open prompter view.
     // Stored VM state would go stale because Settings is presented modally
@@ -118,7 +137,62 @@ struct TeleprompterView: View {
         .ignoresSafeArea(.keyboard)
         .contentShape(Rectangle())
         .onTapGesture { vm.togglePlay() }
+        // Keyboard focus + .onKeyPress wiring (Feature 7). Without
+        // .focusable() + .focused(), SwiftUI never delivers key events.
+        // We mount these unconditionally so a user who opts back in mid-
+        // session gets keys without re-entering the prompter; the source
+        // returns .ignored when remoteEnabled is false.
+        .focusable()
+        .focused($prompterFocused)
+        .focusEffectDisabled()
+        .onKeyPress(phases: .down) { press in
+            guard remoteEnabled, let src = keyboardSource else { return .ignored }
+            return src.handle(press)
+        }
         .task { await vm.load() }
+        .task(id: useVolumeButtons) {
+            // Toggle the volume source whenever the opt-in changes. The
+            // task identity restarts this when the @AppStorage value flips.
+            // Volume capture is OFF by default — see VolumeEventSource.swift
+            // for the App Store guideline 2.5.9 trade-off.
+            if remoteEnabled, useVolumeButtons {
+                if volumeSource == nil {
+                    volumeSource = VolumeEventSource(
+                        bus: vm.remoteBus,
+                        store: appState.remoteBindings
+                    )
+                }
+                volumeSource?.start()
+            } else {
+                volumeSource?.stop()
+            }
+        }
+        .task {
+            // Construct event sources once and start the always-on ones.
+            // The keyboard source has no lifecycle of its own (it's driven
+            // by .onKeyPress); media commands attach until prompter exits.
+            keyboardSource = KeyboardEventSource(
+                bus: vm.remoteBus,
+                store: appState.remoteBindings
+            )
+            let media = MediaCommandSource(
+                bus: vm.remoteBus,
+                store: appState.remoteBindings
+            )
+            mediaSource = media
+            if remoteEnabled { media.start() }
+
+            // Take focus so .onKeyPress fires. Set after sources exist so
+            // the first key press doesn't race the instantiation.
+            prompterFocused = true
+        }
+        .task {
+            // Drain remote events into the view model. Lives for the
+            // duration of this view; the bus is per-VM and ends with it.
+            for await event in vm.remoteBus.events {
+                vm.handleRemoteEvent(event)
+            }
+        }
         .task {
             // Listen for file changes while this script is open.
             for await url in appState.watcher.changed {
@@ -126,6 +200,11 @@ struct TeleprompterView: View {
                     vm.reloadAvailable = true
                 }
             }
+        }
+        .onDisappear {
+            mediaSource?.stop()
+            volumeSource?.stop()
+            prompterFocused = false
         }
         .statusBarHidden()
         // The teleprompter reading view is ALWAYS dark, regardless of the

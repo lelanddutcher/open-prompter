@@ -30,6 +30,18 @@ enum PrefKey: String, CaseIterable {
     case coachMarkPlayShown = "pref.coachMarkPlayShown"
     case coachMarkMirrorShown = "pref.coachMarkMirrorShown"
     case appearance = "pref.appearance"
+    /// Master toggle for the Bluetooth remote feature (Feature 7).
+    /// Default true so once Labs exposes Remote Control, the user gets
+    /// keyboard/media-key control immediately without an extra step.
+    case remoteEnabled = "pref.remote.enabled"
+    /// Opt-in for the volume-button event source. OFF by default — the
+    /// inverse capture pattern protects against App Store guideline 2.5.9.
+    /// Settings copy explains the trade-off when the user enables it.
+    case useVolumeButtons = "pref.remote.useVolumeButtons"
+    /// Labs feature flag for Bluetooth remote. Defaults to ON in DEBUG, OFF
+    /// in Release until the feature is shipped — see `OpenPrompterApp.swift`
+    /// where `Prefs.register()` reads `#if DEBUG` to set the right default.
+    case labsBluetoothRemote = "labs.bluetoothRemote"
 
     var defaultValue: Any {
         switch self {
@@ -46,6 +58,17 @@ enum PrefKey: String, CaseIterable {
         case .coachMarkPlayShown: return false
         case .coachMarkMirrorShown: return false
         case .appearance: return Prefs.Appearance.dark.rawValue
+        case .remoteEnabled: return true
+        case .useVolumeButtons: return false
+        case .labsBluetoothRemote:
+            // In DEBUG builds we default Labs flags to ON so internal builds
+            // exercise the in-progress feature. Release builds default OFF
+            // so end users only see Labs entries they've explicitly enabled.
+            #if DEBUG
+            return true
+            #else
+            return false
+            #endif
         }
     }
 }
@@ -188,5 +211,20 @@ enum Prefs {
             return Appearance(rawValue: raw) ?? .dark
         }
         set { defaults.set(newValue.rawValue, forKey: PrefKey.appearance.rawValue) }
+    }
+
+    static var remoteEnabled: Bool {
+        get { defaults.bool(forKey: PrefKey.remoteEnabled.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.remoteEnabled.rawValue) }
+    }
+
+    static var useVolumeButtons: Bool {
+        get { defaults.bool(forKey: PrefKey.useVolumeButtons.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.useVolumeButtons.rawValue) }
+    }
+
+    static var labsBluetoothRemote: Bool {
+        get { defaults.bool(forKey: PrefKey.labsBluetoothRemote.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.labsBluetoothRemote.rawValue) }
     }
 }
