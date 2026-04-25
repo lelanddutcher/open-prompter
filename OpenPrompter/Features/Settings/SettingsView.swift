@@ -13,7 +13,8 @@ struct SettingsView: View {
     @State private var aggressiveStripping: Bool = Prefs.aggressiveStripping
     @State private var defaultSpeed: Double = Prefs.defaultSpeed
     @State private var defaultFont: Double = Prefs.defaultFont
-    @State private var mirrorDefault: Bool = Prefs.mirrorDefault
+    @State private var hMirrorDefault: Bool = Prefs.hMirrorDefault
+    @State private var vMirrorDefault: Bool = Prefs.vMirrorDefault
     @State private var appearance: Prefs.Appearance = Prefs.appearance
     @State private var prompterFont: String = Prefs.prompterFont.rawValue
 
@@ -61,9 +62,32 @@ struct SettingsView: View {
                     }
                     Slider(value: $defaultFont, in: 32...160, step: 4)
                         .onChange(of: defaultFont) { _, new in Prefs.defaultFont = new }
+                }
 
-                    Toggle("mirror on by default", isOn: $mirrorDefault)
-                        .onChange(of: mirrorDefault) { _, new in Prefs.mirrorDefault = new }
+                Section("mirror") {
+                    Toggle(isOn: $hMirrorDefault) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("horizontal flip")
+                            Text("reverse left ↔ right (for beam-splitter rigs)")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.dim)
+                        }
+                    }
+                    .onChange(of: hMirrorDefault) { _, new in Prefs.hMirrorDefault = new }
+
+                    Toggle(isOn: $vMirrorDefault) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("vertical flip")
+                            Text("reverse top ↔ bottom (for upside-down or periscope rigs)")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.dim)
+                        }
+                    }
+                    .onChange(of: vMirrorDefault) { _, new in Prefs.vMirrorDefault = new }
+
+                    Text("the in-prompter mirror chip flips horizontal. flip both for a 180° rotation.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.dim)
                 }
 
                 Section("prompter font") {

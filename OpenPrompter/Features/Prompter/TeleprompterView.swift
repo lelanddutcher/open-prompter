@@ -33,6 +33,17 @@ struct TeleprompterView: View {
             Theme.bg.ignoresSafeArea()
 
             // Scrolling text — full-bleed, measures its own viewport internally.
+            // Mirror is applied as a pair of independent scale flips per
+            // Roadmap V2 §6 ("Mirror mode — second axis"). The text layer is
+            // the only thing that flips here; the top bar and controls live
+            // outside this ZStack so they stay legible regardless of mirror
+            // state.
+            // FUTURE: when the PiP camera mode (Roadmap V2 §1) lands, the
+            // camera preview transform should compose against these same two
+            // booleans — `AVCaptureConnection.videoMirrored` for the H axis
+            // and a `videoOrientation` flip (or a sibling `.scaleEffect`) for
+            // the V axis. Keep the text and the camera in sync so the rig
+            // optics line up against a single source of truth.
             scrollingText
                 .scaleEffect(
                     x: vm.mirroredHorizontal ? -1 : 1,

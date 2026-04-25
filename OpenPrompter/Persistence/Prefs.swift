@@ -15,7 +15,14 @@ enum PrefKey: String, CaseIterable {
     case defaultSpeed = "pref.defaultSpeed"
     case defaultFont = "pref.defaultFont"
     case prompterFont = "pref.prompterFont"
+    /// Legacy single-axis mirror default. Superseded by `hMirrorDefault`
+    /// (and the new `vMirrorDefault`) in the v2 second-axis work. Kept in
+    /// the enum so a one-shot migration can read it; left written in
+    /// UserDefaults rather than removed so a downgrade or older build
+    /// doesn't lose the user's choice.
     case mirrorDefault = "pref.mirrorDefault"
+    case hMirrorDefault = "pref.hMirrorDefault"
+    case vMirrorDefault = "pref.vMirrorDefault"
     case focusDefault = "pref.focusDefault"
     case aggressiveStripping = "pref.aggressiveStripping"
     case lastFileURL = "pref.lastFileURL"
@@ -30,6 +37,8 @@ enum PrefKey: String, CaseIterable {
         case .defaultFont: return 64.0         // points
         case .prompterFont: return PrompterFont.default.rawValue
         case .mirrorDefault: return false
+        case .hMirrorDefault: return false
+        case .vMirrorDefault: return false
         case .focusDefault: return false
         case .aggressiveStripping: return true
         case .lastFileURL: return ""
@@ -56,11 +65,39 @@ enum Prefs {
     }
 
     static func register() {
+        // Migration must consult only the persistent (on-disk) domain so
+        // it can tell "user wrote this" from "framework registered a
+        // fallback". Pass the main bundle identifier so we read the app's
+        // own .plist and not anything in the global registration domain.
+        let domain = Bundle.main.bundleIdentifier ?? ""
+        migrateLegacyMirrorKey(in: defaults, domain: domain)
+
         var initial: [String: Any] = [:]
         for key in PrefKey.allCases {
             initial[key.rawValue] = key.defaultValue
         }
         defaults.register(defaults: initial)
+    }
+
+    /// One-shot migration from the legacy single-axis mirror key
+    /// (`pref.mirrorDefault`) to the new horizontal-axis key
+    /// (`pref.hMirrorDefault`). Idempotent: only copies when the user has
+    /// explicitly written the legacy key AND has not yet written to the new
+    /// key. The legacy key is left in place so a downgrade still finds the
+    /// user's preference.
+    ///
+    /// `domain` is the persistent domain to inspect (typically the app's
+    /// bundle identifier). Reading via `persistentDomain(forName:)` skips
+    /// the process-wide registration domain so framework-default fallbacks
+    /// don't masquerade as user writes.
+    static func migrateLegacyMirrorKey(in store: UserDefaults, domain: String) {
+        let legacyKey = PrefKey.mirrorDefault.rawValue
+        let newKey = PrefKey.hMirrorDefault.rawValue
+        let persistent = store.persistentDomain(forName: domain) ?? [:]
+        guard persistent[legacyKey] != nil,
+              persistent[newKey] == nil else { return }
+        let legacyValue = (persistent[legacyKey] as? Bool) ?? false
+        store.set(legacyValue, forKey: newKey)
     }
 
     // MARK: - Scalar accessors
@@ -87,9 +124,31 @@ enum Prefs {
         set { defaults.set(newValue.rawValue, forKey: PrefKey.prompterFont.rawValue) }
     }
 
+    /// Legacy single-axis mirror default. Reads pass through to the new
+    /// horizontal pref so any code path still on this name keeps working.
+    /// Writes update both the legacy key and the new horizontal key so a
+    /// downgrade still sees the user's latest choice.
+    @available(*, deprecated, message: "Use hMirrorDefault / vMirrorDefault.")
     static var mirrorDefault: Bool {
-        get { defaults.bool(forKey: PrefKey.mirrorDefault.rawValue) }
-        set { defaults.set(newValue, forKey: PrefKey.mirrorDefault.rawValue) }
+        get { defaults.bool(forKey: PrefKey.hMirrorDefault.rawValue) }
+        set {
+            defaults.set(newValue, forKey: PrefKey.hMirrorDefault.rawValue)
+            defaults.set(newValue, forKey: PrefKey.mirrorDefault.rawValue)
+        }
+    }
+
+    /// Horizontal mirror (left ↔ right). The standard transform for
+    /// beam-splitter teleprompter rigs. Default off.
+    static var hMirrorDefault: Bool {
+        get { defaults.bool(forKey: PrefKey.hMirrorDefault.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.hMirrorDefault.rawValue) }
+    }
+
+    /// Vertical mirror (top ↔ bottom). For periscope rigs and upside-down
+    /// phone mounts. Combine with horizontal for a 180° rotation. Default off.
+    static var vMirrorDefault: Bool {
+        get { defaults.bool(forKey: PrefKey.vMirrorDefault.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.vMirrorDefault.rawValue) }
     }
 
     static var focusDefault: Bool {

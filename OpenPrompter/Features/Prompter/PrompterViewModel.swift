@@ -24,7 +24,7 @@ final class PrompterViewModel {
     var speed: Double
     var fontSize: Double
     var mirroredHorizontal: Bool
-    var mirroredVertical: Bool = false
+    var mirroredVertical: Bool
     var focus: Bool
 
     // MARK: - Content
@@ -63,7 +63,8 @@ final class PrompterViewModel {
         self.file = file
         self.speed = Prefs.defaultSpeed
         self.fontSize = Prefs.defaultFont
-        self.mirroredHorizontal = Prefs.mirrorDefault
+        self.mirroredHorizontal = Prefs.hMirrorDefault
+        self.mirroredVertical = Prefs.vMirrorDefault
         self.focus = Prefs.focusDefault
     }
 

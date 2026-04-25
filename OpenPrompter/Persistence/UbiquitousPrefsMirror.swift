@@ -18,7 +18,12 @@ enum UbiquitousPrefsMirror {
         .defaultSpeed,
         .defaultFont,
         .prompterFont,
+        // The legacy single-axis mirror key is still mirrored so an older
+        // build on a sibling device sees the user's most recent choice.
+        // The new per-axis keys travel alongside it.
         .mirrorDefault,
+        .hMirrorDefault,
+        .vMirrorDefault,
         .focusDefault,
         .aggressiveStripping,
         .appearance
