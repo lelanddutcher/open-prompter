@@ -30,6 +30,12 @@
 	<string>Open Prompter shows your camera in a small tile or behind the script while you read. Camera footage is never recorded unless you press record.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
 	<string>Open Prompter reads the markdown files in the folder you pick so they can appear as teleprompter scripts.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Open Prompter records audio with your video and follows along with your reading on-device. Audio is processed locally and never leaves your device.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Open Prompter saves your finished recordings to Photos so you can edit and share them.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIAppFonts</key>
 	<array>
 		<string>AtkinsonHyperlegible-Regular.ttf</string>

@@ -36,6 +36,13 @@ struct SettingsView: View {
         return false
         #endif
     }()
+    @AppStorage(PrefKey.labsRecording.rawValue) private var labsRecording: Bool = {
+        #if DEBUG
+        return true
+        #else
+        return false
+        #endif
+    }()
     /// Read live so the camera section can decide whether to render once
     /// the user has picked a non-`.off` mode (regardless of the Labs flag).
     @AppStorage(PrefKey.cameraStyle.rawValue) private var cameraStyleRaw: String = "off"
@@ -138,6 +145,18 @@ struct SettingsView: View {
                     CameraSettingsView(recordingState: appState.recordingState)
                 }
 
+                // Recording (Features 2 + 4). Behind the labs flag and only
+                // surfaces when the user has the recording feature enabled.
+                // Settings opens from the library — outside any prompter
+                // session — so the route monitor needs to be started here so
+                // the "current source" row reflects what iOS picks up right
+                // now, not whatever was active the last time the prompter
+                // was on screen.
+                if labsRecording {
+                    RecordingSettingsView(routeMonitor: appState.audioRouteMonitor)
+                        .onAppear { appState.audioRouteMonitor.start() }
+                }
+
                 // Remote Control (Feature 7). Behind the labs flag — shipped
                 // off by default in Release until the feature graduates from
                 // Labs. The whole subview lives in RemoteControlSettingsView.
@@ -174,6 +193,11 @@ struct SettingsView: View {
 
                     Toggle("camera style", isOn: $labsCameraStyle)
                     Text("in-progress: three-mode camera composition picker (off, picture-in-picture, behind text) with a draggable corner-snapping pip tile. surface a camera section above when on.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.dim)
+
+                    Toggle("recording", isOn: $labsRecording)
+                    Text("in-progress: front-camera recording with quality + framerate + mic source pickers, dynamic island live activity, and save-to-photos / save-next-to-script destinations. surface a recording section above when on.")
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.dim)
                 }

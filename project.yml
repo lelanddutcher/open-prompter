@@ -64,6 +64,18 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         NSDocumentsFolderUsageDescription: "Open Prompter reads the markdown files in the folder you pick so they can appear as teleprompter scripts."
         NSCameraUsageDescription: "Open Prompter shows your camera in a small tile or behind the script while you read. Camera footage is never recorded unless you press record."
+        # Cross-feature mic copy — V2 Design 01 §"Microphone — cross-feature
+        # coordination". Recording AND voice tracking will both use this
+        # permission once Feature 5 lands; the prompt mentions both so the
+        # user makes one informed decision.
+        NSMicrophoneUsageDescription: "Open Prompter records audio with your video and follows along with your reading on-device. Audio is processed locally and never leaves your device."
+        # Photos write-only scope — the recording feature creates and adds
+        # to an "Open Prompter" album. We never request the broader read
+        # permission (`NSPhotoLibraryUsageDescription`).
+        NSPhotoLibraryAddUsageDescription: "Open Prompter saves your finished recordings to Photos so you can edit and share them."
+        # Live Activities — required so the recording chip can post a
+        # `Activity.request(...)` for the Dynamic Island indicator.
+        NSSupportsLiveActivities: true
         ITSAppUsesNonExemptEncryption: false
         UIAppFonts:
           - AtkinsonHyperlegible-Regular.ttf
@@ -92,6 +104,37 @@ targets:
         product: Markdown
       - package: swift-collections
         product: Collections
+      # Live Activity widget extension. XcodeGen embeds this into the main
+      # app bundle when `embed: true` (the default for app-extension types).
+      - target: OpenPrompterLiveActivity
+
+  # Widget Extension target hosting the Live Activity for the recording
+  # feature. Shares `PrompterRecordingAttributes.swift` with the main app
+  # via the explicit `path:` entry in `sources:` below — XcodeGen
+  # materializes the file into both build graphs without duplication.
+  OpenPrompterLiveActivity:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.2"
+    sources:
+      - path: OpenPrompterLiveActivity
+      - path: OpenPrompter/Features/Recording/PrompterRecordingAttributes.swift
+    info:
+      path: OpenPrompterLiveActivity/Info.plist
+      properties:
+        CFBundleDisplayName: Open Prompter
+        CFBundleName: Open Prompter
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "2"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.openprompter.ios.liveactivity
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "5.10"
+        GENERATE_INFOPLIST_FILE: NO
 
   OpenPrompterTests:
     type: bundle.unit-test

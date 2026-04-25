@@ -56,10 +56,24 @@ final class AppState {
     /// for camera prefs without a live prompter.
     let cameraStore = CameraStore()
 
-    /// Recording-state flag (V2 Design 01 §"Tally-light border indicator").
-    /// Feature 1 only flips this via the Labs debug toggle for design
-    /// validation. Feature 2 will wire the real recording controller.
+    /// Recording-state flag (V2 Design 01 §"Tally-light border indicator")
+    /// promoted in Feature 2 to a full state machine via `RecordingPhase`.
+    /// `isRecording` is still computed from `phase == .recording(_)` so
+    /// the existing tally-light wiring is unchanged.
     let recordingState = RecordingState()
+
+    /// Audio-route monitor for the recording feature's microphone status
+    /// row. Owned by AppState so the route observer survives Settings sheet
+    /// presentation cycles. Started lazily — the prompter view triggers
+    /// `start()` on appear so non-recording users don't pay the listener.
+    let audioRouteMonitor = AudioRouteMonitor()
+
+    /// Recording session — drives the writer pipeline + Live Activity.
+    /// Initialized in `init` once the camera store + recording state are
+    /// available. Stored on AppState so the session lifecycle survives
+    /// the prompter open/close cycle (a force-quit during finalize would
+    /// otherwise lose the take).
+    let recordingSession: RecordingSession
 
     // MARK: - Banner
 
@@ -78,7 +92,16 @@ final class AppState {
 
     init() {
         Prefs.register()
+        // The session needs both the camera store and the recording state,
+        // both of which are stored properties initialized above. Init this
+        // before bookmark resolution so a recovery scan that immediately
+        // posts to the state machine has a session ready to handle it.
+        self.recordingSession = RecordingSession(
+            state: self.recordingState,
+            cameraStore: self.cameraStore
+        )
         resolveBookmarkAndStart()
+        scanForInterruptedRecording()
         // Debug-only: launch flag `-autoDemo 1` opens the demo prompter
         // immediately, bypassing folder pick. Used by simulator runs.
         #if DEBUG
@@ -86,6 +109,16 @@ final class AppState {
             openDemoScript()
         }
         #endif
+    }
+
+    /// Recovery scan — if there's a stale `.mov` in Documents/Recordings/
+    /// at launch, the previous run was force-quit mid-take. Surface a
+    /// banner so the user can recover or discard. Per V2 Design 02 review
+    /// note 8.
+    private func scanForInterruptedRecording() {
+        if let stale = RecordingFileStore.mostRecentStaleRecording() {
+            recordingState.surfaceRecovery(url: stale)
+        }
     }
 
     // MARK: - Navigation actions

@@ -69,6 +69,44 @@ enum PrefKey: String, CaseIterable {
     /// to iCloud KVS.
     case coachMarkCameraStyleShown = "pref.coachMarkCameraStyleShown"
 
+    // MARK: - Recording (V2 Feature 2 + 4)
+
+    /// Recording quality tier — `"standard"` or `"high"`. Default `"high"`
+    /// (V2 Design 02 review note 8 collapsed the picker to two tiers).
+    /// Mirrored to iCloud KVS so the user's preference travels.
+    case recordingQuality = "pref.recording.quality"
+    /// Recording framerate — `"fps24"`, `"fps30"`, or `"fps60"`. Default
+    /// `"fps30"` (social-platform standard). Mirrored.
+    case recordingFramerate = "pref.recording.framerate"
+    /// Pinned microphone source. Stored as the AVAudioSession port UID so
+    /// the pin persists across reconnects (the same accessory keeps the
+    /// same UID even after a power-cycle). Two reserved values: `"auto"`
+    /// (let iOS pick — explicit opt-in to fallback behavior) and
+    /// `"builtin"` (default). Per-device — NOT mirrored to iCloud, since
+    /// a paired iPad will see a different set of accessories.
+    case recordingMicSource = "pref.recording.micSource"
+    /// Stabilization mode — `"off"` / `"standard"` / `"cinematic"`. Default
+    /// `"off"` (mounted-rig assumption per V2 Design 02 §"Stabilization").
+    /// Mirrored.
+    case recordingStabilization = "pref.recording.stabilization"
+    /// Pre-roll countdown — `"off"` / `"three"` / `"five"`. Default `"three"`
+    /// per review note 2. Mirrored.
+    case recordingCountdown = "pref.recording.countdown"
+    /// Recording indicator preference — `"islandOnly"` / `"both"` /
+    /// `"tallyOnly"`. Default is `"both"` on Dynamic Island devices,
+    /// `"tallyOnly"` on non-island devices (review note 6). The default is
+    /// computed at first read in `Prefs.recordingIndicator`. Mirrored.
+    case recordingIndicator = "pref.recording.indicator"
+    /// "Also save next to script" toggle. Default `false`. Mirrored.
+    case recordingSaveToScriptFolder = "pref.recording.saveToScriptFolder"
+    /// Labs feature flag for the recording feature. Defaults ON in DEBUG,
+    /// OFF in Release until the feature graduates from Labs.
+    case labsRecording = "labs.recording"
+    /// One-shot acknowledgment of the Photos write-only permission prompt.
+    /// We use this to tell whether we've already prompted on this device,
+    /// so the chip doesn't fire the system prompt twice in a single take.
+    case recordingPhotosPermissionAsked = "pref.recording.photosPermissionAsked"
+
     var defaultValue: Any {
         switch self {
         case .defaultSpeed: return 48.0        // pixels per second
@@ -106,6 +144,25 @@ enum PrefKey: String, CaseIterable {
             return false
             #endif
         case .coachMarkCameraStyleShown: return false
+        case .recordingQuality:        return "high"
+        case .recordingFramerate:      return "fps30"
+        case .recordingMicSource:      return "builtin"
+        case .recordingStabilization:  return "off"
+        case .recordingCountdown:      return "three"
+        // The default is filled in lazily by `Prefs.recordingIndicator`
+        // because it depends on whether the running device supports Live
+        // Activities. Storing a stable string here means a non-island
+        // device upgrading later still sees a sane value if the runtime
+        // check ever fails.
+        case .recordingIndicator:      return "both"
+        case .recordingSaveToScriptFolder: return false
+        case .labsRecording:
+            #if DEBUG
+            return true
+            #else
+            return false
+            #endif
+        case .recordingPhotosPermissionAsked: return false
         }
     }
 }
@@ -306,5 +363,80 @@ enum Prefs {
     static var coachMarkCameraStyleShown: Bool {
         get { defaults.bool(forKey: PrefKey.coachMarkCameraStyleShown.rawValue) }
         set { defaults.set(newValue, forKey: PrefKey.coachMarkCameraStyleShown.rawValue) }
+    }
+
+    // MARK: - Recording (V2 Feature 2 + 4)
+
+    /// Quality tier raw string. Reads always fall back to "high" if the
+    /// stored value is missing or unknown (downgrade from a future tier
+    /// shouldn't crash). Settings reads through this as a `RecordingQuality`
+    /// enum.
+    static var recordingQuality: String {
+        get { defaults.string(forKey: PrefKey.recordingQuality.rawValue) ?? "high" }
+        set { defaults.set(newValue, forKey: PrefKey.recordingQuality.rawValue) }
+    }
+
+    static var recordingFramerate: String {
+        get { defaults.string(forKey: PrefKey.recordingFramerate.rawValue) ?? "fps30" }
+        set { defaults.set(newValue, forKey: PrefKey.recordingFramerate.rawValue) }
+    }
+
+    /// Pinned mic source — port UID, "auto", or "builtin". See PrefKey
+    /// docs above for why this is per-device.
+    static var recordingMicSource: String? {
+        get { defaults.string(forKey: PrefKey.recordingMicSource.rawValue) }
+        set {
+            if let v = newValue {
+                defaults.set(v, forKey: PrefKey.recordingMicSource.rawValue)
+            } else {
+                defaults.removeObject(forKey: PrefKey.recordingMicSource.rawValue)
+            }
+        }
+    }
+
+    static var recordingStabilization: String {
+        get { defaults.string(forKey: PrefKey.recordingStabilization.rawValue) ?? "off" }
+        set { defaults.set(newValue, forKey: PrefKey.recordingStabilization.rawValue) }
+    }
+
+    static var recordingCountdown: String {
+        get { defaults.string(forKey: PrefKey.recordingCountdown.rawValue) ?? "three" }
+        set { defaults.set(newValue, forKey: PrefKey.recordingCountdown.rawValue) }
+    }
+
+    /// Recording indicator preference. Default depends on whether the
+    /// running device supports Live Activities — a non-island device must
+    /// land on `tallyOnly`, an island device on `both`. We resolve the
+    /// default lazily on first read so a paired iPad / iPhone-without-
+    /// island gets the right initial value without a manual migration.
+    static var recordingIndicator: String {
+        get {
+            if let raw = defaults.string(forKey: PrefKey.recordingIndicator.rawValue),
+               !raw.isEmpty {
+                return raw
+            }
+            // No stored value yet — pick the device-appropriate default.
+            #if canImport(ActivityKit)
+            return RecordingIndicatorPref.default.rawValue
+            #else
+            return RecordingIndicatorPref.tallyOnly.rawValue
+            #endif
+        }
+        set { defaults.set(newValue, forKey: PrefKey.recordingIndicator.rawValue) }
+    }
+
+    static var recordingSaveToScriptFolder: Bool {
+        get { defaults.bool(forKey: PrefKey.recordingSaveToScriptFolder.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.recordingSaveToScriptFolder.rawValue) }
+    }
+
+    static var labsRecording: Bool {
+        get { defaults.bool(forKey: PrefKey.labsRecording.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.labsRecording.rawValue) }
+    }
+
+    static var recordingPhotosPermissionAsked: Bool {
+        get { defaults.bool(forKey: PrefKey.recordingPhotosPermissionAsked.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.recordingPhotosPermissionAsked.rawValue) }
     }
 }

@@ -45,6 +45,14 @@ struct TeleprompterView: View {
     @State private var showCameraDeniedBanner: Bool = false
     @State private var showCameraIntroBanner: Bool = false
 
+    // Recording (V2 Features 2 + 4). Labs gates visibility of the chip;
+    // when the user has the chip on screen we mount the hardware-capture
+    // bridge and listen for save / failure cues from the session.
+    @AppStorage(PrefKey.labsRecording.rawValue) private var labsRecording: Bool = false
+    @State private var recordingSavedToast: RecordingState.SavedToast? = nil
+    @State private var icloudCopyFailureMessage: String? = nil
+    @State private var recoveryURL: URL? = nil
+
     // Prompter font pref is read live via @AppStorage so picker changes in
     // Settings propagate instantly — even to an already-open prompter view.
     // Stored VM state would go stale because Settings is presented modally
@@ -172,6 +180,19 @@ struct TeleprompterView: View {
                 if showCameraIntroBanner {
                     cameraIntroBanner
                 }
+                if let toast = recordingSavedToast {
+                    recordingSavedToastBanner(toast)
+                }
+                if let reason = icloudCopyFailureMessage {
+                    iCloudCopyFailureBanner(reason)
+                }
+                if let url = recoveryURL {
+                    RecoveryBanner(
+                        url: url,
+                        onRecover: { handleRecoveryRecover(url: url) },
+                        onDiscard: { handleRecoveryDiscard(url: url) }
+                    )
+                }
             }
             // No extra top padding — sit flush with the safe-area inset so
             // the reading line falls under the front-camera lens (the user
@@ -184,11 +205,20 @@ struct TeleprompterView: View {
             VStack(spacing: 6) {
                 // Camera Style chip lives just above the existing controls,
                 // visible whenever Labs is on or the user has picked a non-
-                // off style. Same gating logic as the Settings section.
-                if showCameraChip {
+                // off style. The recording chip sits next to it when the
+                // recording feature is enabled and a camera mode is active
+                // (you can't record without a session).
+                if showCameraChip || showRecordingChip {
                     HStack(spacing: 8) {
                         Spacer()
-                        CameraStyleChip(store: appState.cameraStore)
+                        if showCameraChip {
+                            CameraStyleChip(store: appState.cameraStore)
+                        }
+                        if showRecordingChip {
+                            RecordingChip(state: appState.recordingState) {
+                                handleRecordingChipTap()
+                            }
+                        }
                         Spacer()
                     }
                 }
@@ -202,10 +232,38 @@ struct TeleprompterView: View {
         // Tally-light: 4pt red border that pulses while recording. Drawn
         // last so nothing in the chrome can occlude it (V2 Design 01
         // §"Tally-light border indicator"). Reduce-Motion is honored
-        // inside the overlay.
+        // inside the overlay. The recording-indicator preference
+        // (V2 Design 02 review note 6) gates the in-app border so the
+        // user can pick island-only / both / tally-only.
         .overlay {
-            TallyLightOverlay(isActive: appState.recordingState.isRecording)
+            TallyLightOverlay(
+                isActive: appState.recordingState.isRecording && tallyLightAllowedByPref
+            )
         }
+        // Countdown 3-2-1 overlay. Renders only during the countdown phase;
+        // tap-anywhere on the dim cancels back to idle.
+        .overlay {
+            CountdownOverlay(
+                state: appState.recordingState,
+                onCancel: {
+                    Task { await appState.recordingSession.tapCancelDuringCountdown() }
+                }
+            )
+        }
+        // Hardware capture buttons (V2 Design 02 §"Hardware capture
+        // buttons"). The interaction is enabled whenever the recording chip
+        // is visible — volume / Camera Control / Action button start the
+        // countdown / cancel / stop, mirroring the chip taps. Disabled
+        // gracefully on iOS <17.2; the camera chip-only path stays clean.
+        .background(
+            HardwareCaptureBridge(
+                isEnabled: showRecordingChip,
+                onPrimary: { handleRecordingChipTap() },
+                onSecondary: { handleRecordingChipTap() }
+            )
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+        )
         .overlay(alignment: .bottomTrailing) {
             Button(action: { vm.toggleFocus() }) {
                 Image(systemName: "eye")
@@ -356,11 +414,66 @@ struct TeleprompterView: View {
                 coachMarkShown = true
             }
         }
+        // Recording lifecycle: tell the session which script is loaded
+        // (drives the Live Activity title and the iCloud-next-to-script
+        // copy destination) and start the audio-route monitor so the
+        // Settings status row reflects what iOS is actually picking up.
+        .task {
+            appState.recordingSession.setCurrentScript(
+                url: vm.file.url,
+                displayName: vm.file.displayName
+            )
+            appState.audioRouteMonitor.start()
+        }
+        // Mirror the saved toast / iCloud failure / recovery cues from
+        // RecordingState into local @State so SwiftUI animates them in
+        // and out via the banner overlay.
+        .onChange(of: appState.recordingState.pendingSavedToast) { _, _ in
+            if let toast = appState.recordingState.consumeSavedToast() {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    recordingSavedToast = toast
+                }
+                Task {
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        recordingSavedToast = nil
+                    }
+                }
+            }
+        }
+        .onChange(of: appState.recordingState.pendingICloudCopyFailure) { _, _ in
+            if let reason = appState.recordingState.consumeICloudCopyFailure() {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    icloudCopyFailureMessage = reason
+                }
+            }
+        }
+        .onChange(of: appState.recordingState.pendingRecoveryBanner) { _, _ in
+            if let url = appState.recordingState.consumeRecoveryBanner() {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    recoveryURL = url
+                }
+            }
+        }
+        .task {
+            // Drain a recovery banner queued before the prompter opened
+            // (the AppState init-time scan posts to recordingState before
+            // anything subscribes).
+            if let url = appState.recordingState.consumeRecoveryBanner() {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    recoveryURL = url
+                }
+            }
+        }
         .onDisappear {
             mediaSource?.stop()
             volumeSource?.stop()
             prompterFocused = false
             Task { await appState.cameraStore.suspend() }
+            // Tear down a live recording on disappear so the file gets
+            // saved if the user navigates away mid-take.
+            Task { await appState.recordingSession.teardown() }
+            appState.audioRouteMonitor.stop()
         }
         .statusBarHidden()
         // The teleprompter reading view is ALWAYS dark, regardless of the
@@ -532,6 +645,133 @@ struct TeleprompterView: View {
             Button {
                 withAnimation(.easeInOut(duration: 0.18)) {
                     showCameraDeniedBanner = false
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 28, height: 28)
+                    .foregroundStyle(Theme.muted)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Theme.amber.opacity(0.6), lineWidth: 1)
+        )
+        .padding(.horizontal, 10)
+    }
+
+    // MARK: - Recording helpers (V2 Features 2 + 4)
+
+    /// Show the recording chip when Labs is on AND we have a live camera
+    /// session — the user can't record without a preview. Mirrors the
+    /// roadmap's "recording requires a live camera" gate.
+    private var showRecordingChip: Bool {
+        labsRecording && cameraStyle != .off
+    }
+
+    /// Tally light visibility — driven by `RecordingIndicatorPref`. The
+    /// preference is read live so a Settings flip during a take updates
+    /// the overlay immediately.
+    private var tallyLightAllowedByPref: Bool {
+        let raw = Prefs.recordingIndicator
+        let pref = RecordingIndicatorPref(rawValue: raw) ?? .both
+        return pref.showsTallyLight
+    }
+
+    /// Single dispatch point for chip taps + hardware capture button
+    /// presses. Phase determines what the next action is — start countdown
+    /// from idle, cancel from countdown, stop from recording.
+    private func handleRecordingChipTap() {
+        switch appState.recordingState.phase {
+        case .idle:
+            Task { await appState.recordingSession.tapREC() }
+        case .countdown:
+            Task { await appState.recordingSession.tapCancelDuringCountdown() }
+        case .recording:
+            Task { await appState.recordingSession.tapStop() }
+        case .finalizing, .saving:
+            // No-op — the chip is disabled in these phases anyway.
+            break
+        case .error:
+            // Tap during error clears the error and goes back to idle.
+            appState.recordingState.dismissError()
+        }
+    }
+
+    private func handleRecoveryRecover(url: URL) {
+        Task {
+            let ok = await RecoveryAction.recoverToPhotos(url: url)
+            await MainActor.run {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    recoveryURL = nil
+                    if ok {
+                        recordingSavedToast = RecordingState.SavedToast(
+                            photosWritten: true,
+                            scriptFolderWritten: false
+                        )
+                    }
+                }
+                if recordingSavedToast != nil {
+                    Task {
+                        try? await Task.sleep(nanoseconds: 2_500_000_000)
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            recordingSavedToast = nil
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func handleRecoveryDiscard(url: URL) {
+        RecordingFileStore.removeRecording(at: url)
+        withAnimation(.easeInOut(duration: 0.2)) {
+            recoveryURL = nil
+        }
+    }
+
+    @ViewBuilder
+    private func recordingSavedToastBanner(_ toast: RecordingState.SavedToast) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(Theme.green)
+            Text(toast.displayText)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .tracking(0.5)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Theme.green.opacity(0.6), lineWidth: 1)
+        )
+        .padding(.horizontal, 10)
+    }
+
+    @ViewBuilder
+    private func iCloudCopyFailureBanner(_ reason: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "icloud.slash")
+                .font(.system(size: 13, weight: .bold))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("saved to photos")
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .tracking(0.5)
+                Text("couldn't save next to script — \(reason.lowercased())")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Theme.dim)
+                    .lineLimit(2)
+            }
+            Spacer()
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    icloudCopyFailureMessage = nil
                 }
             } label: {
                 Image(systemName: "xmark")

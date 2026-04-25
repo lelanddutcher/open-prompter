@@ -36,7 +36,17 @@ enum UbiquitousPrefsMirror {
         .cameraStyle,
         .cameraPipSize,
         .cameraPipPositionX,
-        .cameraPipPositionY
+        .cameraPipPositionY,
+        // Recording (Feature 2 + 4) mirrors the cross-device preferences.
+        // `recordingMicSource` is intentionally excluded — paths to specific
+        // accessories don't survive across devices and pinning AirPods on
+        // an iPhone shouldn't pin them on an iPad that doesn't see them.
+        .recordingQuality,
+        .recordingFramerate,
+        .recordingStabilization,
+        .recordingCountdown,
+        .recordingIndicator,
+        .recordingSaveToScriptFolder
     ]
 
     private static var observerToken: NSObjectProtocol?

@@ -73,6 +73,12 @@ final class CameraStore {
         qos: .userInitiated
     )
 
+    /// Read-only accessor for the session queue. Recording uses this to
+    /// add/remove its own inputs/outputs without racing the camera store's
+    /// own start/stop transitions. Marked `internal` so RecordingSession
+    /// can read it; the queue itself stays unique to the camera store.
+    nonisolated var _exposedSessionQueueRef: DispatchQueue { sessionQueue }
+
     /// Currently-attached camera input. `nil` until `start()` succeeds.
     nonisolated(unsafe) private var currentInput: AVCaptureDeviceInput?
 
