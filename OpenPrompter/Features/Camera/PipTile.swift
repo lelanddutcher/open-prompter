@@ -2,18 +2,23 @@
 //  PipTile.swift
 //  OpenPrompter
 //
-//  The draggable FaceTime-style camera tile that anchors to one of five
-//  positions on screen. Wraps `CameraPreview` and applies all the gestures
-//  documented in V2 Design 01 §"PiP tile behavior":
+//  The draggable FaceTime-style camera tile. As of the post-merge dogfooding
+//  pass, the tile is _free-positioned_ — there's no corner snapping. The user
+//  drops it wherever they want it, including the middle of the screen. The
+//  position survives across rotation and across paired devices via a pair of
+//  normalized 0..1 prefs (`cameraPipPositionX` / `cameraPipPositionY`).
 //
-//  - Drag → live tile follows finger; release snaps to nearest corner via
-//    `spring(response: 0.32, dampingFraction: 0.78)`.
+//  Gestures:
+//  - Drag → live tile follows finger; on release the tile stays exactly
+//    where the user dropped it. We clamp to safe-area bounds (top inset,
+//    bottom-chrome strip) so the tile can't be dragged under the controls.
 //  - Double-tap → cycle preset sizes (small / medium / large).
-//  - Two-finger swipe down → hide off-screen, leaving a 24×72pt chevron tab
-//    on the nearest edge. Tap chevron to restore.
+//  - Strong flick down → hide off-screen, leaving a 24×72pt chevron tab on
+//    the nearest screen edge. Tap chevron to restore at the previous
+//    position.
 //  - Single tap → reserved for the future "promote tile to full-frame"
-//    interaction (V2 Design 01 §"Gesture vocabulary"). Wired here as a
-//    `View.onTapGesture` slot so it's easy to extend.
+//    interaction. Wired here as a `View.onTapGesture` slot so it's easy
+//    to extend.
 //
 //  Reduce-Motion: every spring becomes an instant cut. The tile still moves;
 //  it just doesn't bounce.
@@ -23,11 +28,13 @@ import SwiftUI
 
 struct PipTile: View {
     @Bindable var store: CameraStore
-    /// Whether the user opted into the `pref.coachMarkCameraStyleShown`
-    /// banner — wired in by the parent so the chevron tab shows the right
-    /// affordance label on first restore.
     var horizontalMirror: Bool
     var verticalMirror: Bool
+    /// True when the prompter chrome (top bar + bottom controls) is on
+    /// screen. While the chrome is visible we reserve a strip at the bottom
+    /// for the controls so the tile can't be dragged under them. When the
+    /// chrome is hidden the safe area expands to the full viewport.
+    var chromeVisible: Bool
     /// Promotion handler — called when the user single-taps the tile. The
     /// parent flips the prompter into a "preview is full frame, text is in
     /// a bottom band" mode. Feature 1 ships the gesture and persists the
@@ -36,8 +43,13 @@ struct PipTile: View {
     var onPromote: (() -> Void)? = nil
 
     @State private var size: PipSize
-    @State private var corner: PipCorner
-    /// Live-drag offset relative to the snapped center. Reset on drag end.
+    /// Normalized 0..1 absolute position of the tile center. Persisted to
+    /// prefs on every release so the tile remembers where the user dropped
+    /// it across launches.
+    @State private var positionX: Double
+    @State private var positionY: Double
+    /// Live-drag offset applied during the drag gesture. Reset on drag end
+    /// (we fold it into `positionX/Y` at that point).
     @State private var dragOffset: CGSize = .zero
     /// True while the tile is hidden off-screen waiting for a chevron tap.
     /// Strong-flick-down sets this; chevron tap or VoiceOver action clears
@@ -49,21 +61,34 @@ struct PipTile: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion: Bool
 
+    /// Reserved bottom strip (in points) for the chrome controls when
+    /// `chromeVisible` is true. The bottom-bar controls live within this
+    /// region; clamping the tile out of it prevents a drag from parking
+    /// the preview behind the play/pause/speed rows.
+    private let bottomChromeReserve: CGFloat = 140
+    /// Padding kept clear at the top for the dynamic island / status bar.
+    private let topReserve: CGFloat = 8
+    /// Side padding so the tile breathes against the screen edge.
+    private let sidePadding: CGFloat = 12
+
     init(
         store: CameraStore,
         horizontalMirror: Bool,
         verticalMirror: Bool,
+        chromeVisible: Bool,
         onPromote: (() -> Void)? = nil
     ) {
         self.store = store
         self.horizontalMirror = horizontalMirror
         self.verticalMirror = verticalMirror
+        self.chromeVisible = chromeVisible
         self.onPromote = onPromote
         // Seed from prefs so re-entry into the prompter remembers the user's
-        // last-used corner and size. Falls back to medium / topCenter on
-        // first launch (per V2 Design 01 §"Default state").
+        // last drop point and size. Position falls back to the registered
+        // default (0.5, 0.22 — top-center, just under the front lens).
         _size = State(initialValue: PipSize(rawValue: Prefs.cameraPipSize) ?? .medium)
-        _corner = State(initialValue: PipCorner(rawValue: Prefs.cameraPipCornerLast) ?? .topCenter)
+        _positionX = State(initialValue: Prefs.cameraPipPositionX)
+        _positionY = State(initialValue: Prefs.cameraPipPositionY)
     }
 
     var body: some View {
@@ -72,7 +97,7 @@ struct PipTile: View {
                 if hidden {
                     chevronTab(in: geo.size)
                 } else {
-                    tileBody(in: geo.size)
+                    tileBody(in: geo.size, safeArea: geo.safeAreaInsets)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -80,12 +105,9 @@ struct PipTile: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("camera tile")
-        .accessibilityValue(Text("\(size.displayName), \(corner.displayName)"))
-        .accessibilityHint("double tap to swap sizes; long-press to swap front and rear")
+        .accessibilityValue(Text(size.displayName))
+        .accessibilityHint("double tap to swap sizes; drag to move")
         .accessibilityAction(named: "cycle size") { cycleSize() }
-        .accessibilityAction(named: "swap camera") {
-            Task { await store.swapCamera() }
-        }
         .accessibilityAction(named: hidden ? "show tile" : "hide tile") {
             if hidden { restoreTile() } else { hideTile() }
         }
@@ -94,12 +116,17 @@ struct PipTile: View {
     // MARK: - Sub-views
 
     @ViewBuilder
-    private func tileBody(in viewport: CGSize) -> some View {
+    private func tileBody(in viewport: CGSize, safeArea: EdgeInsets) -> some View {
         let dims = size.dimensions
-        let anchor = corner.center(in: viewport, tileSize: dims, inset: 12)
+        // Resolve the persisted normalized position to a viewport-space
+        // center, then clamp into the visible safe area before applying the
+        // live drag translation. Clamping the _persisted_ position rather
+        // than the post-translation position means the user can briefly
+        // overshoot during a drag; it snaps back to in-bounds on release.
+        let resolved = resolvedCenter(in: viewport, dims: dims, safeArea: safeArea)
         let tileCenter = CGPoint(
-            x: anchor.x + dragOffset.width,
-            y: anchor.y + dragOffset.height
+            x: resolved.x + dragOffset.width,
+            y: resolved.y + dragOffset.height
         )
 
         CameraPreview(
@@ -127,42 +154,40 @@ struct PipTile: View {
         // Single tap → promote (handled by parent). Currently `onPromote`
         // is unwired — Feature 2 adds the layout reorg that listens here.
         .onTapGesture(count: 1) { onPromote?() }
-        // Drag → live track + spring snap on release.
+        // Drag → live track + drop-and-stay on release. We do NOT spring
+        // back to a corner; the tile stays where the user lifted off.
         .gesture(
             DragGesture()
                 .onChanged { value in dragOffset = value.translation }
-                .onEnded { value in onDragEnded(value: value, in: viewport) }
+                .onEnded { value in
+                    onDragEnded(
+                        value: value,
+                        in: viewport,
+                        dims: dims,
+                        safeArea: safeArea
+                    )
+                }
         )
-        // Two-finger swipe down → hide. SwiftUI's two-finger pattern is a
-        // long-press on iOS isn't quite right for a swipe — we approximate
-        // with a magnify gesture that detects a meaningful downward motion
-        // via a simultaneous gesture. For Feature 1 we ship the simpler
-        // accessibility action ("hide tile") so the gesture is reachable
-        // even if the multi-touch path is fiddly to land. A follow-up can
-        // tighten the multi-touch handler.
     }
 
     private func chevronTab(in viewport: CGSize) -> some View {
-        // Chevron tab anchored on the nearest edge to the last position.
-        // Picking a side from the snapped corner: leading corners → leading
-        // edge; trailing or center corners → trailing edge so the user always
-        // has a discoverable affordance.
+        // Chevron tab anchored on the nearest screen edge to the tile's
+        // last x-coordinate. If the tile was on the left half of the
+        // viewport, surface the chevron on the leading edge; otherwise
+        // trailing.
         let dims = CGSize(width: 24, height: 72)
-        let trailing = corner == .topTrailing || corner == .bottomTrailing || corner == .topCenter
-        let x = trailing ? viewport.width - dims.width / 2 - 6 : dims.width / 2 + 6
-        // Vertical position roughly mirrors the corner the tile came from.
-        let y: CGFloat
-        switch corner {
-        case .topLeading, .topTrailing, .topCenter:
-            y = max(dims.height / 2 + 60, viewport.height * 0.3)
-        case .bottomLeading, .bottomTrailing:
-            y = min(viewport.height - dims.height / 2 - 60, viewport.height * 0.7)
-        }
+        let onTrailing = positionX >= 0.5
+        let x = onTrailing ? viewport.width - dims.width / 2 - 6 : dims.width / 2 + 6
+        // Vertical position mirrors the tile's last y, clamped to keep the
+        // chevron clear of the very top and bottom (where it would collide
+        // with chrome / the home indicator).
+        let rawY = CGFloat(positionY) * viewport.height
+        let y = max(dims.height / 2 + 60, min(viewport.height - dims.height / 2 - 60, rawY))
         return Button(action: restoreTile) {
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(Theme.surface)
                 .overlay(
-                    Image(systemName: trailing ? "chevron.left" : "chevron.right")
+                    Image(systemName: onTrailing ? "chevron.left" : "chevron.right")
                         .font(.system(size: 12, weight: .bold))
                         .foregroundStyle(Theme.fg)
                 )
@@ -176,25 +201,84 @@ struct PipTile: View {
         .accessibilityLabel("show camera tile")
     }
 
+    // MARK: - Position math
+
+    /// Resolve the persisted normalized `(positionX, positionY)` into a
+    /// viewport-space center, clamped to keep the tile inside the bounds
+    /// (top safe-area, bottom chrome strip, side padding). Pure and unit-
+    /// testable via the `clampedCenter(...)` static helper below.
+    private func resolvedCenter(
+        in viewport: CGSize,
+        dims: CGSize,
+        safeArea: EdgeInsets
+    ) -> CGPoint {
+        let raw = CGPoint(
+            x: CGFloat(positionX) * viewport.width,
+            y: CGFloat(positionY) * viewport.height
+        )
+        return Self.clampedCenter(
+            point: raw,
+            viewport: viewport,
+            tileSize: dims,
+            safeArea: safeArea,
+            chromeReserve: chromeVisible ? bottomChromeReserve : 0,
+            topReserve: topReserve,
+            sidePadding: sidePadding
+        )
+    }
+
+    /// Clamp a tile-center point to a rectangle that keeps the entire tile
+    /// inside the viewport, above the bottom-chrome reserve, and below the
+    /// top safe-area inset. Pure — no `self`, no captures, easy to test.
+    static func clampedCenter(
+        point: CGPoint,
+        viewport: CGSize,
+        tileSize: CGSize,
+        safeArea: EdgeInsets,
+        chromeReserve: CGFloat,
+        topReserve: CGFloat,
+        sidePadding: CGFloat
+    ) -> CGPoint {
+        let halfW = tileSize.width / 2
+        let halfH = tileSize.height / 2
+        let minX = sidePadding + halfW
+        let maxX = viewport.width - sidePadding - halfW
+        let minY = safeArea.top + topReserve + halfH
+        // The chrome reserve takes precedence over the bottom safe area
+        // when chrome is visible — we don't double-count the home indicator.
+        let bottomLimit = max(safeArea.bottom, chromeReserve)
+        let maxY = viewport.height - bottomLimit - 8 - halfH
+        // Guard against degenerate viewports (e.g. during a layout pass at
+        // launch where safe area hasn't settled yet) by collapsing to the
+        // center if minY > maxY.
+        let clampedX = max(minX, min(maxX, point.x))
+        let clampedY = minY <= maxY ? max(minY, min(maxY, point.y)) : viewport.height / 2
+        return CGPoint(x: clampedX, y: clampedY)
+    }
+
     // MARK: - Gesture handlers
 
-    private func onDragEnded(value: DragGesture.Value, in viewport: CGSize) {
-        let dims = size.dimensions
-        // The release point is the original anchor + the drag translation.
-        let anchor = corner.center(in: viewport, tileSize: dims, inset: 12)
+    private func onDragEnded(
+        value: DragGesture.Value,
+        in viewport: CGSize,
+        dims: CGSize,
+        safeArea: EdgeInsets
+    ) {
+        // The release point is the resolved (clamped) center plus the drag
+        // translation.
+        let resolved = resolvedCenter(in: viewport, dims: dims, safeArea: safeArea)
         let releasePoint = CGPoint(
-            x: anchor.x + value.translation.width,
-            y: anchor.y + value.translation.height
+            x: resolved.x + value.translation.width,
+            y: resolved.y + value.translation.height
         )
 
         // If the user flicked downward strongly, treat that as the
-        // "two-finger swipe down to hide" gesture — single finger reaches
-        // the same outcome. The threshold is intentionally aggressive to
-        // avoid stealing fast scroll attempts that happen to start on the
-        // tile: predicted end ≥ 70% of viewport height, AND actual
-        // translation ≥ 200pt (so the user clearly intended to throw the
-        // tile and didn't just accidentally swipe), AND the motion is more
-        // vertical than horizontal.
+        // "swipe down to hide" gesture. Threshold is intentionally
+        // aggressive to avoid stealing fast scroll attempts that happen to
+        // start on the tile: predicted end ≥ 70% of viewport height, AND
+        // actual translation ≥ 200pt (so the user clearly intended to
+        // throw the tile and didn't just accidentally swipe), AND the
+        // motion is more vertical than horizontal.
         let predicted = value.predictedEndTranslation
         let actual = value.translation
         if predicted.height > viewport.height * 0.7,
@@ -205,23 +289,25 @@ struct PipTile: View {
             return
         }
 
-        let nearest = PipCorner.nearestCorner(
-            to: releasePoint,
-            in: viewport,
-            tileSize: dims
+        // Drop and stay. Clamp the release point into the safe rectangle
+        // and persist it as a normalized 0..1 coordinate so it survives
+        // rotation and follows the user across paired devices.
+        let landing = Self.clampedCenter(
+            point: releasePoint,
+            viewport: viewport,
+            tileSize: dims,
+            safeArea: safeArea,
+            chromeReserve: chromeVisible ? bottomChromeReserve : 0,
+            topReserve: topReserve,
+            sidePadding: sidePadding
         )
-        if reduceMotion {
-            // Reduce-motion: instant cut to the nearest corner.
-            dragOffset = .zero
-            corner = nearest
-            persistCorner()
-        } else {
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
-                dragOffset = .zero
-                corner = nearest
-            }
-            persistCorner()
-        }
+        let nx = viewport.width > 0 ? Double(landing.x / viewport.width) : 0.5
+        let ny = viewport.height > 0 ? Double(landing.y / viewport.height) : 0.22
+        dragOffset = .zero
+        positionX = nx
+        positionY = ny
+        Prefs.cameraPipPositionX = nx
+        Prefs.cameraPipPositionY = ny
         Haptics.tap()
     }
 
@@ -254,9 +340,5 @@ struct PipTile: View {
             withAnimation(.easeInOut(duration: 0.22)) { hidden = false }
         }
         Haptics.tap()
-    }
-
-    private func persistCorner() {
-        Prefs.cameraPipCornerLast = corner.rawValue
     }
 }

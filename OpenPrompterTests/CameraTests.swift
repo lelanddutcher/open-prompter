@@ -3,11 +3,12 @@
 //  OpenPrompterTests
 //
 //  Unit tests for Camera Style + PiP (V2 Feature 1).
-//  Per the design doc test plan:
+//  After the post-merge dogfood pass:
 //    - CameraStyle round-trip codable
-//    - PipCorner.nearestCorner(to:in:) math
 //    - PipSize cycle order
-//    - CameraStore state transitions (off → pip → behind → off, denial path)
+//    - PipTile.clampedCenter math (free-position model — no corner snap)
+//    - CameraStore state transitions (off → pip → off, denial path,
+//      optimistic style update)
 //    - RecordingState flips tally light visibility
 //    - Persistence keys round-trip through UserDefaults
 //
@@ -18,6 +19,7 @@
 //
 
 import XCTest
+import SwiftUI
 @testable import OpenPrompter
 
 @MainActor
@@ -27,9 +29,9 @@ final class CameraTests: XCTestCase {
 
     private let cameraKeys: [String] = [
         PrefKey.cameraStyle.rawValue,
-        PrefKey.cameraFacingFront.rawValue,
         PrefKey.cameraPipSize.rawValue,
-        PrefKey.cameraPipCornerLast.rawValue,
+        PrefKey.cameraPipPositionX.rawValue,
+        PrefKey.cameraPipPositionY.rawValue,
         PrefKey.labsCameraStyle.rawValue,
         PrefKey.coachMarkCameraStyleShown.rawValue
     ]
@@ -93,75 +95,136 @@ final class CameraTests: XCTestCase {
         XCTAssertTrue(CameraStyle.behind.requiresCameraPermission)
     }
 
-    // MARK: - PipCorner snap-to-nearest
+    // MARK: - PipTile.clampedCenter (free-position math)
 
-    func testPipCornerNearestForObviousPositions() {
+    func testPipTileClampHonorsTopSafeArea() {
+        // A point near (0, 0) gets pulled DOWN to safeArea.top + topReserve
+        // + halfH so the tile doesn't slip under the dynamic island.
         let viewport = CGSize(width: 390, height: 844)
-        let tileSize = PipSize.medium.dimensions
+        let dims = CGSize(width: 130, height: 175)
+        let safeArea = EdgeInsets(top: 47, leading: 0, bottom: 34, trailing: 0)
 
-        // A point very near the top-leading corner should snap there.
-        let topLeading = CGPoint(x: 50, y: 50)
-        XCTAssertEqual(
-            PipCorner.nearestCorner(to: topLeading, in: viewport, tileSize: tileSize),
-            .topLeading
+        let result = PipTile.clampedCenter(
+            point: CGPoint(x: 200, y: 0),
+            viewport: viewport,
+            tileSize: dims,
+            safeArea: safeArea,
+            chromeReserve: 140,
+            topReserve: 8,
+            sidePadding: 12
         )
-
-        // A point near the top-trailing corner snaps there.
-        let topTrailing = CGPoint(x: viewport.width - 50, y: 50)
-        XCTAssertEqual(
-            PipCorner.nearestCorner(to: topTrailing, in: viewport, tileSize: tileSize),
-            .topTrailing
-        )
-
-        // A point near bottom-leading corner snaps there.
-        let bottomLeading = CGPoint(x: 50, y: viewport.height - 50)
-        XCTAssertEqual(
-            PipCorner.nearestCorner(to: bottomLeading, in: viewport, tileSize: tileSize),
-            .bottomLeading
-        )
-
-        // A point near bottom-trailing corner snaps there.
-        let bottomTrailing = CGPoint(x: viewport.width - 50, y: viewport.height - 50)
-        XCTAssertEqual(
-            PipCorner.nearestCorner(to: bottomTrailing, in: viewport, tileSize: tileSize),
-            .bottomTrailing
+        XCTAssertGreaterThanOrEqual(
+            result.y,
+            safeArea.top + 8 + dims.height / 2,
+            "Tile center must clear safeArea.top + topReserve + halfH."
         )
     }
 
-    func testPipCornerSnapsToTopCenter() {
-        // The top-center anchor is exactly horizontally centered along the
-        // top edge — a point released there should pick `.topCenter`.
+    func testPipTileClampHonorsBottomChromeStripWhenChromeVisible() {
+        // chromeReserve > safeArea.bottom — the chrome wins. Tile center
+        // must end up above viewport.height - chromeReserve - 8 - halfH.
         let viewport = CGSize(width: 390, height: 844)
-        let tileSize = PipSize.medium.dimensions
-        let anchor = PipCorner.topCenter.center(in: viewport, tileSize: tileSize, inset: 12)
+        let dims = CGSize(width: 130, height: 175)
+        let safeArea = EdgeInsets(top: 47, leading: 0, bottom: 34, trailing: 0)
 
-        XCTAssertEqual(
-            PipCorner.nearestCorner(to: anchor, in: viewport, tileSize: tileSize),
-            .topCenter
+        let result = PipTile.clampedCenter(
+            point: CGPoint(x: 200, y: viewport.height + 100),
+            viewport: viewport,
+            tileSize: dims,
+            safeArea: safeArea,
+            chromeReserve: 140,
+            topReserve: 8,
+            sidePadding: 12
+        )
+        let expectedMaxY = viewport.height - 140 - 8 - dims.height / 2
+        XCTAssertLessThanOrEqual(
+            result.y,
+            expectedMaxY + 0.001,
+            "Tile center must stay above the chrome reserve when chrome visible."
         )
     }
 
-    func testPipCornerCenterRespectsInsetAndTileSize() {
-        let viewport = CGSize(width: 400, height: 800)
-        let tileSize = CGSize(width: 100, height: 100)
-        let inset: CGFloat = 16
+    func testPipTileClampReleasesBottomReserveWhenChromeHidden() {
+        // chromeReserve == 0 (chrome hidden via tap-to-focus). The tile
+        // can land within the home-indicator safe-area bottom but no
+        // further than viewport.height - safeArea.bottom - 8 - halfH.
+        let viewport = CGSize(width: 390, height: 844)
+        let dims = CGSize(width: 130, height: 175)
+        let safeArea = EdgeInsets(top: 47, leading: 0, bottom: 34, trailing: 0)
 
-        let topLeading = PipCorner.topLeading.center(
-            in: viewport,
-            tileSize: tileSize,
-            inset: inset
+        let result = PipTile.clampedCenter(
+            point: CGPoint(x: 200, y: viewport.height + 100),
+            viewport: viewport,
+            tileSize: dims,
+            safeArea: safeArea,
+            chromeReserve: 0,
+            topReserve: 8,
+            sidePadding: 12
         )
-        // Anchor for top-leading should be (inset + halfW, inset + halfH).
-        XCTAssertEqual(topLeading.x, inset + 50, accuracy: 0.001)
-        XCTAssertEqual(topLeading.y, inset + 50, accuracy: 0.001)
+        let expectedMaxY = viewport.height - safeArea.bottom - 8 - dims.height / 2
+        XCTAssertLessThanOrEqual(
+            result.y,
+            expectedMaxY + 0.001,
+            "Tile center must clear the bottom safe area when chrome hidden."
+        )
+        // And it must be _below_ the chrome-visible limit because we
+        // released that reserve.
+        let chromeLimit = viewport.height - 140 - 8 - dims.height / 2
+        XCTAssertGreaterThan(
+            result.y,
+            chromeLimit,
+            "Hidden-chrome clamp should reach further down than chrome-visible clamp."
+        )
+    }
 
-        let bottomTrailing = PipCorner.bottomTrailing.center(
-            in: viewport,
-            tileSize: tileSize,
-            inset: inset
+    func testPipTileClampHonorsSidePadding() {
+        let viewport = CGSize(width: 390, height: 844)
+        let dims = CGSize(width: 130, height: 175)
+        let safeArea = EdgeInsets()
+
+        // Far-left release.
+        let left = PipTile.clampedCenter(
+            point: CGPoint(x: -50, y: 400),
+            viewport: viewport,
+            tileSize: dims,
+            safeArea: safeArea,
+            chromeReserve: 0,
+            topReserve: 8,
+            sidePadding: 12
         )
-        XCTAssertEqual(bottomTrailing.x, viewport.width - inset - 50, accuracy: 0.001)
-        XCTAssertEqual(bottomTrailing.y, viewport.height - inset - 50, accuracy: 0.001)
+        XCTAssertEqual(left.x, 12 + dims.width / 2, accuracy: 0.001)
+
+        // Far-right release.
+        let right = PipTile.clampedCenter(
+            point: CGPoint(x: 1000, y: 400),
+            viewport: viewport,
+            tileSize: dims,
+            safeArea: safeArea,
+            chromeReserve: 0,
+            topReserve: 8,
+            sidePadding: 12
+        )
+        XCTAssertEqual(right.x, viewport.width - 12 - dims.width / 2, accuracy: 0.001)
+    }
+
+    func testPipTileClampPassesInBoundsPointThrough() {
+        // A point well inside the safe rectangle should not be moved.
+        let viewport = CGSize(width: 390, height: 844)
+        let dims = CGSize(width: 130, height: 175)
+        let safeArea = EdgeInsets(top: 47, leading: 0, bottom: 34, trailing: 0)
+
+        let inside = CGPoint(x: 195, y: 400)
+        let result = PipTile.clampedCenter(
+            point: inside,
+            viewport: viewport,
+            tileSize: dims,
+            safeArea: safeArea,
+            chromeReserve: 140,
+            topReserve: 8,
+            sidePadding: 12
+        )
+        XCTAssertEqual(result.x, inside.x, accuracy: 0.001)
+        XCTAssertEqual(result.y, inside.y, accuracy: 0.001)
     }
 
     // MARK: - PipSize
@@ -192,11 +255,8 @@ final class CameraTests: XCTestCase {
 
     func testStoreSeedsFromPrefs() {
         UserDefaults.standard.set("pip", forKey: PrefKey.cameraStyle.rawValue)
-        UserDefaults.standard.set(false, forKey: PrefKey.cameraFacingFront.rawValue)
-
         let store = CameraStore(suppressDeviceWork: true)
         XCTAssertEqual(store.style, .pip)
-        XCTAssertFalse(store.facingFront)
     }
 
     func testStoreFallsBackToOffOnUnknownPrefValue() {
@@ -221,19 +281,37 @@ final class CameraTests: XCTestCase {
         XCTAssertEqual(store.style, .off)
     }
 
-    func testStoreSwapCameraTogglesPersistedFacing() async {
+    func testStoreOptimisticStyleFlipToOffIsImmediate() async {
+        // Seed with .pip in prefs, then ask the store to flip to .off.
+        // The .off transition has no permission gate so the style should
+        // update synchronously before stop() returns. We assert via the
+        // public API after the await — the optimistic write is observable
+        // here (and crucially, in production SwiftUI sees it the moment
+        // setStyle yields).
+        UserDefaults.standard.set("pip", forKey: PrefKey.cameraStyle.rawValue)
         let store = CameraStore(suppressDeviceWork: true)
-        let startFront = store.facingFront
+        XCTAssertEqual(store.style, .pip)
 
-        await store.swapCamera()
+        await store.setStyle(.off)
+        XCTAssertEqual(store.style, .off,
+                       "setStyle(.off) must flip style immediately.")
+        XCTAssertEqual(Prefs.cameraStyle, "off",
+                       "Persistence must reflect the optimistic flip.")
+    }
 
-        XCTAssertNotEqual(store.facingFront, startFront,
-                          "swapCamera() must invert facingFront.")
-        XCTAssertEqual(
-            UserDefaults.standard.bool(forKey: PrefKey.cameraFacingFront.rawValue),
-            store.facingFront,
-            "swapCamera() must persist the new facing immediately."
-        )
+    func testStoreRapidToggleDoesNotDoubleStart() async {
+        // The session has its own `if !session.isRunning` guard so calling
+        // start() twice in quick succession is a no-op. Suppressed device
+        // work has the same idempotency on `isSessionRunning`.
+        let store = CameraStore(suppressDeviceWork: true)
+        // Force "authorized" by skipping the request path; we can't flip
+        // the system status from a unit test, so this only exercises the
+        // off-path transitions here. The real-camera idempotency check
+        // lives in the production guard on session.isRunning.
+        await store.setStyle(.off) // no-op (already off)
+        await store.setStyle(.off) // no-op (already off)
+        XCTAssertEqual(store.style, .off)
+        XCTAssertFalse(store.isSessionRunning)
     }
 
     func testStoreDeniedPathReturnsToOff() async {
@@ -273,11 +351,11 @@ final class CameraTests: XCTestCase {
     func testPrefDefaultsMatchSpec() {
         XCTAssertEqual(PrefKey.cameraStyle.defaultValue as? String, "off",
                        "First-run default must be off (privacy-respecting).")
-        XCTAssertEqual(PrefKey.cameraFacingFront.defaultValue as? Bool, true,
-                       "Front camera default — selfie creators are the larger audience.")
         XCTAssertEqual(PrefKey.cameraPipSize.defaultValue as? String, "medium")
-        XCTAssertEqual(PrefKey.cameraPipCornerLast.defaultValue as? String, "topCenter",
-                       "Top-center anchor minimizes eye-line drift at arm's length.")
+        XCTAssertEqual(PrefKey.cameraPipPositionX.defaultValue as? Double, 0.5,
+                       "Default X is horizontally centered.")
+        XCTAssertEqual(PrefKey.cameraPipPositionY.defaultValue as? Double, 0.22,
+                       "Default Y sits roughly under the front lens.")
         XCTAssertEqual(PrefKey.coachMarkCameraStyleShown.defaultValue as? Bool, false,
                        "Coach-mark must default unseen so first-run banner can fire.")
     }
@@ -285,11 +363,11 @@ final class CameraTests: XCTestCase {
     func testPrefAccessorsRoundTrip() {
         Prefs.cameraStyle = "pip"
         XCTAssertEqual(Prefs.cameraStyle, "pip")
-        Prefs.cameraFacingFront = false
-        XCTAssertFalse(Prefs.cameraFacingFront)
         Prefs.cameraPipSize = "large"
         XCTAssertEqual(Prefs.cameraPipSize, "large")
-        Prefs.cameraPipCornerLast = "bottomTrailing"
-        XCTAssertEqual(Prefs.cameraPipCornerLast, "bottomTrailing")
+        Prefs.cameraPipPositionX = 0.33
+        XCTAssertEqual(Prefs.cameraPipPositionX, 0.33, accuracy: 0.001)
+        Prefs.cameraPipPositionY = 0.66
+        XCTAssertEqual(Prefs.cameraPipPositionY, 0.66, accuracy: 0.001)
     }
 }

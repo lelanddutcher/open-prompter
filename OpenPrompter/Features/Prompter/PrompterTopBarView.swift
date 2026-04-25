@@ -64,7 +64,14 @@ struct PrompterTopBarView: View {
 
             Spacer(minLength: 6)
 
-            Button(action: { showEditor = true }) {
+            Button(action: {
+                // Pause first if the prompter is mid-take so the script
+                // doesn't keep scrolling behind the editor sheet. We don't
+                // auto-resume on dismiss — the user can reach for play
+                // intentionally when they're ready.
+                if vm.isPlaying { vm.togglePlay() }
+                showEditor = true
+            }) {
                 // 44pt outer hit target; inner capsule stays compact.
                 Image(systemName: "pencil")
                     .font(.system(size: 13, weight: .bold))

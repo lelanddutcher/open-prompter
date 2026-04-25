@@ -146,17 +146,20 @@ struct TeleprompterView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // PiP tile floats above the text but below the chrome. Disabled
-        // for `.behind` (preview is the backdrop) and `.off` (no session).
+        // PiP tile floats above the text and is _independent_ of the
+        // chrome-hide state — when the user taps to hide the chrome they
+        // still want to see themselves on camera. (The user explicitly
+        // asked to defer the lower-opacity-when-recording variant until
+        // Feature 2 lands recording.) Disabled for `.behind` (preview is
+        // the backdrop) and `.off` (no session).
         .overlay {
             if cameraStyle == .pip {
                 PipTile(
                     store: appState.cameraStore,
                     horizontalMirror: vm.mirroredHorizontal,
-                    verticalMirror: vm.mirroredVertical
+                    verticalMirror: vm.mirroredVertical,
+                    chromeVisible: !vm.focus
                 )
-                .opacity(vm.focus ? 0.0 : 1.0)
-                .animation(.easeInOut(duration: Theme.focusAnim), value: vm.focus)
                 .transition(.opacity)
             }
         }
@@ -170,7 +173,9 @@ struct TeleprompterView: View {
                     cameraIntroBanner
                 }
             }
-            .padding(.top, 4)
+            // No extra top padding — sit flush with the safe-area inset so
+            // the reading line falls under the front-camera lens (the user
+            // wanted the script raised toward eye-level).
             .opacity(vm.focus ? 0.0 : 1.0)
             .allowsHitTesting(!vm.focus)
             .animation(.easeInOut(duration: Theme.focusAnim), value: vm.focus)

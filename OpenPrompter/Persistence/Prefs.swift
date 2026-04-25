@@ -49,15 +49,18 @@ enum PrefKey: String, CaseIterable {
     /// First-run default: `"off"` — privacy-respecting, no surprise camera
     /// permission prompt on first prompter open after the v2 update.
     case cameraStyle = "pref.camera.style"
-    /// Front (true) or rear (false) camera. Default front; selfie creators
-    /// are the larger audience.
-    case cameraFacingFront = "pref.camera.facingFront"
     /// Last-used PiP tile size. Persisted between launches.
     case cameraPipSize = "pref.camera.pipSize"
-    /// Last corner the user dropped the PiP tile into. Defaults to
-    /// `"topCenter"` — at arm's length, top-center keeps eye-line nearest
-    /// the front lens (V2 Design 01 §"PiP tile behavior").
-    case cameraPipCornerLast = "pref.camera.pipCornerLast"
+    /// Last absolute X position of the PiP tile, normalized 0..1 across the
+    /// viewport's width. The tile is placed wherever the user dropped it —
+    /// no corner snapping. Default `0.5` (horizontally centered) — pairs
+    /// with `cameraPipPositionY` `~0.22` to put the tile under the front
+    /// camera lens for natural eye-line.
+    case cameraPipPositionX = "pref.camera.pipPositionX"
+    /// Last absolute Y position of the PiP tile, normalized 0..1 across the
+    /// viewport's height. Default `0.22` — roughly under the dynamic
+    /// island / lens. Clamped to safe areas at runtime.
+    case cameraPipPositionY = "pref.camera.pipPositionY"
     /// Labs feature flag for Camera Style. Defaults ON in DEBUG, OFF in
     /// Release until the feature graduates from Labs.
     case labsCameraStyle = "labs.cameraStyle"
@@ -93,9 +96,9 @@ enum PrefKey: String, CaseIterable {
             return false
             #endif
         case .cameraStyle:           return "off"
-        case .cameraFacingFront:     return true
         case .cameraPipSize:         return "medium"
-        case .cameraPipCornerLast:   return "topCenter"
+        case .cameraPipPositionX:    return 0.5
+        case .cameraPipPositionY:    return 0.22
         case .labsCameraStyle:
             #if DEBUG
             return true
@@ -273,22 +276,26 @@ enum Prefs {
         set { defaults.set(newValue, forKey: PrefKey.cameraStyle.rawValue) }
     }
 
-    static var cameraFacingFront: Bool {
-        get { defaults.bool(forKey: PrefKey.cameraFacingFront.rawValue) }
-        set { defaults.set(newValue, forKey: PrefKey.cameraFacingFront.rawValue) }
-    }
-
     /// Raw string of `PipSize`. Default `"medium"`.
     static var cameraPipSize: String {
         get { defaults.string(forKey: PrefKey.cameraPipSize.rawValue) ?? "medium" }
         set { defaults.set(newValue, forKey: PrefKey.cameraPipSize.rawValue) }
     }
 
-    /// Raw string of `PipCorner`. Default `"topCenter"` — see
-    /// `V2 Design 01 — Camera Style + PiP.md` for the eye-line rationale.
-    static var cameraPipCornerLast: String {
-        get { defaults.string(forKey: PrefKey.cameraPipCornerLast.rawValue) ?? "topCenter" }
-        set { defaults.set(newValue, forKey: PrefKey.cameraPipCornerLast.rawValue) }
+    /// Normalized 0..1 X coordinate of the last drop point. The PiP tile is
+    /// placed wherever the user released it; the runtime clamps to keep the
+    /// tile within safe areas (top inset, bottom chrome strip).
+    static var cameraPipPositionX: Double {
+        get { defaults.double(forKey: PrefKey.cameraPipPositionX.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.cameraPipPositionX.rawValue) }
+    }
+
+    /// Normalized 0..1 Y coordinate of the last drop point. Default 0.22 —
+    /// just under the front-camera lens / dynamic island so first launches
+    /// put the eye-line where the user is already looking.
+    static var cameraPipPositionY: Double {
+        get { defaults.double(forKey: PrefKey.cameraPipPositionY.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.cameraPipPositionY.rawValue) }
     }
 
     static var labsCameraStyle: Bool {

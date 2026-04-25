@@ -3,7 +3,10 @@
 //  OpenPrompter
 //
 //  Bottom-bar pill that cycles between camera composition modes. Tap goes
-//  off → pip → behind → off; long-press swaps front/rear (no-op in `.off`).
+//  off → pip → behind → off. The chip is selfie-only — the front/rear long-
+//  press was dropped in the post-merge dogfooding pass; selfie creators are
+//  the dominant audience and the swap was confusing on-device.
+//
 //  Style follows the existing prompter chip language (Surface bg + hairline
 //  border, lowercase mono label, 44pt hit target).
 //
@@ -19,7 +22,9 @@ struct CameraStyleChip: View {
     var body: some View {
         Button {
             // Cycle styles. The store handles the permission gating and
-            // the "snap back to off" path on denial.
+            // the "snap back to off" path on denial. Style flips
+            // optimistically so the chip label updates instantly even
+            // before the AVCaptureSession finishes starting.
             Task {
                 await store.setStyle(store.style.nextStyle)
                 Haptics.tap()
@@ -40,18 +45,6 @@ struct CameraStyleChip: View {
             .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
             .contentShape(Capsule())
         }
-        // Long-press cycles front/rear without moving styles. Confirms with
-        // a medium-impact haptic so the user feels the swap distinct from a
-        // short-tap cycle.
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.5)
-                .onEnded { _ in
-                    Task {
-                        await store.swapCamera()
-                        Haptics.tap(.medium)
-                    }
-                }
-        )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("camera style")
         .accessibilityValue(Text(store.style.settingsDisplayName))

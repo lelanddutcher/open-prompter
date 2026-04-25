@@ -31,10 +31,12 @@ enum UbiquitousPrefsMirror {
         // mark stay device-local: a flag that's on for one device shouldn't
         // light up an unprepared sibling, and "I've seen this banner once"
         // is per-device per existing pattern (see coachMarkPlayShown etc.).
+        // PiP tile position mirrors so the user's preferred eye-line spot
+        // travels with them across paired devices.
         .cameraStyle,
-        .cameraFacingFront,
         .cameraPipSize,
-        .cameraPipCornerLast
+        .cameraPipPositionX,
+        .cameraPipPositionY
     ]
 
     private static var observerToken: NSObjectProtocol?

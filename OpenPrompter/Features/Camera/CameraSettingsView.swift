@@ -9,6 +9,10 @@
 //  non-`.off` mode. This keeps the setting hidden from users who never opted
 //  in until they do, but doesn't strand a setting they're already using.
 //
+//  After the post-merge dogfood pass we dropped two pickers:
+//  - "default camera" (front/rear) — the camera is now selfie-only
+//  - "pip starting corner" — the tile is free-positioned; corners gone
+//
 
 import SwiftUI
 
@@ -16,9 +20,7 @@ struct CameraSettingsView: View {
     // @AppStorage so the pickers self-heal when the user touches the same
     // prefs from outside Settings (e.g. via the chip in the prompter).
     @AppStorage(PrefKey.cameraStyle.rawValue) private var styleRaw: String = "off"
-    @AppStorage(PrefKey.cameraFacingFront.rawValue) private var facingFront: Bool = true
     @AppStorage(PrefKey.cameraPipSize.rawValue) private var pipSizeRaw: String = "medium"
-    @AppStorage(PrefKey.cameraPipCornerLast.rawValue) private var pipCornerRaw: String = "topCenter"
 
     /// Recording-state model. Optional — Settings doesn't need a real
     /// `RecordingState` to render the toggle UI; callers wire the actual
@@ -46,26 +48,13 @@ struct CameraSettingsView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.dim)
 
-                Picker("default camera", selection: $facingFront) {
-                    Text("front").tag(true)
-                    Text("rear").tag(false)
-                }
-                .pickerStyle(.menu)
-
                 Picker("pip starting size", selection: $pipSizeRaw) {
                     ForEach(PipSize.allCases, id: \.rawValue) { size in
                         Text(size.displayName).tag(size.rawValue)
                     }
                 }
                 .pickerStyle(.menu)
-
-                Picker("pip starting corner", selection: $pipCornerRaw) {
-                    ForEach(PipCorner.allCases, id: \.rawValue) { corner in
-                        Text(corner.displayName).tag(corner.rawValue)
-                    }
-                }
-                .pickerStyle(.menu)
-                Text("the tile remembers wherever you last dropped it; this is the first-launch default.")
+                Text("the tile remembers wherever you last dropped it on screen.")
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.dim)
 

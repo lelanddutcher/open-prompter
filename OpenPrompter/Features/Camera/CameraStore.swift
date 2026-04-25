@@ -2,9 +2,10 @@
 //  CameraStore.swift
 //  OpenPrompter
 //
-//  Owner of the AVCaptureSession. Knows the user's chosen `CameraStyle`,
-//  whether the front or rear camera is selected, and the camera permission
-//  status. Lifecycle:
+//  Owner of the AVCaptureSession. Knows the user's chosen `CameraStyle` and
+//  the camera permission status. Camera position is hardcoded to `.front` —
+//  selfie creators are the dominant audience and the rear-camera affordance
+//  was confusing enough that we dropped it. Lifecycle:
 //
 //  - `style != .off` AND permission granted  → session running
 //  - `style == .off` OR permission denied    → session stopped, `style` snaps
@@ -41,11 +42,6 @@ final class CameraStore {
     /// every paired prompter open in the user's session re-loads it.
     private(set) var style: CameraStyle
 
-    /// Front (true) or rear (false) camera. Persisted to
-    /// `Prefs.cameraFacingFront`. Defaults to front — selfie creators are
-    /// the dominant audience.
-    private(set) var facingFront: Bool
-
     /// Last known authorization status. Refreshed on `requestAccessIfNeeded()`
     /// and via the AVFoundation observer on init. SwiftUI reads through this
     /// to decide whether to show the banner or the live preview.
@@ -77,8 +73,7 @@ final class CameraStore {
         qos: .userInitiated
     )
 
-    /// Currently-attached camera input (so we can swap it on facingFront flip
-    /// without rebuilding the whole session). `nil` until `start()` succeeds.
+    /// Currently-attached camera input. `nil` until `start()` succeeds.
     nonisolated(unsafe) private var currentInput: AVCaptureDeviceInput?
 
     /// Set by tests to skip the actual AVCaptureSession plumbing. Production
@@ -95,7 +90,6 @@ final class CameraStore {
         // (downgrade scenario), fall back to `.off` rather than crashing.
         let raw = Prefs.cameraStyle
         self.style = CameraStyle(rawValue: raw) ?? .off
-        self.facingFront = Prefs.cameraFacingFront
         self.authorization = AVCaptureDevice.authorizationStatus(for: .video)
     }
 
@@ -104,13 +98,23 @@ final class CameraStore {
     /// User-initiated mode change from the chip or Settings. Triggers the
     /// permission prompt the first time we move to a non-`.off` mode. On
     /// denial, snaps back to `.off` and sets `pendingPermissionDeniedBanner`.
+    ///
+    /// We update `style` _optimistically_ — the moment we know we'll keep
+    /// the new mode (permission was already granted, or we're heading to
+    /// `.off`), so SwiftUI can re-render the chip/tile immediately. The
+    /// blocking AVFoundation start happens on `sessionQueue` after the
+    /// state flip, so the preview catches up while the chip already looks
+    /// correct. Without this, the chip froze for 2-3s whenever the user
+    /// re-enabled the camera (the dogfood report that triggered the fix).
     func setStyle(_ new: CameraStyle) async {
         guard new != style else { return }
 
         if new == .off {
-            await stop()
+            // Flip the UI state first — there's no permission gate to wait
+            // on, and the user wants the chip to show "off" instantly.
             style = .off
             persistStyle()
+            await stop()
             return
         }
 
@@ -118,29 +122,19 @@ final class CameraStore {
         let granted = await requestAccessIfNeeded()
         guard granted else {
             // Snap back to off; surface a one-shot banner for the UI to read.
-            style = .off
+            if style != .off { style = .off }
             persistStyle()
             pendingPermissionDeniedBanner = true
             await stop()
             return
         }
+        // Optimistic update: flip `style` before awaiting the session start.
+        // The PiP tile renders the moment SwiftUI reads `style == .pip`,
+        // even if the first preview frame hasn't arrived. The user sees the
+        // tile instantly with a black preview that fills in shortly after.
         style = new
         persistStyle()
         await start()
-    }
-
-    /// Long-press chip gesture: front ↔ rear. No-op in `.off` because there
-    /// is no live session to swap inputs on. Persists the new facing.
-    func swapCamera() async {
-        guard style != .off else {
-            // Just persist the choice so re-entering pip uses the new camera.
-            facingFront.toggle()
-            Prefs.cameraFacingFront = facingFront
-            return
-        }
-        facingFront.toggle()
-        Prefs.cameraFacingFront = facingFront
-        await reconfigureInput()
     }
 
     /// Resume session if we should be running (mode != off, permission granted).
@@ -198,24 +192,19 @@ final class CameraStore {
 
     // MARK: - AVCaptureSession plumbing
 
-    /// Configure inputs (front or rear camera) and start the session. The
-    /// blocking `startRunning()` runs on `sessionQueue`; we await its completion
-    /// so the @MainActor caller can flip UI state once the session is live.
-    ///
-    /// `facingFront` is read once on the main actor before we hop to the
-    /// session queue. Earlier versions of this code reached back to main
-    /// via `DispatchQueue.main.sync` from inside the queue block, which is
-    /// a latent deadlock if anything ever dispatches main → sessionQueue
-    /// synchronously. Pre-snapshotting closes that hole.
+    /// Configure inputs (front camera) and start the session. The blocking
+    /// `startRunning()` runs on `sessionQueue`; we await its completion so
+    /// the @MainActor caller can flip UI state once the session is live.
+    /// `start()` is idempotent — re-entry while the session is already
+    /// running is a no-op (`if !session.isRunning`).
     private func start() async {
         if suppressDeviceWork {
             isSessionRunning = true
             return
         }
-        let position: AVCaptureDevice.Position = facingFront ? .front : .back
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             sessionQueue.async {
-                self.configureInputsLocked(position: position)
+                self.configureInputsLocked()
                 if !self.session.isRunning {
                     self.session.startRunning()
                 }
@@ -254,41 +243,16 @@ final class CameraStore {
         }
     }
 
-    /// Swap the camera input without tearing down the whole session — used
-    /// by long-press to flip front/rear. `facingFront` is snapshotted on
-    /// the main actor before hopping to `sessionQueue`, same pattern as
-    /// `start()`.
-    private func reconfigureInput() async {
-        if suppressDeviceWork { return }
-        let position: AVCaptureDevice.Position = facingFront ? .front : .back
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            sessionQueue.async {
-                self.session.beginConfiguration()
-                if let existing = self.currentInput {
-                    self.session.removeInput(existing)
-                    self.currentInput = nil
-                }
-                self.configureInputsLocked(position: position)
-                self.session.commitConfiguration()
-                continuation.resume()
-            }
-        }
-    }
-
-    /// Build and attach the camera input for the supplied position. Must
-    /// be called inside a `beginConfiguration` block (or equivalent —
-    /// `start()` and `reconfigureInput()` both set up configuration
-    /// brackets around the call).
-    ///
-    /// `position` is supplied by the caller (snapshotted on the main actor
-    /// before the queue hop) so this function does no actor-crossing work
-    /// of its own — eliminating any chance of a main-thread deadlock from
-    /// inside the session queue.
-    nonisolated private func configureInputsLocked(position: AVCaptureDevice.Position) {
+    /// Build and attach the front-camera input. Must be called inside a
+    /// `beginConfiguration` block (or equivalent — `start()` and the
+    /// reconfigure path both set up configuration brackets around the call).
+    /// Position is hardcoded `.front` — the rear camera affordance was
+    /// dropped in the post-merge dogfooding pass.
+    nonisolated private func configureInputsLocked() {
         guard let device = AVCaptureDevice.default(
             .builtInWideAngleCamera,
             for: .video,
-            position: position
+            position: .front
         ) else {
             return
         }
