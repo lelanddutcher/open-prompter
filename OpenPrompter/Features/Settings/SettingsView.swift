@@ -29,6 +29,16 @@ struct SettingsView: View {
         return false
         #endif
     }()
+    @AppStorage(PrefKey.labsCameraStyle.rawValue) private var labsCameraStyle: Bool = {
+        #if DEBUG
+        return true
+        #else
+        return false
+        #endif
+    }()
+    /// Read live so the camera section can decide whether to render once
+    /// the user has picked a non-`.off` mode (regardless of the Labs flag).
+    @AppStorage(PrefKey.cameraStyle.rawValue) private var cameraStyleRaw: String = "off"
 
     var body: some View {
         NavigationStack {
@@ -119,6 +129,15 @@ struct SettingsView: View {
                         .foregroundStyle(Theme.dim)
                 }
 
+                // Camera Style + PiP (V2 Feature 1). Hidden from users who
+                // never opted in — visible when EITHER the Labs flag is on
+                // OR the user already picked a non-`.off` style. That way a
+                // user who turned on PiP via the chip never loses the
+                // settings entry, even if a future build flips Labs off.
+                if labsCameraStyle || cameraStyleRaw != "off" {
+                    CameraSettingsView(recordingState: appState.recordingState)
+                }
+
                 // Remote Control (Feature 7). Behind the labs flag — shipped
                 // off by default in Release until the feature graduates from
                 // Labs. The whole subview lives in RemoteControlSettingsView.
@@ -150,6 +169,11 @@ struct SettingsView: View {
                 Section("labs") {
                     Toggle("bluetooth remote", isOn: $labsBluetoothRemote)
                     Text("in-progress: keyboard, presenter, and media-key control with user-remappable bindings. surface a remote control section above when on.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.dim)
+
+                    Toggle("camera style", isOn: $labsCameraStyle)
+                    Text("in-progress: three-mode camera composition picker (off, picture-in-picture, behind text) with a draggable corner-snapping pip tile. surface a camera section above when on.")
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.dim)
                 }

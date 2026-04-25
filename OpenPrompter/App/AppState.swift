@@ -47,6 +47,20 @@ final class AppState {
     /// (future) prompter top-bar chip.
     let keyboardMonitor = KeyboardConnectionMonitor()
 
+    // MARK: - Camera (V2 Feature 1)
+
+    /// App-wide camera owner. The prompter view binds this to the chip,
+    /// the preview, and the PiP tile. Lives on AppState (not on the
+    /// per-VM PrompterViewModel) so the AVCaptureSession lifecycle survives
+    /// the prompter open/close cycle and so Settings can render a section
+    /// for camera prefs without a live prompter.
+    let cameraStore = CameraStore()
+
+    /// Recording-state flag (V2 Design 01 §"Tally-light border indicator").
+    /// Feature 1 only flips this via the Labs debug toggle for design
+    /// validation. Feature 2 will wire the real recording controller.
+    let recordingState = RecordingState()
+
     // MARK: - Banner
 
     enum BannerKind: Equatable {

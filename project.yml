@@ -63,6 +63,7 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         NSDocumentsFolderUsageDescription: "Open Prompter reads the markdown files in the folder you pick so they can appear as teleprompter scripts."
+        NSCameraUsageDescription: "Open Prompter shows your camera in a small tile or behind the script while you read. Camera footage is never recorded unless you press record."
         ITSAppUsesNonExemptEncryption: false
         UIAppFonts:
           - AtkinsonHyperlegible-Regular.ttf

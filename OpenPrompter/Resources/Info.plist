@@ -19,15 +19,24 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Open Prompter shows your camera in a small tile or behind the script while you read. Camera footage is never recorded unless you press record.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
 	<string>Open Prompter reads the markdown files in the folder you pick so they can appear as teleprompter scripts.</string>
+	<key>UIAppFonts</key>
+	<array>
+		<string>AtkinsonHyperlegible-Regular.ttf</string>
+		<string>AtkinsonHyperlegible-Bold.ttf</string>
+		<string>Lexend-Regular.ttf</string>
+		<string>Lexend-Bold.ttf</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -51,13 +60,6 @@
 		<string>UIInterfaceOrientationPortrait</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
-	</array>
-	<key>UIAppFonts</key>
-	<array>
-		<string>AtkinsonHyperlegible-Regular.ttf</string>
-		<string>AtkinsonHyperlegible-Bold.ttf</string>
-		<string>Lexend-Regular.ttf</string>
-		<string>Lexend-Bold.ttf</string>
 	</array>
 </dict>
 </plist>

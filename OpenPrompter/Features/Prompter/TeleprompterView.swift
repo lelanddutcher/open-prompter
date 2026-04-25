@@ -12,6 +12,8 @@ import SwiftUI
 
 struct TeleprompterView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var vm: PrompterViewModel
     @State private var changeWatcher: Task<Void, Never>? = nil
 
@@ -34,6 +36,14 @@ struct TeleprompterView: View {
     @AppStorage(PrefKey.remoteEnabled.rawValue) private var remoteEnabled: Bool = true
     @AppStorage(PrefKey.useVolumeButtons.rawValue) private var useVolumeButtons: Bool = false
 
+    // Camera Style + PiP (V2 Feature 1). Read live so the camera section
+    // applies to the open prompter view. The store on AppState owns the
+    // session — these flags drive overlay composition.
+    @AppStorage(PrefKey.cameraStyle.rawValue) private var cameraStyleRaw: String = "off"
+    @AppStorage(PrefKey.coachMarkCameraStyleShown.rawValue) private var coachMarkShown: Bool = false
+    @State private var showCameraDeniedBanner: Bool = false
+    @State private var showCameraIntroBanner: Bool = false
+
     // Prompter font pref is read live via @AppStorage so picker changes in
     // Settings propagate instantly — even to an already-open prompter view.
     // Stored VM state would go stale because Settings is presented modally
@@ -43,13 +53,46 @@ struct TeleprompterView: View {
         PrompterFont(rawValue: prompterFontRaw) ?? .default
     }
 
+    /// Resolved enum from the @AppStorage raw string. Falls back to `.off`
+    /// for an unknown value (downgrade safety).
+    private var cameraStyle: CameraStyle {
+        CameraStyle(rawValue: cameraStyleRaw) ?? .off
+    }
+
     init(file: ScriptFile) {
         _vm = State(initialValue: PrompterViewModel(file: file))
     }
 
     var body: some View {
         ZStack {
-            Theme.bg.ignoresSafeArea()
+            // Backdrop. In `.behind` mode the camera fills the screen and
+            // we DON'T paint Theme.bg over it. In `.pip` and `.off` we paint
+            // Prompter Black behind the text (the PiP tile sits as an
+            // overlay; the prompter still reads against pure black).
+            if cameraStyle != .behind {
+                Theme.bg.ignoresSafeArea()
+            }
+
+            // `.behind` mode: full-frame camera preview. Mirror axes (V2
+            // Feature 6) compose against the preview layer — same source
+            // of truth as the text scale.
+            if cameraStyle == .behind {
+                CameraPreview(
+                    session: appState.cameraStore.session,
+                    gravity: .resizeAspectFill,
+                    horizontalMirror: vm.mirroredHorizontal,
+                    verticalMirror: vm.mirroredVertical
+                )
+                .ignoresSafeArea()
+                // Scrim behind the reading line: WCAG 2.2 AA contrast over
+                // live video. 0.55 is the spec default; raise to 0.7 at AX5
+                // Dynamic Type sizes per V2 Design 01 §"`behind` — full-
+                // frame camera, prompter overlay".
+                Color(red: 10.0/255, green: 10.0/255, blue: 11.0/255)
+                    .opacity(scrimOpacityForBehindMode)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
 
             // Scrolling text — full-bleed, measures its own viewport internally.
             // Mirror is applied as a pair of independent scale flips per
@@ -57,12 +100,9 @@ struct TeleprompterView: View {
             // the only thing that flips here; the top bar and controls live
             // outside this ZStack so they stay legible regardless of mirror
             // state.
-            // FUTURE: when the PiP camera mode (Roadmap V2 §1) lands, the
-            // camera preview transform should compose against these same two
-            // booleans — `AVCaptureConnection.videoMirrored` for the H axis
-            // and a `videoOrientation` flip (or a sibling `.scaleEffect`) for
-            // the V axis. Keep the text and the camera in sync so the rig
-            // optics line up against a single source of truth.
+            // The camera preview transform composes against the SAME two
+            // booleans (V2 Feature 1) so the rig optics line up against a
+            // single source of truth.
             scrollingText
                 .scaleEffect(
                     x: vm.mirroredHorizontal ? -1 : 1,
@@ -105,19 +145,60 @@ struct TeleprompterView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .overlay(alignment: .top) {
-            PrompterTopBarView(vm: vm)
-                .padding(.top, 4)
+        // PiP tile floats above the text but below the chrome. Disabled
+        // for `.behind` (preview is the backdrop) and `.off` (no session).
+        .overlay {
+            if cameraStyle == .pip {
+                PipTile(
+                    store: appState.cameraStore,
+                    horizontalMirror: vm.mirroredHorizontal,
+                    verticalMirror: vm.mirroredVertical
+                )
                 .opacity(vm.focus ? 0.0 : 1.0)
-                .allowsHitTesting(!vm.focus)
                 .animation(.easeInOut(duration: Theme.focusAnim), value: vm.focus)
+                .transition(.opacity)
+            }
+        }
+        .overlay(alignment: .top) {
+            VStack(spacing: 6) {
+                PrompterTopBarView(vm: vm)
+                if showCameraDeniedBanner {
+                    cameraDeniedBanner
+                }
+                if showCameraIntroBanner {
+                    cameraIntroBanner
+                }
+            }
+            .padding(.top, 4)
+            .opacity(vm.focus ? 0.0 : 1.0)
+            .allowsHitTesting(!vm.focus)
+            .animation(.easeInOut(duration: Theme.focusAnim), value: vm.focus)
         }
         .overlay(alignment: .bottom) {
-            PrompterControlsView(vm: vm)
-                .padding(.bottom, 6)
-                .opacity(vm.focus ? 0.0 : 1.0)
-                .allowsHitTesting(!vm.focus)
-                .animation(.easeInOut(duration: Theme.focusAnim), value: vm.focus)
+            VStack(spacing: 6) {
+                // Camera Style chip lives just above the existing controls,
+                // visible whenever Labs is on or the user has picked a non-
+                // off style. Same gating logic as the Settings section.
+                if showCameraChip {
+                    HStack(spacing: 8) {
+                        Spacer()
+                        CameraStyleChip(store: appState.cameraStore)
+                        Spacer()
+                    }
+                }
+                PrompterControlsView(vm: vm)
+            }
+            .padding(.bottom, 6)
+            .opacity(vm.focus ? 0.0 : 1.0)
+            .allowsHitTesting(!vm.focus)
+            .animation(.easeInOut(duration: Theme.focusAnim), value: vm.focus)
+        }
+        // Tally-light: 4pt red border that pulses while recording. Drawn
+        // last so nothing in the chrome can occlude it (V2 Design 01
+        // §"Tally-light border indicator"). Reduce-Motion is honored
+        // inside the overlay.
+        .overlay {
+            TallyLightOverlay(isActive: appState.recordingState.isRecording)
         }
         .overlay(alignment: .bottomTrailing) {
             Button(action: { vm.toggleFocus() }) {
@@ -217,10 +298,57 @@ struct TeleprompterView: View {
                 volumeSource?.stop()
             }
         }
+        // Camera lifecycle (V2 Feature 1). Resume on appear if mode != off
+        // AND permission is granted; suspend on disappear so the privacy
+        // LED extinguishes promptly. The store's `setStyle` already started
+        // the session if the user just flipped via the chip — `resume()` is
+        // idempotent so calling it here is safe.
+        .task {
+            await appState.cameraStore.resume()
+        }
+        .onChange(of: cameraStyleRaw) { _, _ in
+            // Settings or chip changed the style — drain any pending
+            // permission-denied banner cue from the store and surface it.
+            if appState.cameraStore.consumePermissionDenialBanner() {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showCameraDeniedBanner = true
+                }
+            }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            // Stop the session on background to extinguish the privacy LED;
+            // resume on foreground if the mode demands it. iOS will already
+            // pause AVCaptureSession on its own, but explicit stop releases
+            // the camera holds and clears the LED on real hardware.
+            switch newPhase {
+            case .active:
+                Task { await appState.cameraStore.resume() }
+            case .background, .inactive:
+                Task { await appState.cameraStore.suspend() }
+            @unknown default:
+                break
+            }
+        }
+        .task {
+            // First-launch coach-mark banner. Surfaces "Try the new camera
+            // modes" the first time the prompter opens after the v2 update.
+            // Auto-dismisses on first style change or after 8s.
+            if !coachMarkShown && cameraStyle == .off {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showCameraIntroBanner = true
+                }
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showCameraIntroBanner = false
+                }
+                coachMarkShown = true
+            }
+        }
         .onDisappear {
             mediaSource?.stop()
             volumeSource?.stop()
             prompterFocused = false
+            Task { await appState.cameraStore.suspend() }
         }
         .statusBarHidden()
         // The teleprompter reading view is ALWAYS dark, regardless of the
@@ -338,5 +466,113 @@ struct TeleprompterView: View {
         default: multiplier = 1.1
         }
         return min(vm.fontSize * multiplier, 180)
+    }
+
+    // MARK: - Camera helpers (V2 Feature 1)
+
+    /// Show the camera chip in the bottom-bar area whenever Labs is on or
+    /// the user has already picked a non-`.off` style. Mirrors the gating
+    /// logic in `SettingsView` so the two surfaces line up.
+    private var showCameraChip: Bool {
+        let labsOn: Bool = {
+            #if DEBUG
+            return UserDefaults.standard.object(forKey: PrefKey.labsCameraStyle.rawValue) == nil
+                ? true
+                : UserDefaults.standard.bool(forKey: PrefKey.labsCameraStyle.rawValue)
+            #else
+            return UserDefaults.standard.bool(forKey: PrefKey.labsCameraStyle.rawValue)
+            #endif
+        }()
+        return labsOn || cameraStyle != .off
+    }
+
+    /// Scrim opacity for `.behind` mode. 0.55 by default (per V2 Design 01
+    /// §"`behind` — full-frame camera, prompter overlay"); raised to 0.7 at
+    /// AX5 Dynamic Type sizes for WCAG 2.2 AA contrast over live video.
+    private var scrimOpacityForBehindMode: Double {
+        switch dynamicTypeSize {
+        case .accessibility5, .accessibility4: return 0.7
+        default: return 0.55
+        }
+    }
+
+    @ViewBuilder
+    private var cameraDeniedBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "video.slash")
+                .font(.system(size: 13, weight: .bold))
+            Text("camera access is off — open Settings to enable")
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .tracking(0.5)
+            Spacer()
+            Button {
+                #if canImport(UIKit)
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+                #endif
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showCameraDeniedBanner = false
+                }
+            } label: {
+                Text("OPEN")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .tracking(0.8)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Theme.surface, in: Capsule())
+                    .foregroundStyle(Theme.fg)
+                    .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+            }
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showCameraDeniedBanner = false
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 28, height: 28)
+                    .foregroundStyle(Theme.muted)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Theme.amber.opacity(0.6), lineWidth: 1)
+        )
+        .padding(.horizontal, 10)
+    }
+
+    @ViewBuilder
+    private var cameraIntroBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "camera")
+                .font(.system(size: 13, weight: .bold))
+            Text("try the new camera modes — tap the camera chip below")
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .tracking(0.5)
+            Spacer()
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showCameraIntroBanner = false
+                }
+                coachMarkShown = true
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 28, height: 28)
+                    .foregroundStyle(Theme.muted)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Theme.green.opacity(0.6), lineWidth: 1)
+        )
+        .padding(.horizontal, 10)
     }
 }

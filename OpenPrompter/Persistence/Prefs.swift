@@ -42,6 +42,29 @@ enum PrefKey: String, CaseIterable {
     /// in Release until the feature is shipped — see `OpenPrompterApp.swift`
     /// where `Prefs.register()` reads `#if DEBUG` to set the right default.
     case labsBluetoothRemote = "labs.bluetoothRemote"
+    // MARK: - Camera Style + PiP (V2 Feature 1)
+    /// User's chosen camera composition mode. Stored as a string so the
+    /// JSON shape stays stable if we add a new mode (e.g. floating preview)
+    /// without invalidating sibling devices' iCloud KVS payloads.
+    /// First-run default: `"off"` — privacy-respecting, no surprise camera
+    /// permission prompt on first prompter open after the v2 update.
+    case cameraStyle = "pref.camera.style"
+    /// Front (true) or rear (false) camera. Default front; selfie creators
+    /// are the larger audience.
+    case cameraFacingFront = "pref.camera.facingFront"
+    /// Last-used PiP tile size. Persisted between launches.
+    case cameraPipSize = "pref.camera.pipSize"
+    /// Last corner the user dropped the PiP tile into. Defaults to
+    /// `"topCenter"` — at arm's length, top-center keeps eye-line nearest
+    /// the front lens (V2 Design 01 §"PiP tile behavior").
+    case cameraPipCornerLast = "pref.camera.pipCornerLast"
+    /// Labs feature flag for Camera Style. Defaults ON in DEBUG, OFF in
+    /// Release until the feature graduates from Labs.
+    case labsCameraStyle = "labs.cameraStyle"
+    /// One-shot "Try the new camera modes" banner on first prompter open
+    /// after the v2 update. Coach marks stay device-local — not mirrored
+    /// to iCloud KVS.
+    case coachMarkCameraStyleShown = "pref.coachMarkCameraStyleShown"
 
     var defaultValue: Any {
         switch self {
@@ -69,6 +92,17 @@ enum PrefKey: String, CaseIterable {
             #else
             return false
             #endif
+        case .cameraStyle:           return "off"
+        case .cameraFacingFront:     return true
+        case .cameraPipSize:         return "medium"
+        case .cameraPipCornerLast:   return "topCenter"
+        case .labsCameraStyle:
+            #if DEBUG
+            return true
+            #else
+            return false
+            #endif
+        case .coachMarkCameraStyleShown: return false
         }
     }
 }
@@ -226,5 +260,44 @@ enum Prefs {
     static var labsBluetoothRemote: Bool {
         get { defaults.bool(forKey: PrefKey.labsBluetoothRemote.rawValue) }
         set { defaults.set(newValue, forKey: PrefKey.labsBluetoothRemote.rawValue) }
+    }
+
+    // MARK: - Camera Style + PiP (V2 Feature 1)
+
+    /// Raw string of `CameraStyle`. Stored as a string so we can extend the
+    /// enum without a migration (a downgrade reading an unknown value falls
+    /// back to `.off`). Default is `"off"` — we never auto-prompt for
+    /// camera permission on first run.
+    static var cameraStyle: String {
+        get { defaults.string(forKey: PrefKey.cameraStyle.rawValue) ?? "off" }
+        set { defaults.set(newValue, forKey: PrefKey.cameraStyle.rawValue) }
+    }
+
+    static var cameraFacingFront: Bool {
+        get { defaults.bool(forKey: PrefKey.cameraFacingFront.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.cameraFacingFront.rawValue) }
+    }
+
+    /// Raw string of `PipSize`. Default `"medium"`.
+    static var cameraPipSize: String {
+        get { defaults.string(forKey: PrefKey.cameraPipSize.rawValue) ?? "medium" }
+        set { defaults.set(newValue, forKey: PrefKey.cameraPipSize.rawValue) }
+    }
+
+    /// Raw string of `PipCorner`. Default `"topCenter"` — see
+    /// `V2 Design 01 — Camera Style + PiP.md` for the eye-line rationale.
+    static var cameraPipCornerLast: String {
+        get { defaults.string(forKey: PrefKey.cameraPipCornerLast.rawValue) ?? "topCenter" }
+        set { defaults.set(newValue, forKey: PrefKey.cameraPipCornerLast.rawValue) }
+    }
+
+    static var labsCameraStyle: Bool {
+        get { defaults.bool(forKey: PrefKey.labsCameraStyle.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.labsCameraStyle.rawValue) }
+    }
+
+    static var coachMarkCameraStyleShown: Bool {
+        get { defaults.bool(forKey: PrefKey.coachMarkCameraStyleShown.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.coachMarkCameraStyleShown.rawValue) }
     }
 }

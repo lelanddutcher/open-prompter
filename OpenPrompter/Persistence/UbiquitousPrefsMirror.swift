@@ -26,7 +26,15 @@ enum UbiquitousPrefsMirror {
         .vMirrorDefault,
         .focusDefault,
         .aggressiveStripping,
-        .appearance
+        .appearance,
+        // Camera Style + PiP (V2 Feature 1). The labs flag and the coach
+        // mark stay device-local: a flag that's on for one device shouldn't
+        // light up an unprepared sibling, and "I've seen this banner once"
+        // is per-device per existing pattern (see coachMarkPlayShown etc.).
+        .cameraStyle,
+        .cameraFacingFront,
+        .cameraPipSize,
+        .cameraPipCornerLast
     ]
 
     private static var observerToken: NSObjectProtocol?
