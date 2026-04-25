@@ -201,6 +201,22 @@ struct TeleprompterView: View {
                 }
             }
         }
+        .onChange(of: remoteEnabled) { _, newValue in
+            // Settings flipped the master toggle while the prompter is on
+            // screen. Start / stop the long-lived sources so the change
+            // applies immediately — without this, the user has to leave
+            // and re-enter the prompter for the toggle to take effect.
+            // The volume source has its own `.task(id:)` upstream which
+            // also re-evaluates `remoteEnabled` indirectly via this branch
+            // when the user has the volume opt-in on.
+            if newValue {
+                mediaSource?.start()
+                if useVolumeButtons { volumeSource?.start() }
+            } else {
+                mediaSource?.stop()
+                volumeSource?.stop()
+            }
+        }
         .onDisappear {
             mediaSource?.stop()
             volumeSource?.stop()

@@ -75,6 +75,19 @@ final class MediaCommandSource: RemoteEventSource {
         center.pauseCommand.isEnabled = true
         center.nextTrackCommand.isEnabled = true
         center.previousTrackCommand.isEnabled = true
+
+        // Register a minimal Now-Playing entry. Without metadata, enabling
+        // the commands above produces an empty "Now Playing" tile in
+        // Control Center / lock screen, which (a) looks broken and (b) has
+        // historically been flagged by App Store reviewers as media-session
+        // abuse. A bare title satisfies the system's expectation that a
+        // command-center registration corresponds to *something* playing.
+        // Playback rate is 0 because the prompter is silent — we're using
+        // the consumer-key delivery path, not actually serving audio.
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+            MPMediaItemPropertyTitle: "Open Prompter",
+            MPNowPlayingInfoPropertyPlaybackRate: 0.0
+        ]
     }
 
     func stop() {
@@ -91,6 +104,10 @@ final class MediaCommandSource: RemoteEventSource {
         pauseHandler = nil
         nextHandler = nil
         prevHandler = nil
+
+        // Clear our Now-Playing entry so other media apps reclaim the
+        // lock-screen UI when our prompter exits the foreground.
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
 
     private func publish(for key: RemoteKey) {

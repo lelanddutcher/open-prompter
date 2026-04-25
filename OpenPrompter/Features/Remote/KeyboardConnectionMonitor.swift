@@ -24,8 +24,16 @@ import Observation
 final class KeyboardConnectionMonitor {
     private(set) var isKeyboardConnected: Bool = false
 
-    private var connectObserver: NSObjectProtocol?
-    private var disconnectObserver: NSObjectProtocol?
+    // `nonisolated(unsafe)` because `deinit` is implicitly nonisolated and
+    // needs to read these tokens to remove the observers. Each token is
+    // assigned exactly once in `init()` (on the main actor) and never
+    // mutated afterwards, so there is no actual race for the compiler check
+    // to protect against. The annotation is the safe-by-construction
+    // declaration; we don't reach for `@unchecked Sendable` on the class.
+    @ObservationIgnored
+    private nonisolated(unsafe) var connectObserver: NSObjectProtocol?
+    @ObservationIgnored
+    private nonisolated(unsafe) var disconnectObserver: NSObjectProtocol?
 
     init() {
         refresh()
@@ -45,12 +53,24 @@ final class KeyboardConnectionMonitor {
         }
     }
 
-    // We deliberately omit a deinit observer-removal block. The monitor is
-    // app-scoped (lives on AppState) and never deallocates during a normal
-    // run; reaching for the main-actor isolated observer tokens from a
-    // nonisolated `deinit` runs into Swift 6 isolation rules. NSNotification
-    // observers without explicit removal are released when the object is
-    // freed at process exit, which is the only path that gets here.
+    // Teardown on dealloc. Even though this monitor is currently app-scoped
+    // (via AppState), tests and any future re-instantiation paths require
+    // explicit observer removal — leaving an observer registered retains
+    // the monitor and produces phantom callbacks the next time the same
+    // notification fires.
+    //
+    // `deinit` is implicitly nonisolated. We capture the tokens locally
+    // (so we don't reach for self's main-actor state from the nonisolated
+    // context) and hop to `@MainActor` for the actual removal. The hop is
+    // fire-and-forget, which is safe for cleanup work.
+    deinit {
+        let connect = connectObserver
+        let disconnect = disconnectObserver
+        Task { @MainActor in
+            if let connect    { NotificationCenter.default.removeObserver(connect) }
+            if let disconnect { NotificationCenter.default.removeObserver(disconnect) }
+        }
+    }
 
     private func refresh() {
         isKeyboardConnected = GCKeyboard.coalesced != nil

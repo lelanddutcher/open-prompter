@@ -94,6 +94,10 @@ final class PrompterViewModel {
     func load() async {
         isLoading = true
         loadError = nil
+        // Reset the take-start anchor on every (re)load. A stale offset
+        // captured against a previous file's content would point into
+        // invalid scroll territory in the new content.
+        playStartScrollOffset = 0
         do {
             let text = try await FileCoordinatorReader.readAsync(file.url)
             let rules: StrippingRules = Prefs.aggressiveStripping ? .aggressive : .gentle

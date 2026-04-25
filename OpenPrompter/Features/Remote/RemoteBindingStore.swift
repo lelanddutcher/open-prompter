@@ -119,31 +119,30 @@ final class RemoteBindingStore {
 
     /// The canonical default table — see `Roadmap V2.md` §7 and
     /// `Bluetooth Remote Research.md`. Keep this in sync with the docs.
-    static var defaultBindings: [RemoteKey: RemoteEvent] {
-        [
-            .space:          .playPause,
-            .return:         .playPause,
-            .arrowUp:        .speedUp,
-            .arrowDown:      .speedDown,
-            .arrowLeft:      .jumpBackward,
-            .arrowRight:     .jumpForward,
-            .pageUp:         .prevSection,
-            .pageDown:       .nextSection,
-            .letter("b"):    .jumpToStart,
-            .letter("m"):    .mirrorToggle,
-            .letter("r"):    .restart,
-            // Media keys — Satechi R2 et al. emit play/pause + skip on the
-            // MPRemoteCommandCenter pathway. Default to play/pause on all
-            // three; user can remap.
-            .mediaPlayPause: .playPause,
-            .mediaNextTrack: .nextSection,
-            .mediaPrevTrack: .prevSection,
-            // Volume bindings are wired but only fire when the user enables
-            // the volume opt-in. Default action is play/pause for AB Shutter 3.
-            .volumeUp:       .playPause,
-            .volumeDown:     .playPause
-        ]
-    }
+    /// Stored as `let` so reads don't reallocate the dictionary.
+    static let defaultBindings: [RemoteKey: RemoteEvent] = [
+        .space:          .playPause,
+        .return:         .playPause,
+        .arrowUp:        .speedUp,
+        .arrowDown:      .speedDown,
+        .arrowLeft:      .jumpBackward,
+        .arrowRight:     .jumpForward,
+        .pageUp:         .prevSection,
+        .pageDown:       .nextSection,
+        .letter("b"):    .jumpToStart,
+        .letter("m"):    .mirrorToggle,
+        .letter("r"):    .restart,
+        // Media keys — Satechi R2 et al. emit play/pause + skip on the
+        // MPRemoteCommandCenter pathway. Default to play/pause on all
+        // three; user can remap.
+        .mediaPlayPause: .playPause,
+        .mediaNextTrack: .nextSection,
+        .mediaPrevTrack: .prevSection,
+        // Volume bindings are wired but only fire when the user enables
+        // the volume opt-in. Default action is play/pause for AB Shutter 3.
+        .volumeUp:       .playPause,
+        .volumeDown:     .playPause
+    ]
 
     private(set) var bindings: [RemoteKey: RemoteEvent] = [:]
 
