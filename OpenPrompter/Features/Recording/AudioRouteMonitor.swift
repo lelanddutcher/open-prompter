@@ -73,7 +73,13 @@ final class AudioRouteMonitor {
         }
     }
 
-    private var observerToken: NSObjectProtocol?
+    // `nonisolated(unsafe)` because `deinit` is implicitly nonisolated and
+    // needs to read this token to remove the observer. Mirrors the pattern
+    // in `KeyboardConnectionMonitor` (Feature 7) — assigned exactly once
+    // on MainActor in `start()` and cleared on `stop()`, so there's no
+    // actual race for the compiler check to protect against.
+    @ObservationIgnored
+    private nonisolated(unsafe) var observerToken: NSObjectProtocol?
 
     init() {}
 
@@ -130,12 +136,16 @@ final class AudioRouteMonitor {
         }
     }
 
+    // Teardown on dealloc — mirrors `KeyboardConnectionMonitor.deinit`
+    // (Feature 7). Capture the token locally so the nonisolated `deinit`
+    // body doesn't reach for main-actor-isolated state, then hop to
+    // MainActor for the actual `removeObserver` call. Fire-and-forget is
+    // safe here — the closure already weakens self, so any leftover
+    // notification just no-ops.
     deinit {
-        // The token field is @MainActor-isolated; removing a NotificationCenter
-        // observer is safe to do from any thread, but Swift 6 strict
-        // concurrency wants us to read the stored property nonisolated. We
-        // capture the token at the last main-actor point we have via a
-        // local copy on `stop()` and trust that any leaked instance simply
-        // stops getting notifications (the closure has a weak self anyway).
+        let token = observerToken
+        Task { @MainActor in
+            if let token { NotificationCenter.default.removeObserver(token) }
+        }
     }
 }

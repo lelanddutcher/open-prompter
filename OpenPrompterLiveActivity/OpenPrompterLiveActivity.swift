@@ -51,9 +51,7 @@ struct OpenPrompterLiveActivity: Widget {
                     .padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    Text(elapsedDisplay(state: context.state))
-                        .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white)
+                    expandedTrailing(state: context.state)
                         .padding(.trailing, 4)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
@@ -71,9 +69,7 @@ struct OpenPrompterLiveActivity: Widget {
             } compactLeading: {
                 CompactRECDot(phase: context.state.phase)
             } compactTrailing: {
-                Text(compactTrailing(state: context.state))
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.white)
+                compactTrailing(state: context.state)
             } minimal: {
                 CompactRECDot(phase: context.state.phase)
             }
@@ -81,38 +77,56 @@ struct OpenPrompterLiveActivity: Widget {
         }
     }
 
-    private func elapsedDisplay(state: PrompterRecordingAttributes.PrompterRecordingState) -> String {
+    /// Expanded-region trailing presentation. While recording, render a
+    /// system-managed timer (`Text(startedAt, style: .timer)`) so the
+    /// displayed time updates every second without `Activity.update`
+    /// pushes (V2 Design 02 review note 4).
+    @ViewBuilder
+    private func expandedTrailing(
+        state: PrompterRecordingAttributes.PrompterRecordingState
+    ) -> some View {
         switch state.phase {
         case "countdown":
-            return "\(max(0, state.elapsedSeconds))"
+            Text("\(max(0, state.elapsedSeconds))")
+                .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white)
         case "recording":
-            return formatElapsed(state.elapsedSeconds)
+            Text(state.startedAt, style: .timer)
+                .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white)
+                .monospacedDigit()
         case "finalizing", "saving":
-            return "saving"
+            Text("saving")
+                .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white)
         default:
-            return ""
+            EmptyView()
         }
     }
 
-    private func compactTrailing(state: PrompterRecordingAttributes.PrompterRecordingState) -> String {
+    /// Compact-trailing presentation. Same approach as expanded — system
+    /// timer for the running clock.
+    @ViewBuilder
+    private func compactTrailing(
+        state: PrompterRecordingAttributes.PrompterRecordingState
+    ) -> some View {
         switch state.phase {
         case "countdown":
-            return "\(max(0, state.elapsedSeconds))"
+            Text("\(max(0, state.elapsedSeconds))")
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white)
         case "recording":
-            return formatElapsed(state.elapsedSeconds)
+            Text(state.startedAt, style: .timer)
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white)
+                .monospacedDigit()
         case "finalizing", "saving":
-            return "·"
+            Text("·")
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white)
         default:
-            return ""
+            EmptyView()
         }
-    }
-
-    private func formatElapsed(_ secs: Int) -> String {
-        let h = secs / 3600
-        let m = (secs % 3600) / 60
-        let s = secs % 60
-        if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
-        return String(format: "%d:%02d", m, s)
     }
 }
 
@@ -162,9 +176,7 @@ private struct LockScreenPresentation: View {
                 }
             }
             Spacer()
-            Text(timeDisplay)
-                .font(.system(size: 18, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.white)
+            timeDisplay
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -172,19 +184,26 @@ private struct LockScreenPresentation: View {
         .activitySystemActionForegroundColor(.white)
     }
 
-    private var timeDisplay: String {
-        let secs = max(0, state.elapsedSeconds)
+    @ViewBuilder
+    private var timeDisplay: some View {
         switch state.phase {
         case "countdown":
-            return "\(secs)"
+            Text("\(max(0, state.elapsedSeconds))")
+                .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white)
+        case "recording":
+            // System-managed timer — updates without Activity.update pushes
+            // (V2 Design 02 review note 4).
+            Text(state.startedAt, style: .timer)
+                .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white)
+                .monospacedDigit()
         case "finalizing", "saving":
-            return "saving"
+            Text("saving")
+                .font(.system(size: 18, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white)
         default:
-            let h = secs / 3600
-            let m = (secs % 3600) / 60
-            let s = secs % 60
-            if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
-            return String(format: "%d:%02d", m, s)
+            EmptyView()
         }
     }
 }

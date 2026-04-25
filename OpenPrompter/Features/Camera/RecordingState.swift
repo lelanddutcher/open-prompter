@@ -81,6 +81,13 @@ final class RecordingState {
     /// Most recent error message. Cleared on the next non-error transition.
     private(set) var lastError: String? = nil
 
+    /// Set true when the writer setup couldn't attach a microphone for the
+    /// current take (the device input failed to build, or the session
+    /// rejected it). The chip displays a strikethrough-mic glyph so the
+    /// user sees during the take that audio is missing — distinct from the
+    /// post-take error path. Cleared on the next `beginRecording`.
+    var micUnavailableForThisTake: Bool = false
+
     /// Outcome detail for the toast.
     struct SavedToast: Equatable {
         var photosWritten: Bool

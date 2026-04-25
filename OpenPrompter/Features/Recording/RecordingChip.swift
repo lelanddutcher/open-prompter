@@ -37,6 +37,9 @@ struct RecordingChip: View {
             HStack(spacing: 6) {
                 indicator
                 label
+                if showsMicWarning {
+                    micWarning
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -51,6 +54,26 @@ struct RecordingChip: View {
         .accessibilityValue(Text(accessibilityValue))
         .accessibilityAddTraits(.isButton)
         .disabled(isDisabled)
+    }
+
+    /// True when the writer setup couldn't attach a microphone for this
+    /// take. Surfaced as a strikethrough-mic glyph next to the chip so the
+    /// user sees during the take (V2 Design 02 review note 6) — distinct
+    /// from the post-take error path.
+    private var showsMicWarning: Bool {
+        // Only show during in-flight takes (countdown / recording). Hide
+        // on idle, error, finalizing, saving where it would be confusing.
+        switch state.phase {
+        case .countdown, .recording: return state.micUnavailableForThisTake
+        default:                     return false
+        }
+    }
+
+    private var micWarning: some View {
+        Image(systemName: "mic.slash.fill")
+            .font(.system(size: 11, weight: .bold))
+            .foregroundStyle(Theme.amber)
+            .accessibilityHidden(true)
     }
 
     @ViewBuilder
@@ -109,7 +132,7 @@ struct RecordingChip: View {
 
     private func displayText(now: Date) -> String {
         switch state.phase {
-        case .idle:                          return "rec"
+        case .idle:                          return "REC"
         case .countdown(let remaining):      return "\(remaining)"
         case .recording:
             let secs = state.elapsedSeconds(now: now)
@@ -147,10 +170,11 @@ struct RecordingChip: View {
     }
 
     private var accessibilityValue: String {
+        let micNote = state.micUnavailableForThisTake ? ", microphone unavailable" : ""
         switch state.phase {
         case .idle:                        return ""
-        case .countdown(let r):            return "\(r) seconds remaining"
-        case .recording:                   return formatElapsedSpoken(state.elapsedSeconds())
+        case .countdown(let r):            return "\(r) seconds remaining\(micNote)"
+        case .recording:                   return formatElapsedSpoken(state.elapsedSeconds()) + micNote
         case .finalizing, .saving:         return "saving"
         case .error(let msg):              return msg
         }

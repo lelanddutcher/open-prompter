@@ -327,7 +327,7 @@ final class RecordingTests: XCTestCase {
 
     // MARK: - ICloudCopyJob
 
-    func testICloudCopySuccessPath() throws {
+    func testICloudCopySuccessPath() async throws {
         let fm = FileManager.default
         let tempDir = fm.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -342,7 +342,7 @@ final class RecordingTests: XCTestCase {
         let script = tempDir.appendingPathComponent("notes.md")
         try Data("# notes".utf8).write(to: script)
 
-        let result = ICloudCopyJob.copy(
+        let result = await ICloudCopyJob.copy(
             recording: recording,
             forScript: script,
             timestamp: Date(timeIntervalSinceReferenceDate: 1000)
@@ -360,11 +360,11 @@ final class RecordingTests: XCTestCase {
         }
     }
 
-    func testICloudCopyFailureSurfacesUserMessageImmediately() {
+    func testICloudCopyFailureSurfacesUserMessageImmediately() async {
         // Source missing → immediate failure with user-readable copy.
         let bogusSource = URL(fileURLWithPath: "/private/tmp/openprompter-tests/does-not-exist.mov")
         let bogusScript = URL(fileURLWithPath: "/private/tmp/openprompter-tests/script.md")
-        let result = ICloudCopyJob.copy(recording: bogusSource, forScript: bogusScript)
+        let result = await ICloudCopyJob.copy(recording: bogusSource, forScript: bogusScript)
         switch result {
         case .success:
             XCTFail("Source missing must surface a failure.")

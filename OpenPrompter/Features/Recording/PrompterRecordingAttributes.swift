@@ -36,10 +36,18 @@ public struct PrompterRecordingAttributes: ActivityAttributes {
     /// Mutable per-update content. The widget reads this to render every
     /// presentation.
     public struct PrompterRecordingState: Codable, Hashable {
-        /// Wall-clock seconds since the writer started. The widget can
-        /// either render this directly or use it as a fallback when the
-        /// system-managed `ActivityViewContextDate` form isn't available.
+        /// Countdown remaining seconds (or `0` outside the countdown phase).
+        /// Used only by the countdown numeral. The running clock is driven
+        /// by `startedAt` + `Text(date, style: .timer)` so the system
+        /// updates the displayed time without per-second `Activity.update`s
+        /// (V2 Design 02 review note 4).
         public var elapsedSeconds: Int
+        /// Wall-clock moment recording began (or last resumed). Set when
+        /// the session transitions countdown → recording, then read by
+        /// the widget via `Text(startedAt, style: .timer)`.
+        /// `Date.distantPast` for non-recording phases (the widget gates on
+        /// `phase == "recording"` before rendering the timer).
+        public var startedAt: Date
         /// Truncated script title for the expanded / lock-screen
         /// presentations. Empty string when the user is on the demo or no
         /// script is loaded.
@@ -48,8 +56,14 @@ public struct PrompterRecordingAttributes: ActivityAttributes {
         /// or `"idle"` (when the activity is being torn down).
         public var phase: String
 
-        public init(elapsedSeconds: Int, scriptTitle: String, phase: String) {
+        public init(
+            elapsedSeconds: Int,
+            startedAt: Date = .distantPast,
+            scriptTitle: String,
+            phase: String
+        ) {
             self.elapsedSeconds = elapsedSeconds
+            self.startedAt = startedAt
             self.scriptTitle = scriptTitle
             self.phase = phase
         }

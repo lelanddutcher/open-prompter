@@ -16,8 +16,11 @@ import Foundation
 
 enum ICloudCopyJob {
 
-    /// One-shot copy. Returns a `Result` on the calling actor — the caller
-    /// (RecordingSession) handles the success/failure UX directly.
+    /// One-shot copy. Runs on a detached task so multi-hundred-MB files
+    /// don't freeze the calling actor (in production: MainActor via
+    /// `RecordingSession.runSaveFlow`). Returns a `Result` once the
+    /// `NSFileCoordinator.coordinate` block plus the underlying
+    /// `FileManager.copyItem` complete.
     ///
     /// `script` is the script being read at the start of the take. The copy
     /// lands at `<script-parent>/<script-stem>__<ISO-timestamp>.mov`. If the
@@ -32,6 +35,19 @@ enum ICloudCopyJob {
         recording: URL,
         forScript script: URL,
         timestamp: Date = .now
+    ) async -> Result<URL, ICloudCopyError> {
+        await Task.detached(priority: .userInitiated) {
+            performCopy(recording: recording, forScript: script, timestamp: timestamp)
+        }.value
+    }
+
+    /// Synchronous body of the copy. Lives on the detached task so
+    /// `NSFileCoordinator.coordinate` (synchronous) and the
+    /// `FileManager.copyItem` byte pump don't block the caller.
+    private static func performCopy(
+        recording: URL,
+        forScript script: URL,
+        timestamp: Date
     ) -> Result<URL, ICloudCopyError> {
 
         // Build destination URL. The script's parent dir is the user-picked

@@ -15,6 +15,12 @@
 //    distinct from `CameraStore.sessionQueue` (Apple guidance — they
 //    advise against sharing data-output queues with session-config queues
 //    to avoid deadlocks during teardown).
+//  - Writer state (writer, inputs, outputs, session-start markers, etc.)
+//    is guarded by `writerStateLock`, an `OSAllocatedUnfairLock<WriterState>`.
+//    Both MainActor methods and recordingQueue handlers acquire the lock
+//    for any read or write of writer-pipeline properties. Lock holds are
+//    kept short — copy values out, work on them outside the lock, write
+//    back inside the lock. We never `await` while holding the lock.
 //  - Writer appends are serialized on `recordingQueue`.
 //  - The Live Activity actor calls happen on a Task that drops back to
 //    the global concurrent pool.
@@ -26,10 +32,12 @@
 //    `AVMetadataItem`s on the writer's metadata track.
 //
 
+import AVFAudio
 import AVFoundation
 import Combine
 import Foundation
 import Observation
+import os
 import Photos
 import UIKit
 
@@ -91,25 +99,45 @@ final class RecordingSession {
     // MARK: - Writer / outputs
 
     /// Dedicated sample-buffer delivery queue. Distinct from
-    /// `cameraSessionQueue` per Apple guidance.
-    nonisolated(unsafe) private let recordingQueue = DispatchQueue(
+    /// `cameraSessionQueue` per Apple guidance. Stored in a let constant
+    /// at init — `DispatchQueue` is `Sendable`, so the property doesn't
+    /// need any cross-actor wrapping.
+    nonisolated private let recordingQueue = DispatchQueue(
         label: "app.openprompter.recording.session",
         qos: .userInitiated
     )
 
-    nonisolated(unsafe) private var writer: AVAssetWriter?
-    nonisolated(unsafe) private var videoInput: AVAssetWriterInput?
-    nonisolated(unsafe) private var audioInput: AVAssetWriterInput?
-    nonisolated(unsafe) private var videoOutput: AVCaptureVideoDataOutput?
-    nonisolated(unsafe) private var audioOutput: AVCaptureAudioDataOutput?
-    nonisolated(unsafe) private var audioInputDevice: AVCaptureDeviceInput?
-    nonisolated(unsafe) private var sessionStartTime: CMTime?
-    nonisolated(unsafe) private var hasStartedSession: Bool = false
-    nonisolated(unsafe) private var currentRecordingURL: URL?
-    nonisolated(unsafe) private var recordingStartedAt: Date?
-    /// Capture initial save destinations at start-of-take so a Settings flip
-    /// mid-recording doesn't change the destination list.
-    nonisolated(unsafe) private var lockedDestinations: SaveDestinations = .default
+    /// Cross-actor writer-pipeline state. Bundles every property that the
+    /// MainActor methods (begin / configure / finalize) write and the
+    /// `recordingQueue` sample-buffer handler reads. Wrapped in
+    /// `OSAllocatedUnfairLock` so accesses from either side serialize
+    /// without resorting to `nonisolated(unsafe)`.
+    fileprivate struct WriterState {
+        var writer: AVAssetWriter?
+        var videoInput: AVAssetWriterInput?
+        var audioInput: AVAssetWriterInput?
+        var videoOutput: AVCaptureVideoDataOutput?
+        var audioOutput: AVCaptureAudioDataOutput?
+        var audioInputDevice: AVCaptureDeviceInput?
+        var sessionStartTime: CMTime?
+        var hasStartedSession: Bool = false
+        var currentRecordingURL: URL?
+        var recordingStartedAt: Date?
+        /// Capture initial save destinations at start-of-take so a Settings
+        /// flip mid-recording doesn't change the destination list.
+        var lockedDestinations: SaveDestinations = .default
+        var sampleBufferRouter: SampleBufferRouter?
+    }
+
+    /// Lock guarding all writer-pipeline properties. Held briefly — copy
+    /// values out, work outside the lock, write back inside.
+    /// `OSAllocatedUnfairLock` is iOS 16+ so no availability gate needed
+    /// (project floor is iOS 17.0). Marked `nonisolated` so the
+    /// recordingQueue handler (and the cameraSessionQueue config block)
+    /// can acquire it without hopping to MainActor.
+    fileprivate nonisolated let writerStateLock = OSAllocatedUnfairLock<WriterState>(
+        initialState: WriterState()
+    )
 
     /// Test seam — production callers leave this false. Tests set it true
     /// to skip every AVFoundation interaction so we exercise the state
@@ -130,11 +158,6 @@ final class RecordingSession {
 
     /// Countdown ticker — invalidated on cancel/stop.
     private var countdownTask: Task<Void, Never>? = nil
-
-    /// Sample-buffer delegate forwarder. Holds a weak reference back to the
-    /// session so the actor's @MainActor isolation isn't violated by the
-    /// AVFoundation callback path.
-    nonisolated(unsafe) private var sampleBufferRouter: SampleBufferRouter?
 
     // MARK: - Init
 
@@ -185,10 +208,11 @@ final class RecordingSession {
 
         // Lock save destinations now — the user may flip Settings mid-take
         // and we want the original choice to win.
-        lockedDestinations = SaveDestinations(
+        let destinations = SaveDestinations(
             photos: true,
             scriptFolder: Prefs.recordingSaveToScriptFolder
         )
+        writerStateLock.withLock { $0.lockedDestinations = destinations }
 
         let countdown = RecordingCountdown(rawValue: Prefs.recordingCountdown) ?? .three
         if countdown.seconds <= 0 {
@@ -212,7 +236,8 @@ final class RecordingSession {
         guard case .recording = state.phase else { return }
         state.enterFinalizing()
         await finalizeWriter()
-        state.enterSaving(destinations: lockedDestinations)
+        let dests = writerStateLock.withLock { $0.lockedDestinations }
+        state.enterSaving(destinations: dests)
         await runSaveFlow()
     }
 
@@ -228,7 +253,8 @@ final class RecordingSession {
         if case .recording = state.phase {
             state.enterFinalizing()
             await finalizeWriter()
-            state.enterSaving(destinations: lockedDestinations)
+            let dests = writerStateLock.withLock { $0.lockedDestinations }
+            state.enterSaving(destinations: dests)
             await runSaveFlow()
         } else if case .countdown = state.phase {
             // Cancel any in-flight countdown — the user navigated away
@@ -267,7 +293,9 @@ final class RecordingSession {
 
     private func beginRecording() async {
         let started = Date()
-        recordingStartedAt = started
+        // Reset per-take flags before we publish the recording phase.
+        state.micUnavailableForThisTake = false
+        writerStateLock.withLock { $0.recordingStartedAt = started }
         state.phase = .recording(startedAt: started)
         startLiveActivityIfNeeded(phase: .recording(startedAt: started))
 
@@ -282,7 +310,7 @@ final class RecordingSession {
 
         do {
             let url = RecordingFileStore.newRecordingURL(now: started)
-            currentRecordingURL = url
+            writerStateLock.withLock { $0.currentRecordingURL = url }
             try await configureWriter(at: url, cameraSession: cameraSession, cameraSessionQueue: cameraSessionQueue)
         } catch {
             state.surfaceError(error.localizedDescription)
@@ -354,17 +382,33 @@ final class RecordingSession {
         writer.add(videoInput)
         writer.add(audioInput)
 
-        self.writer = writer
-        self.videoInput = videoInput
-        self.audioInput = audioInput
-        self.hasStartedSession = false
-        self.sessionStartTime = nil
-
         // Sample-buffer router. Holds a weak ref back into the session so
         // the AVFoundation callback path can append on the recording queue
         // without violating actor isolation.
         let router = SampleBufferRouter(session: self)
-        self.sampleBufferRouter = router
+
+        // Seed the writer state inside the lock — we're still on MainActor
+        // here, but the recordingQueue may already be ready to read once we
+        // attach the data outputs below.
+        writerStateLock.withLock { state in
+            state.writer = writer
+            state.videoInput = videoInput
+            state.audioInput = audioInput
+            state.hasStartedSession = false
+            state.sessionStartTime = nil
+            state.sampleBufferRouter = router
+        }
+
+        // Capture the lock + recordingQueue into locals so the cameraSessionQueue
+        // closure (which is `Sendable`) doesn't have to reach for `self.…`
+        // off-actor. The closure also needs to flag mic-unavailable back on
+        // MainActor if the audio device input fails — capture that too.
+        let lock = writerStateLock
+        let recordQ = recordingQueue
+
+        // Track whether the audio input was attached — flagged back to
+        // RecordingState (`micUnavailableForThisTake`) once we hop to main.
+        let micAttached = OSAllocatedUnfairLock<Bool>(initialState: false)
 
         // Add data outputs to the shared session inside a configuration
         // block. We do this on the camera's session queue to avoid racing
@@ -375,19 +419,24 @@ final class RecordingSession {
                 defer { cameraSession.commitConfiguration() }
 
                 // Audio device input — pick the user's preferred mic if it's
-                // currently connected; fall back to the system default.
+                // currently connected; fall back to the system default. We
+                // record whether attachment succeeded so the chip can show a
+                // strikethrough-mic glyph during the take when audio is
+                // missing (V2 Design 02 review note 6).
                 let audioDevice = Self.preferredAudioDevice() ?? AVCaptureDevice.default(for: .audio)
                 if let audioDevice {
                     do {
                         let input = try AVCaptureDeviceInput(device: audioDevice)
                         if cameraSession.canAddInput(input) {
                             cameraSession.addInput(input)
-                            self.audioInputDevice = input
+                            lock.withLock { $0.audioInputDevice = input }
+                            micAttached.withLock { $0 = true }
                         }
                     } catch {
                         // Not fatal — the writer can still record video; the
-                        // resulting file just has no audio track. Surface a
-                        // soft error and continue.
+                        // resulting file just has no audio track. The chip
+                        // surfaces a strikethrough-mic glyph so the user sees
+                        // during the take that audio is missing.
                     }
                 }
 
@@ -397,10 +446,10 @@ final class RecordingSession {
                     kCVPixelBufferPixelFormatTypeKey as String:
                         Int(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
                 ]
-                videoOut.setSampleBufferDelegate(router, queue: self.recordingQueue)
+                videoOut.setSampleBufferDelegate(router, queue: recordQ)
                 if cameraSession.canAddOutput(videoOut) {
                     cameraSession.addOutput(videoOut)
-                    self.videoOutput = videoOut
+                    lock.withLock { $0.videoOutput = videoOut }
                     if let connection = videoOut.connection(with: .video) {
                         if connection.isVideoStabilizationSupported {
                             connection.preferredVideoStabilizationMode = stabilization.avMode
@@ -417,10 +466,10 @@ final class RecordingSession {
                     }
                 }
                 let audioOut = AVCaptureAudioDataOutput()
-                audioOut.setSampleBufferDelegate(router, queue: self.recordingQueue)
+                audioOut.setSampleBufferDelegate(router, queue: recordQ)
                 if cameraSession.canAddOutput(audioOut) {
                     cameraSession.addOutput(audioOut)
-                    self.audioOutput = audioOut
+                    lock.withLock { $0.audioOutput = audioOut }
                 }
 
                 // Lock framerate at the device level so the writer sees a
@@ -441,6 +490,11 @@ final class RecordingSession {
             }
         }
 
+        // Reflect mic-attachment outcome on MainActor for the chip's
+        // strikethrough glyph (cleared at every `beginRecording`).
+        let attached = micAttached.withLock { $0 }
+        state.micUnavailableForThisTake = !attached
+
         // Start the writer file. Sample-buffer delivery hits the router
         // immediately after this returns; we begin the session on the
         // first video sample so the start-time matches the actual frame
@@ -459,26 +513,41 @@ final class RecordingSession {
 
         guard let cameraSession, let cameraSessionQueue else { return }
 
+        let lock = writerStateLock
+
         // Pull the data outputs off the shared session first so no further
         // sample buffers reach the writer while we're finalizing.
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             cameraSessionQueue.async {
                 cameraSession.beginConfiguration()
-                if let v = self.videoOutput { cameraSession.removeOutput(v) }
-                if let a = self.audioOutput { cameraSession.removeOutput(a) }
-                if let i = self.audioInputDevice { cameraSession.removeInput(i) }
-                self.videoOutput = nil
-                self.audioOutput = nil
-                self.audioInputDevice = nil
+                // Snapshot the outputs/inputs to remove, then clear them
+                // out under the lock in a single pass.
+                let (v, a, i) = lock.withLock { state -> (
+                    AVCaptureVideoDataOutput?,
+                    AVCaptureAudioDataOutput?,
+                    AVCaptureDeviceInput?
+                ) in
+                    let result = (state.videoOutput, state.audioOutput, state.audioInputDevice)
+                    state.videoOutput = nil
+                    state.audioOutput = nil
+                    state.audioInputDevice = nil
+                    return result
+                }
+                if let v { cameraSession.removeOutput(v) }
+                if let a { cameraSession.removeOutput(a) }
+                if let i { cameraSession.removeInput(i) }
                 cameraSession.commitConfiguration()
                 continuation.resume()
             }
         }
 
-        // Mark inputs finished + finalize the file.
-        let writerRef = writer
-        let video = videoInput
-        let audio = audioInput
+        // Mark inputs finished + finalize the file. Snapshot writer / inputs
+        // out of the lock so we don't hold it across the (long) finishWriting.
+        let (writerRef, video, audio) = writerStateLock.withLock { state -> (
+            AVAssetWriter?, AVAssetWriterInput?, AVAssetWriterInput?
+        ) in
+            (state.writer, state.videoInput, state.audioInput)
+        }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             recordingQueue.async {
                 video?.markAsFinished()
@@ -489,45 +558,63 @@ final class RecordingSession {
             }
         }
 
-        if let err = writer?.error {
+        if let err = writerRef?.error {
             state.surfaceError(
                 RecordingSessionError.finalizeFailed(err.localizedDescription).localizedDescription ?? ""
             )
         }
-        writer = nil
-        videoInput = nil
-        audioInput = nil
-        sampleBufferRouter = nil
-        sessionStartTime = nil
-        hasStartedSession = false
+        writerStateLock.withLock { state in
+            state.writer = nil
+            state.videoInput = nil
+            state.audioInput = nil
+            state.sampleBufferRouter = nil
+            state.sessionStartTime = nil
+            state.hasStartedSession = false
+        }
     }
 
     /// Sample-buffer append. Called on `recordingQueue`. Must NOT touch
     /// any @MainActor-isolated state — the router routes back through
-    /// MainActor when it needs to.
+    /// MainActor when it needs to. Reads writer-pipeline state via
+    /// `writerStateLock` so it doesn't race the configure/finalize paths.
     nonisolated fileprivate func appendSampleBuffer(
         _ sampleBuffer: CMSampleBuffer,
         from output: AVCaptureOutput
     ) {
-        // We start the writer's session on the first video sample we see,
-        // so the file's PTS-zero matches the first frame the user is
-        // actually recording (not the wall-clock REC tap).
-        guard let writer = self.writer else { return }
-        if writer.status == .writing {
-            if !self.hasStartedSession, output is AVCaptureVideoDataOutput {
-                let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-                writer.startSession(atSourceTime: pts)
-                self.sessionStartTime = pts
-                self.hasStartedSession = true
+        // Snapshot writer + inputs + session-started flag inside the lock,
+        // then act on the snapshot. We may need to flip `hasStartedSession`
+        // / write the session start time for the first video frame; do
+        // that in a second short lock acquisition rather than holding the
+        // lock across `writer.startSession`.
+        let snapshot = writerStateLock.withLock { state -> (
+            writer: AVAssetWriter?,
+            videoInput: AVAssetWriterInput?,
+            audioInput: AVAssetWriterInput?,
+            hasStartedSession: Bool
+        ) in
+            (state.writer, state.videoInput, state.audioInput, state.hasStartedSession)
+        }
+        guard let writer = snapshot.writer, writer.status == .writing else { return }
+
+        var hasStarted = snapshot.hasStartedSession
+        if !hasStarted, output is AVCaptureVideoDataOutput {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            writer.startSession(atSourceTime: pts)
+            writerStateLock.withLock { state in
+                state.sessionStartTime = pts
+                state.hasStartedSession = true
             }
-            if output is AVCaptureVideoDataOutput {
-                if let input = self.videoInput, input.isReadyForMoreMediaData, self.hasStartedSession {
-                    input.append(sampleBuffer)
-                }
-            } else if output is AVCaptureAudioDataOutput {
-                if let input = self.audioInput, input.isReadyForMoreMediaData, self.hasStartedSession {
-                    input.append(sampleBuffer)
-                }
+            hasStarted = true
+        }
+        guard hasStarted else { return }
+
+        if output is AVCaptureVideoDataOutput {
+            if let input = snapshot.videoInput, input.isReadyForMoreMediaData {
+                input.append(sampleBuffer)
+            }
+        } else if output is AVCaptureAudioDataOutput {
+            if let input = snapshot.audioInput, input.isReadyForMoreMediaData {
+                input.append(sampleBuffer)
             }
         }
     }
@@ -535,7 +622,10 @@ final class RecordingSession {
     // MARK: - Save flow
 
     private func runSaveFlow() async {
-        guard let url = currentRecordingURL else {
+        let (url, dests): (URL?, SaveDestinations) = writerStateLock.withLock {
+            ($0.currentRecordingURL, $0.lockedDestinations)
+        }
+        guard let url else {
             state.finishSavingSuccessfully(photos: false, scriptFolder: false)
             await endLiveActivityIfAny()
             return
@@ -544,15 +634,17 @@ final class RecordingSession {
         // Photos write — write-only access. We request the limited add-only
         // scope per Apple's privacy guidelines (NSPhotoLibraryAddUsageDescription).
         var photosOK = false
-        if lockedDestinations.photos {
+        if dests.photos {
             photosOK = await writeToPhotos(url: url)
         }
 
         // iCloud-next-to-script — only if requested AND a script is loaded.
+        // The copy now runs on a detached task so multi-hundred-MB files
+        // don't freeze MainActor.
         var icloudOK = false
         var icloudFailureReason: String? = nil
-        if lockedDestinations.scriptFolder, let script = currentScriptURL {
-            switch ICloudCopyJob.copy(recording: url, forScript: script) {
+        if dests.scriptFolder, let script = currentScriptURL {
+            switch await ICloudCopyJob.copy(recording: url, forScript: script) {
             case .success:                icloudOK = true
             case .failure(let err):       icloudFailureReason = err.userMessage
             }
@@ -579,8 +671,10 @@ final class RecordingSession {
         if photosOK {
             RecordingFileStore.removeRecording(at: url)
         }
-        currentRecordingURL = nil
-        recordingStartedAt = nil
+        writerStateLock.withLock { state in
+            state.currentRecordingURL = nil
+            state.recordingStartedAt = nil
+        }
     }
 
     private func writeToPhotos(url: URL) async -> Bool {
@@ -698,17 +792,14 @@ final class RecordingSession {
             // Tests run without an Info.plist mic key — bypass.
             return true
         }
-        let session = AVAudioSession.sharedInstance()
-        switch session.recordPermission {
-        case .granted: return true
-        case .denied:  return false
-        case .undetermined:
-            return await withCheckedContinuation { continuation in
-                session.requestRecordPermission { granted in
-                    continuation.resume(returning: granted)
-                }
-            }
-        @unknown default: return false
+        // iOS 17+ replaced the deprecated `AVAudioSession.requestRecordPermission`
+        // with `AVAudioApplication.requestRecordPermission()`. Project floor
+        // is iOS 17.0, so no availability gate needed.
+        switch AVAudioApplication.shared.recordPermission {
+        case .granted:      return true
+        case .denied:       return false
+        case .undetermined: return await AVAudioApplication.requestRecordPermission()
+        @unknown default:   return false
         }
     }
 
@@ -757,11 +848,7 @@ final class RecordingSession {
                 return
             }
             let attrs = PrompterRecordingAttributes(scriptID: currentScriptURL?.absoluteString ?? "")
-            let initialState = PrompterRecordingAttributes.PrompterRecordingState(
-                elapsedSeconds: 0,
-                scriptTitle: currentScriptName,
-                phase: phase.simpleKey
-            )
+            let initialState = liveActivityState(for: phase)
             do {
                 let activity = try Activity<PrompterRecordingAttributes>.request(
                     attributes: attrs,
@@ -781,17 +868,7 @@ final class RecordingSession {
         #if canImport(ActivityKit)
         if #available(iOS 16.2, *) {
             guard let handle = liveActivityRef else { return }
-            let elapsed: Int
-            if case .recording(let started) = phase {
-                elapsed = max(0, Int(Date().timeIntervalSince(started)))
-            } else {
-                elapsed = 0
-            }
-            let new = PrompterRecordingAttributes.PrompterRecordingState(
-                elapsedSeconds: elapsed,
-                scriptTitle: currentScriptName,
-                phase: phase.simpleKey
-            )
+            let new = liveActivityState(for: phase)
             Task {
                 await handle.activity.update(
                     ActivityContent<PrompterRecordingAttributes.ContentState>(
@@ -804,12 +881,44 @@ final class RecordingSession {
         #endif
     }
 
+    /// Build a state payload for the Live Activity. The countdown numeral
+    /// rides on `elapsedSeconds`; the running clock rides on `startedAt`
+    /// and the widget renders it via `Text(date, style: .timer)` so we
+    /// don't need per-second `Activity.update` pushes — phase transitions
+    /// are the only updates we send.
+    private func liveActivityState(for phase: RecordingPhase) -> PrompterRecordingAttributes.PrompterRecordingState {
+        switch phase {
+        case .countdown(let remaining):
+            return PrompterRecordingAttributes.PrompterRecordingState(
+                elapsedSeconds: remaining,
+                startedAt: .distantPast,
+                scriptTitle: currentScriptName,
+                phase: phase.simpleKey
+            )
+        case .recording(let started):
+            return PrompterRecordingAttributes.PrompterRecordingState(
+                elapsedSeconds: 0,
+                startedAt: started,
+                scriptTitle: currentScriptName,
+                phase: phase.simpleKey
+            )
+        default:
+            return PrompterRecordingAttributes.PrompterRecordingState(
+                elapsedSeconds: 0,
+                startedAt: .distantPast,
+                scriptTitle: currentScriptName,
+                phase: phase.simpleKey
+            )
+        }
+    }
+
     private func endLiveActivityIfAny() async {
         #if canImport(ActivityKit)
         if #available(iOS 16.2, *) {
             guard let handle = liveActivityRef else { return }
             let final = PrompterRecordingAttributes.PrompterRecordingState(
                 elapsedSeconds: 0,
+                startedAt: .distantPast,
                 scriptTitle: currentScriptName,
                 phase: "idle"
             )
@@ -846,8 +955,9 @@ final class RecordingSession {
 
 /// AVFoundation calls back on the data-output delegate; we cast the call
 /// back into the session via this nonisolated forwarder. Holds a weak ref
-/// to the session so the actor isolation isn't violated.
-private final class SampleBufferRouter:
+/// to the session so the actor isolation isn't violated. `fileprivate` so
+/// `RecordingSession.WriterState` (also `fileprivate`) can hold one.
+fileprivate final class SampleBufferRouter:
     NSObject,
     AVCaptureVideoDataOutputSampleBufferDelegate,
     AVCaptureAudioDataOutputSampleBufferDelegate

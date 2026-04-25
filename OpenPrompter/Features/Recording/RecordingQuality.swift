@@ -54,6 +54,13 @@ enum RecordingQuality: String, CaseIterable, Codable, Hashable, Sendable {
     /// Bitrate scaled to a given shorter-dimension resolution. Linear in
     /// pixel count (pixels² ratio) — quick approximation of the headroom
     /// 4K needs over 1080p without going full perceptual modeling.
+    ///
+    /// Note: the formula assumes `shortDimension * 16 / 9` for the long
+    /// edge, but the writer actually produces 4:3 (1080×1440) for the
+    /// front-camera open-gate path. We treat `shortDimension` as the
+    /// *long* edge target and the 16:9 ratio is a deliberate generosity —
+    /// it estimates ~slightly higher than the 4:3 case needs, giving the
+    /// encoder a touch of headroom rather than starving it on motion.
     func bitsPerSecond(forShortDimension shortDimension: Int) -> Int {
         let baselinePixels = 1080 * 1920
         let pixels = shortDimension * (shortDimension * 16 / 9)
