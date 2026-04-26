@@ -47,6 +47,15 @@ struct SettingsView: View {
     /// the user has picked a non-`.off` mode (regardless of the Labs flag).
     @AppStorage(PrefKey.cameraStyle.rawValue) private var cameraStyleRaw: String = "off"
 
+    #if DEBUG
+    /// Self-test result alert state. Lives behind `#if DEBUG` so production
+    /// builds carry no overhead from this surface.
+    @State private var selfTestRunning: Bool = false
+    @State private var selfTestAlertTitle: String = ""
+    @State private var selfTestAlertMessage: String = ""
+    @State private var selfTestAlertVisible: Bool = false
+    #endif
+
     var body: some View {
         NavigationStack {
             Form {
@@ -200,6 +209,14 @@ struct SettingsView: View {
                     Text("in-progress: front-camera recording with quality + framerate + mic source pickers, dynamic island live activity, and save-to-photos / save-next-to-script destinations. surface a recording section above when on.")
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.dim)
+
+                    #if DEBUG
+                    // Recording self-test harness — DEBUG only. Reads back
+                    // the most recent .mov in Documents/Recordings/ and
+                    // writes Documents/SelfTest.json so the orchestrator
+                    // can pull it via devicectl. See RecordingSelfTest.swift.
+                    selfTestRow
+                    #endif
                 }
             }
             .navigationTitle("settings")
@@ -209,6 +226,69 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
+            #if DEBUG
+            .alert(selfTestAlertTitle,
+                   isPresented: $selfTestAlertVisible,
+                   actions: { Button("OK", role: .cancel) {} },
+                   message: { Text(selfTestAlertMessage) })
+            #endif
         }
     }
+
+    #if DEBUG
+    /// "Run Recording Self-Test" row + helper button. Reads the most-recent
+    /// .mov from `Documents/Recordings/`, runs assertions, writes the JSON
+    /// report to `Documents/SelfTest.json`, and surfaces a pass/fail
+    /// summary. The orchestrator pulls the JSON via `xcrun devicectl`.
+    @ViewBuilder
+    private var selfTestRow: some View {
+        Button {
+            runSelfTest()
+        } label: {
+            HStack {
+                Text(selfTestRunning ? "running self-test…" : "run recording self-test")
+                Spacer()
+                if selfTestRunning {
+                    ProgressView()
+                }
+            }
+        }
+        .disabled(selfTestRunning)
+        Text("debug only. analyzes the most recent recording in Documents/Recordings/, writes Documents/SelfTest.json with dimensions / duration / bitrate / frame brightness assertions. record a take first, then tap.")
+            .font(.system(size: 12))
+            .foregroundStyle(Theme.dim)
+    }
+
+    private func runSelfTest() {
+        selfTestRunning = true
+        Task { @MainActor in
+            defer { selfTestRunning = false }
+            guard let result = await RecordingSelfTest.runOnMostRecentRecording() else {
+                selfTestAlertTitle = "no recording found"
+                selfTestAlertMessage = "Documents/Recordings/ is empty. record a take in the prompter, then run the self-test."
+                selfTestAlertVisible = true
+                return
+            }
+            _ = RecordingSelfTest.writeReport(result)
+
+            let passed = result.assertions.filter { $0.passed }.count
+            let failed = result.assertions.filter { !$0.passed }
+            let summaryHeader = "\(passed)/\(result.assertions.count) checks passed · \(result.recordingName)"
+            if failed.isEmpty {
+                selfTestAlertTitle = "self-test passed"
+                selfTestAlertMessage = summaryHeader + "\n\n" +
+                    "dims \(result.videoWidth)×\(result.videoHeight) · " +
+                    String(format: "%.2f s", result.durationSeconds) + " · " +
+                    String(format: "%.0f Mbps", Double(result.computedBitrateBps) / 1_000_000) + " · " +
+                    String(format: "%.1f fps", result.nominalFrameRate) + "\n\n" +
+                    "JSON: Documents/SelfTest.json"
+            } else {
+                selfTestAlertTitle = "self-test: \(failed.count) failed"
+                let failureLines = failed.prefix(5).map { "✗ \($0.name)\n  \($0.detail)" }.joined(separator: "\n\n")
+                selfTestAlertMessage = summaryHeader + "\n\n" + failureLines + "\n\nfull JSON: Documents/SelfTest.json"
+            }
+            selfTestAlertVisible = true
+        }
+    }
+    #endif
 }
