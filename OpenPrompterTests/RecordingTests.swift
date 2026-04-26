@@ -248,73 +248,44 @@ final class RecordingTests: XCTestCase {
         }
     }
 
-    func testRecordingQualityBitrateScales() {
-        let standard = RecordingQuality.standard
-        let high = RecordingQuality.high
-        XCTAssertGreaterThan(high.bitrate1080p, standard.bitrate1080p,
-                             "High tier must have a higher 1080p bitrate.")
-        let hi4K = high.bitsPerSecond(forShortDimension: 2160)
-        let hi1080 = high.bitrate1080p
-        XCTAssertGreaterThan(hi4K, hi1080,
-                             "4K bitrate scaling must exceed 1080p.")
+    /// Dogfood-pass-3 bug 2: bitrates are FIXED per tier — we don't scale
+    /// with pixel count. HEVC compresses very efficiently and the iPhone 17
+    /// hardware encoder dropped frames at the previous 150 Mbps cap (the
+    /// 22.68 fps actual / 24 fps requested smoking gun). Real iOS Camera
+    /// ships HEVC at 50 Mbps for 4K30 and the world is fine.
+    func testRecordingQualityStandardBitrateIs50Mbps() {
+        XCTAssertEqual(RecordingQuality.standard.averageBitRate, 50_000_000,
+                       "Standard must be 50 Mbps — matches iOS Camera 4K.")
     }
 
-    /// Dogfood-pass-2 bug 2a: the previous formula scaled bitrate by an
-    /// inferred 16:9 long edge, which on iPhone 17's square 1×1 buffer
-    /// inflated the rate ~78% (3024 short × inferred 5376 long = 16M
-    /// pixels treated as the source vs the real 9.1M pixels). The result
-    /// was a 213 MB / 4 second file at "Standard" — well over the 50 Mbps
-    /// target this tier promises. Verify the pixel-count formula bounds
-    /// the 1×1 case to a sane multiple of the 1080p baseline.
-    func testRecordingQualityBitrateScalesByActualPixelCount() {
-        let standard = RecordingQuality.standard
-        // 1080p baseline as canonical reference.
-        let baseline = standard.bitsPerSecond(forWidth: 1920, height: 1080)
-        XCTAssertEqual(baseline, standard.bitrate1080p,
-                       "1080p input must produce the canonical 1080p bitrate.")
-
-        // iPhone 17 1×1 (3024×3024) — actual pixel count is ~4.4× 1080p, so
-        // the bitrate should be ~4.4× the 50 Mbps baseline ≈ 220 Mbps. The
-        // 3× ceiling caps it at 150 Mbps. Either way it must be well below
-        // the 392 Mbps that the broken formula produced.
-        let square = standard.bitsPerSecond(forWidth: 3024, height: 3024)
-        XCTAssertLessThanOrEqual(square, standard.bitrate1080p * 3,
-                                 "Square 1×1 must be capped at 3× the 1080p baseline.")
-        XCTAssertLessThan(square, 250_000_000,
-                          "1×1 bitrate must stay under 250 Mbps regardless — the broken formula produced ~392 Mbps.")
+    func testRecordingQualityHighBitrateIs120Mbps() {
+        XCTAssertEqual(RecordingQuality.high.averageBitRate, 120_000_000,
+                       "High must be 120 Mbps — pro-creator headroom.")
     }
 
-    /// The High tier hits the same ceiling — a square buffer must not
-    /// blow past 3× the 1080p baseline (360 Mbps max), well below the
-    /// 941 Mbps the broken formula would have produced for High @ 1×1.
-    func testRecordingQualityHighTierSquareBitrateBounded() {
-        let high = RecordingQuality.high
-        let square = high.bitsPerSecond(forWidth: 3024, height: 3024)
-        XCTAssertLessThanOrEqual(square, high.bitrate1080p * 3,
-                                 "High @ square must be capped at 3× the 1080p baseline.")
-        XCTAssertGreaterThanOrEqual(square, high.bitrate1080p,
-                                    "High @ square must still exceed 1080p — it has more pixels.")
+    /// 60 fps gets a 50% bonus to maintain visible quality on motion. Frame
+    /// rate effectively doubles per-frame compression demand.
+    func testRecordingQualityStandard60FpsIs75Mbps() {
+        XCTAssertEqual(RecordingQuality.standard.averageBitRate(framerate: 60),
+                       75_000_000,
+                       "Standard @ 60 fps must be 50 Mbps × 1.5 = 75 Mbps.")
     }
 
-    /// Bitrate scales linearly with pixel count — twice the pixels = twice
-    /// the bitrate (until the ceiling clamps it).
-    func testRecordingQualityBitrateLinearInPixels() {
-        let standard = RecordingQuality.standard
-        let baseline = standard.bitsPerSecond(forPixelCount: 1080 * 1920)
-        let half = standard.bitsPerSecond(forPixelCount: 1080 * 960)
-        // Half the pixels → half the bitrate (subject to the 20 Mbps floor).
-        XCTAssertLessThan(half, baseline)
+    func testRecordingQualityHigh60FpsIs180Mbps() {
+        XCTAssertEqual(RecordingQuality.high.averageBitRate(framerate: 60),
+                       180_000_000,
+                       "High @ 60 fps must be 120 Mbps × 1.5 = 180 Mbps.")
     }
 
-    /// Legacy `forShortDimension` is preserved for callers that don't have
-    /// a real width/height — used by the Settings storage estimator. Must
-    /// continue to assume 16:9 long edge (the picker UI's storage
-    /// estimate is for the 1080p / 4K scenario, not the square sensor).
-    func testRecordingQualityShortDimensionFormulaUnchangedFor16x9() {
-        let standard = RecordingQuality.standard
-        let s1080 = standard.bitsPerSecond(forShortDimension: 1080)
-        XCTAssertEqual(s1080, standard.bitrate1080p,
-                       "short-dim formula at 1080 must equal canonical 1080p bitrate.")
+    /// 24 and 30 fps get the unscaled base bitrate — only 60 fps triggers
+    /// the bonus.
+    func testRecordingQualityFramerateBonusOnlyAt60Fps() {
+        XCTAssertEqual(RecordingQuality.standard.averageBitRate(framerate: 24),
+                       50_000_000)
+        XCTAssertEqual(RecordingQuality.standard.averageBitRate(framerate: 30),
+                       50_000_000)
+        XCTAssertEqual(RecordingQuality.high.averageBitRate(framerate: 30),
+                       120_000_000)
     }
 
     func testRecordingFramerateRoundTrip() throws {
@@ -523,17 +494,15 @@ final class RecordingTests: XCTestCase {
         XCTAssertEqual(state.phase, .idle)
     }
 
-    // MARK: - Dimension resolution (Bug 2b: 3024×4032 smoking gun)
+    // MARK: - Dimension resolution (legacy fallback helpers)
     //
-    // `setDynamicAspectRatio` is async — `device.dynamicDimensions` reads
-    // {0,0} synchronously after the call. Before the dogfood-pass-2 fix
-    // the writer fell through to the native 4032×3024 formatDescription,
-    // mismatching the 3024×3024 buffers that actually arrive once the
-    // reshape lands. The pure helper applies the requested aspect to the
-    // native dims so we get the right writer config even before the async
-    // reshape publishes.
-    //
-    // Pure helpers — no AVFoundation device required.
+    // Dogfood-pass-3 moved primary writer-dimension resolution out of these
+    // helpers and into `lazilyStartWriterOnFirstSample`, which reads the
+    // first sample buffer's `CMVideoFormatDescription` — the only true
+    // source of post-reshape buffer dimensions. The helpers below remain
+    // as a fallback that can be unit-tested without AVFoundation hardware,
+    // verifying the legacy aspect-ratio math still computes correctly for
+    // any callsite that wants a pre-frame guess.
 
     func testApplyAspectRatio1x1OnNative4x3() {
         // iPhone 17 native sensor is 4032×3024 (4:3). Asking for 1×1

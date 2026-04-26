@@ -125,6 +125,10 @@ final class RecordingSession {
         var audioInput: AVAssetWriterInput?
         var videoOutput: AVCaptureVideoDataOutput?
         var audioOutput: AVCaptureAudioDataOutput?
+        /// Legacy slot for an audio device input attached at REC tap. As of
+        /// dogfood-pass-3 the audio input is owned by `CameraStore` and
+        /// attached at session-config time, so this stays nil — kept for
+        /// backwards compatibility with the finalize/teardown bookkeeping.
         var audioInputDevice: AVCaptureDeviceInput?
         var sessionStartTime: CMTime?
         var hasStartedSession: Bool = false
@@ -134,13 +138,15 @@ final class RecordingSession {
         /// flip mid-recording doesn't change the destination list.
         var lockedDestinations: SaveDestinations = .default
         var sampleBufferRouter: SampleBufferRouter?
-        /// Buffer dimensions the writer was configured with — sourced from
-        /// the active capture device's `dynamicDimensions` (iOS 26 dynamic
-        /// aspect) or `activeFormat.formatDescription` (everywhere else).
-        /// Zero means "we couldn't determine a dimension — start the writer
-        /// session lazily on the first sample buffer".
+        /// Buffer dimensions the writer was configured with — populated by
+        /// `lazilyStartWriterOnFirstSample` once the first frame's
+        /// CMVideoFormatDescription has been read. Zero means we haven't
+        /// received the first frame yet.
         var outputWidth: Int = 0
         var outputHeight: Int = 0
+        /// The .mov destination URL the lazy writer construction will use.
+        /// Set in `configureWriter`, cleared after the writer is built.
+        var pendingWriterURL: URL?
     }
 
     /// Lock guarding all writer-pipeline properties. Held briefly — copy
@@ -336,180 +342,72 @@ final class RecordingSession {
     /// Build the writer + inputs and attach the data-outputs to the shared
     /// session. The session-config block runs on `cameraSessionQueue`; the
     /// data-output delegate runs on `recordingQueue`.
+    ///
+    /// Dogfood-pass-3: writer construction (and the AVAssetWriter inputs)
+    /// happen LAZILY in `appendSampleBuffer` once the first video frame
+    /// arrives. We can read the buffer's exact dimensions from
+    /// `CMSampleBufferGetFormatDescription` — that's the ground truth,
+    /// regardless of what `device.activeFormat`, `device.dynamicDimensions`,
+    /// or `device.dynamicAspectRatio` claim. The user's "writer dims=4032×3024
+    /// when buffers are actually 3024×3024" smoking gun was a symptom of
+    /// trying to predict the post-reshape dimensions BEFORE any sample
+    /// buffer had arrived. Now we just wait for the truth.
+    ///
+    /// We still create the destination URL and attach the data outputs here
+    /// so sample-buffer delivery starts ASAP. The writer itself is built
+    /// inside `lazilyStartWriterOnFirstSample` once a real frame lands.
     private func configureWriter(
         at url: URL,
         cameraSession: AVCaptureSession,
         cameraSessionQueue: DispatchQueue
     ) async throws {
-        let quality = RecordingQuality(rawValue: Prefs.recordingQuality) ?? .default
-        let framerate = RecordingFramerate(rawValue: Prefs.recordingFramerate) ?? .default
         let stabilization = RecordingStabilization(rawValue: Prefs.recordingStabilization) ?? .off
-
-        // 60fps + High is the most demanding combo (~150 Mbps HEVC at 60
-        // frames/s). On the iPhone 17e simulator the encoder doesn't always
-        // keep pace and the OS terminates the app under memory pressure.
-        // We log a warning and rely on the writer-failure handling below
-        // to abort cleanly if it goes south. On real hardware the Apple
-        // Silicon hardware encoder handles this fine.
-        if framerate == .fps60 && quality == .high {
-            #if DEBUG
-            print("[RecordingSession] WARNING: 60fps + High is the heaviest combo — encoder may struggle on simulators / older devices.")
-            #endif
-        }
 
         // Activate the audio session for recording. Running this once at
         // start-of-take rather than session-load time keeps a non-recording
         // user from triggering a needless mic LED flicker.
         configureAudioSession()
 
-        let writer: AVAssetWriter
-        do {
-            writer = try AVAssetWriter(outputURL: url, fileType: .mov)
-        } catch {
-            throw RecordingSessionError.writerSetupFailed(error.localizedDescription)
-        }
-        writer.shouldOptimizeForNetworkUse = false
-
-        // Resolve writer dimensions from the active capture device. On iOS
-        // 26+ when dynamic aspect is in play, prefer `dynamicDimensions`
-        // (the actual reshaped buffer); otherwise read `activeFormat`'s
-        // CMVideoFormatDescription. If both fail (no input attached, mid-
-        // reconfigure), we use a safe 1440×1080 4:3 default — the writer
-        // would otherwise fail at construction with zero dimensions.
-        //
-        // Dogfood-pass-2: `setDynamicAspectRatio(.ratio1x1, completionHandler: nil)`
-        // is async — the reshape completes on a later AVFoundation tick, so
-        // `dynamicDimensions` reads {0,0} synchronously after the call.
-        // Before this fix the writer was configured with the 4032×3024
-        // formatDescription fallback (the user's "3024×4032 file" smoking
-        // gun), and the resulting bitrate scaling was sized for that big
-        // buffer rather than the 3024×3024 reshape that actually arrives.
-        // Resolving here picks {0,0} first; the appendSampleBuffer path
-        // then re-resolves dimensions from the first frame's
-        // CMFormatDescription and (re)configures the writer once.
-        let resolvedDims = Self.resolveWriterDimensions(
-            from: cameraSession,
-            requestedAspectRaw: cameraStore?.requestedDynamicAspectRaw
-        )
-        let writerWidth = resolvedDims.width > 0 ? resolvedDims.width : 1440
-        let writerHeight = resolvedDims.height > 0 ? resolvedDims.height : 1080
-
-        // Bitrate scales by ACTUAL pixel count — the previous formula
-        // assumed the long edge was `shortEdge × 16/9`, inflating square-
-        // sensor (1×1) bitrates by ~78% (3024² square treated as 3024×5376).
-        let bitrate = quality.bitsPerSecond(forWidth: writerWidth, height: writerHeight)
-
-        // Video input — HEVC at the chosen bitrate, ITU-R 709 color (no HDR
-        // for selfie content).
-        let videoSettings: [String: Any] = [
-            AVVideoCodecKey: quality.codec,
-            AVVideoWidthKey: writerWidth,
-            AVVideoHeightKey: writerHeight,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: bitrate,
-                AVVideoExpectedSourceFrameRateKey: framerate.fps,
-                // Cap keyframe interval at 1 keyframe per second of video.
-                // Without this hint the encoder can pick GOP lengths that
-                // fight the average-bitrate budget on motion-heavy content.
-                AVVideoMaxKeyFrameIntervalKey: framerate.fps
-            ],
-            AVVideoColorPropertiesKey: [
-                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
-            ]
-        ]
-        #if DEBUG
-        let recLog = Logger(
-            subsystem: "app.openprompter.recording",
-            category: "Writer-Dims-Debug"
-        )
-        recLog.info(
-            "writer setup quality=\(quality.rawValue, privacy: .public) fps=\(framerate.fps, privacy: .public) bitrate=\(bitrate, privacy: .public) dims=\(writerWidth)x\(writerHeight)"
-        )
-        #endif
-        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
-        videoInput.expectsMediaDataInRealTime = true
-        // Rotate to portrait — front-camera connection is landscape-right by
-        // default; rotating 90° via the writer input gives Photos a file
-        // that plays the right way up.
-        videoInput.transform = CGAffineTransform(rotationAngle: .pi / 2)
-
-        // Audio input — AAC, voiceover bitrate.
-        let audioSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVNumberOfChannelsKey: 1,
-            AVSampleRateKey: 44_100,
-            AVEncoderBitRateKey: 128_000
-        ]
-        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-        audioInput.expectsMediaDataInRealTime = true
-
-        guard writer.canAdd(videoInput), writer.canAdd(audioInput) else {
-            throw RecordingSessionError.writerSetupFailed("Writer rejected inputs.")
-        }
-        writer.add(videoInput)
-        writer.add(audioInput)
-
         // Sample-buffer router. Holds a weak ref back into the session so
         // the AVFoundation callback path can append on the recording queue
         // without violating actor isolation.
         let router = SampleBufferRouter(session: self)
 
-        // Seed the writer state inside the lock — we're still on MainActor
-        // here, but the recordingQueue may already be ready to read once we
-        // attach the data outputs below.
+        // Seed the writer state inside the lock — writer/inputs are nil
+        // until the first sample buffer arrives and lazilyStartWriterOnFirstSample
+        // builds them from the buffer's CMVideoFormatDescription.
         writerStateLock.withLock { state in
-            state.writer = writer
-            state.videoInput = videoInput
-            state.audioInput = audioInput
+            state.writer = nil
+            state.videoInput = nil
+            state.audioInput = nil
             state.hasStartedSession = false
             state.sessionStartTime = nil
             state.sampleBufferRouter = router
-            state.outputWidth = writerWidth
-            state.outputHeight = writerHeight
+            state.outputWidth = 0
+            state.outputHeight = 0
+            state.pendingWriterURL = url
         }
 
-        // Capture the lock + recordingQueue into locals so the cameraSessionQueue
-        // closure (which is `Sendable`) doesn't have to reach for `self.…`
-        // off-actor. The closure also needs to flag mic-unavailable back on
-        // MainActor if the audio device input fails — capture that too.
+        // Capture the lock + recordingQueue into locals so the
+        // cameraSessionQueue closure (which is `Sendable`) doesn't have
+        // to reach for `self.…` off-actor.
         let lock = writerStateLock
         let recordQ = recordingQueue
-
-        // Track whether the audio input was attached — flagged back to
-        // RecordingState (`micUnavailableForThisTake`) once we hop to main.
-        let micAttached = OSAllocatedUnfairLock<Bool>(initialState: false)
 
         // Add data outputs to the shared session inside a configuration
         // block. We do this on the camera's session queue to avoid racing
         // with the camera store's own start/stop transitions.
+        //
+        // The audio INPUT (the AVCaptureDeviceInput pulling samples from
+        // the mic) is owned by CameraStore now — attached at session-config
+        // time rather than recording-start time. That keeps the iOS 26
+        // dynamic-aspect reshape stable across REC tap (the dogfood-pass-3
+        // "PiP stretches when REC starts" bug). We just attach the audio
+        // DATA OUTPUT here to gate samples into the writer.
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             cameraSessionQueue.async {
                 cameraSession.beginConfiguration()
                 defer { cameraSession.commitConfiguration() }
-
-                // Audio device input — pick the user's preferred mic if it's
-                // currently connected; fall back to the system default. We
-                // record whether attachment succeeded so the chip can show a
-                // strikethrough-mic glyph during the take when audio is
-                // missing (V2 Design 02 review note 6).
-                let audioDevice = Self.preferredAudioDevice() ?? AVCaptureDevice.default(for: .audio)
-                if let audioDevice {
-                    do {
-                        let input = try AVCaptureDeviceInput(device: audioDevice)
-                        if cameraSession.canAddInput(input) {
-                            cameraSession.addInput(input)
-                            lock.withLock { $0.audioInputDevice = input }
-                            micAttached.withLock { $0 = true }
-                        }
-                    } catch {
-                        // Not fatal — the writer can still record video; the
-                        // resulting file just has no audio track. The chip
-                        // surfaces a strikethrough-mic glyph so the user sees
-                        // during the take that audio is missing.
-                    }
-                }
 
                 let videoOut = AVCaptureVideoDataOutput()
                 videoOut.alwaysDiscardsLateVideoFrames = false
@@ -554,20 +452,153 @@ final class RecordingSession {
             }
         }
 
-        // Reflect mic-attachment outcome on MainActor for the chip's
-        // strikethrough glyph (cleared at every `beginRecording`).
-        let attached = micAttached.withLock { $0 }
-        state.micUnavailableForThisTake = !attached
+        // Reflect mic-attachment outcome (read from the camera store, where
+        // the audio input was attached at session-config time) so the chip
+        // can show a strikethrough-mic glyph during a no-mic take.
+        let micAttached = cameraStore?.currentAudioInputDevice != nil
+        state.micUnavailableForThisTake = !micAttached
+    }
 
-        // Start the writer file. Sample-buffer delivery hits the router
-        // immediately after this returns; we begin the session on the
-        // first video sample so the start-time matches the actual frame
-        // PTS rather than wall-clock time.
-        if !writer.startWriting() {
-            throw RecordingSessionError.writerSetupFailed(
-                writer.error?.localizedDescription ?? "Writer refused to start."
-            )
+    /// Build the AVAssetWriter on the recordingQueue using the actual buffer
+    /// dimensions from the first sample. Called once, on the first video
+    /// sample buffer, from `appendSampleBuffer`. Returns the writer + inputs
+    /// so the caller can immediately start the session and append the
+    /// triggering buffer. Failure surfaces an error back to the main actor
+    /// state machine.
+    nonisolated fileprivate func lazilyStartWriterOnFirstSample(
+        url: URL,
+        firstBuffer: CMSampleBuffer
+    ) -> (writer: AVAssetWriter, video: AVAssetWriterInput, audio: AVAssetWriterInput)? {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(firstBuffer) else {
+            return nil
         }
+        let bufferDims = CMVideoFormatDescriptionGetDimensions(formatDescription)
+        let writerWidth = Int(bufferDims.width)
+        let writerHeight = Int(bufferDims.height)
+        guard writerWidth > 0 && writerHeight > 0 else { return nil }
+
+        let quality = RecordingQuality(rawValue: Prefs.recordingQuality) ?? .default
+        let framerate = RecordingFramerate(rawValue: Prefs.recordingFramerate) ?? .default
+
+        // Fixed per-tier bitrate, framerate-aware (60 fps gets a 50% bonus).
+        // We don't scale by pixel count — HEVC compresses very efficiently
+        // and asking the iPhone 17 hardware encoder for 150+ Mbps at 12 MP
+        // caused frame drops (the 22.68 fps dogfood symptom).
+        let bitrate = quality.averageBitRate(framerate: framerate.fps)
+
+        let writer: AVAssetWriter
+        do {
+            writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        } catch {
+            Task { @MainActor [weak self] in
+                self?.state.surfaceError(
+                    RecordingSessionError.writerSetupFailed(error.localizedDescription)
+                        .localizedDescription ?? ""
+                )
+            }
+            return nil
+        }
+        writer.shouldOptimizeForNetworkUse = false
+
+        // Video input — HEVC at the chosen bitrate, ITU-R 709 color (no HDR
+        // for selfie content). The expected source framerate hint helps the
+        // encoder budget bits per frame correctly when we lock to fps.
+        let videoSettings: [String: Any] = [
+            AVVideoCodecKey: quality.codec,
+            AVVideoWidthKey: writerWidth,
+            AVVideoHeightKey: writerHeight,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: bitrate,
+                AVVideoExpectedSourceFrameRateKey: framerate.fps,
+                // Cap keyframe interval at 1 keyframe per second of video.
+                // Without this hint the encoder can pick GOP lengths that
+                // fight the average-bitrate budget on motion-heavy content.
+                AVVideoMaxKeyFrameIntervalKey: framerate.fps
+            ],
+            AVVideoColorPropertiesKey: [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
+            ]
+        ]
+
+        #if DEBUG
+        // Compare the buffer's truth-source dimensions against what
+        // `device.activeFormat` and `device.dynamicDimensions` claim, so
+        // the user can verify in Console.app that the buffer is the true
+        // source of truth. activeFormat / dynamicDimensions can lie or lag
+        // (the dogfood-pass-2 4032×3024 vs 3024×3024 mismatch).
+        let activeDims: (Int, Int)
+        let dynamicDims: (Int, Int)
+        if let cs = cameraSession,
+           let device = (cs.inputs
+            .compactMap { $0 as? AVCaptureDeviceInput }
+            .first { $0.device.hasMediaType(.video) })?.device {
+            let af = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+            activeDims = (Int(af.width), Int(af.height))
+            if #available(iOS 26.0, *) {
+                let dyn = device.dynamicDimensions
+                dynamicDims = (Int(dyn.width), Int(dyn.height))
+            } else {
+                dynamicDims = (0, 0)
+            }
+        } else {
+            activeDims = (0, 0)
+            dynamicDims = (0, 0)
+        }
+
+        let recLog = Logger(
+            subsystem: "app.openprompter.recording",
+            category: "Writer-Dims-Debug"
+        )
+        recLog.info(
+            "first frame received: \(writerWidth, privacy: .public)x\(writerHeight, privacy: .public) from CMSampleBuffer (vs activeFormat: \(activeDims.0, privacy: .public)x\(activeDims.1, privacy: .public), vs dynamicDimensions: \(dynamicDims.0, privacy: .public)x\(dynamicDims.1, privacy: .public))"
+        )
+        recLog.info(
+            "writer setup quality=\(quality.rawValue, privacy: .public) fps=\(framerate.fps, privacy: .public) bitrate=\(bitrate, privacy: .public) dims=\(writerWidth)x\(writerHeight)"
+        )
+        #endif
+
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+        videoInput.expectsMediaDataInRealTime = true
+        // Rotate to portrait — front-camera connection is landscape-right by
+        // default; rotating 90° via the writer input gives Photos a file
+        // that plays the right way up.
+        videoInput.transform = CGAffineTransform(rotationAngle: .pi / 2)
+
+        // Audio input — AAC, voiceover bitrate.
+        let audioSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVNumberOfChannelsKey: 1,
+            AVSampleRateKey: 44_100,
+            AVEncoderBitRateKey: 128_000
+        ]
+        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+        audioInput.expectsMediaDataInRealTime = true
+
+        guard writer.canAdd(videoInput), writer.canAdd(audioInput) else {
+            Task { @MainActor [weak self] in
+                self?.state.surfaceError(
+                    RecordingSessionError.writerSetupFailed("Writer rejected inputs.")
+                        .localizedDescription ?? ""
+                )
+            }
+            return nil
+        }
+        writer.add(videoInput)
+        writer.add(audioInput)
+
+        if !writer.startWriting() {
+            let msg = writer.error?.localizedDescription ?? "Writer refused to start."
+            Task { @MainActor [weak self] in
+                self?.state.surfaceError(
+                    RecordingSessionError.writerSetupFailed(msg).localizedDescription ?? ""
+                )
+            }
+            return nil
+        }
+
+        return (writer, videoInput, audioInput)
     }
 
     /// Stop sample-buffer delivery, mark the inputs finished, and finalize
@@ -580,12 +611,20 @@ final class RecordingSession {
         let lock = writerStateLock
 
         // Pull the data outputs off the shared session first so no further
-        // sample buffers reach the writer while we're finalizing.
+        // sample buffers reach the writer while we're finalizing. Note we
+        // do NOT remove the audio device input — that's owned by CameraStore
+        // now (attached at session-config time, not at recording-start).
+        // Removing the data outputs is sufficient to stop sample delivery
+        // to the writer; the audio input stays attached until the camera
+        // session itself stops.
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             cameraSessionQueue.async {
                 cameraSession.beginConfiguration()
                 // Snapshot the outputs/inputs to remove, then clear them
-                // out under the lock in a single pass.
+                // out under the lock in a single pass. `audioInputDevice`
+                // is the legacy slot; in the dogfood-pass-3 flow it stays
+                // nil but we still defensively clear it so a stray legacy
+                // attachment can't leak.
                 let (v, a, i) = lock.withLock { state -> (
                     AVCaptureVideoDataOutput?,
                     AVCaptureAudioDataOutput?,
@@ -642,29 +681,73 @@ final class RecordingSession {
     /// MainActor when it needs to. Reads writer-pipeline state via
     /// `writerStateLock` so it doesn't race the configure/finalize paths.
     ///
+    /// Dogfood-pass-3: the writer is constructed lazily on the first video
+    /// sample buffer here. Reading dimensions from
+    /// `CMSampleBufferGetFormatDescription` is the only way to know the
+    /// post-reshape buffer's actual shape — `device.dynamicDimensions` reads
+    /// {0,0} synchronously after `setDynamicAspectRatio`, and the legacy
+    /// `applyAspectRatio` helper was a guess that didn't always match.
+    /// The buffer is the truth.
+    ///
     /// If the writer enters `.failed` mid-recording (encoder couldn't keep
-    /// pace at 60fps + High, disk full, etc.), we hop to MainActor and
-    /// surface a clean error rather than letting the next append crash
-    /// the app. The dogfood report on 60fps + High traced to this path —
-    /// the encoder fell behind and the OS terminated the process under
-    /// memory pressure rather than letting AVFoundation throw.
+    /// pace, disk full, etc.), we hop to MainActor and surface a clean
+    /// error rather than letting the next append crash the app.
     nonisolated fileprivate func appendSampleBuffer(
         _ sampleBuffer: CMSampleBuffer,
         from output: AVCaptureOutput
     ) {
-        // Snapshot writer + inputs + session-started flag inside the lock,
-        // then act on the snapshot. We may need to flip `hasStartedSession`
-        // / write the session start time for the first video frame; do
-        // that in a second short lock acquisition rather than holding the
-        // lock across `writer.startSession`.
+        // First, see if we need to lazily build the writer. The first video
+        // sample buffer triggers writer construction using its actual
+        // CMVideoFormatDescription dimensions — that's the ground truth.
+        // Audio buffers arriving before the writer is built are dropped
+        // (we wait for video to determine dimensions).
         let snapshot = writerStateLock.withLock { state -> (
             writer: AVAssetWriter?,
             videoInput: AVAssetWriterInput?,
             audioInput: AVAssetWriterInput?,
-            hasStartedSession: Bool
+            hasStartedSession: Bool,
+            pendingWriterURL: URL?
         ) in
-            (state.writer, state.videoInput, state.audioInput, state.hasStartedSession)
+            (state.writer, state.videoInput, state.audioInput, state.hasStartedSession, state.pendingWriterURL)
         }
+
+        // Lazy writer construction on the first video sample buffer.
+        if snapshot.writer == nil, output is AVCaptureVideoDataOutput {
+            guard let url = snapshot.pendingWriterURL else { return }
+            guard let built = lazilyStartWriterOnFirstSample(url: url, firstBuffer: sampleBuffer) else {
+                // Failure surfaced through `state.surfaceError` from inside
+                // the helper — clear the pending URL so we don't loop on
+                // the next sample buffer.
+                writerStateLock.withLock { state in
+                    state.pendingWriterURL = nil
+                }
+                return
+            }
+            // Start the writer session at the first frame's PTS.
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            built.writer.startSession(atSourceTime: pts)
+
+            let bufferDims = CMVideoFormatDescriptionGetDimensions(
+                CMSampleBufferGetFormatDescription(sampleBuffer)!
+            )
+            writerStateLock.withLock { state in
+                state.writer = built.writer
+                state.videoInput = built.video
+                state.audioInput = built.audio
+                state.outputWidth = Int(bufferDims.width)
+                state.outputHeight = Int(bufferDims.height)
+                state.hasStartedSession = true
+                state.sessionStartTime = pts
+                state.pendingWriterURL = nil
+            }
+            // Append this triggering frame.
+            if built.video.isReadyForMoreMediaData {
+                built.video.append(sampleBuffer)
+            }
+            return
+        }
+
+        // Drop audio buffers that arrive before the writer exists.
         guard let writer = snapshot.writer else { return }
 
         // Hard guard against a writer that has flipped into a non-writing
@@ -684,18 +767,7 @@ final class RecordingSession {
             return
         }
         guard writer.status == .writing else { return }
-
-        var hasStarted = snapshot.hasStartedSession
-        if !hasStarted, output is AVCaptureVideoDataOutput {
-            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            writer.startSession(atSourceTime: pts)
-            writerStateLock.withLock { state in
-                state.sessionStartTime = pts
-                state.hasStartedSession = true
-            }
-            hasStarted = true
-        }
-        guard hasStarted else { return }
+        guard snapshot.hasStartedSession else { return }
 
         if output is AVCaptureVideoDataOutput {
             if let input = snapshot.videoInput, input.isReadyForMoreMediaData {
@@ -778,98 +850,31 @@ final class RecordingSession {
             return false
         }
 
-        // Write the asset, then add it to (or create) the "Open Prompter"
-        // album. We do this in two phases so a successful write is durable
-        // even if the album link fails (the asset is still in Recents).
+        // Save directly to the user's library (Recents). The previous
+        // implementation also linked the asset into a custom "Open Prompter"
+        // album via `PHAssetCollection.fetchAssetCollections(with:subtype:options:)`
+        // — but enumerating collections is a Photos READ operation, which
+        // requires `NSPhotoLibraryUsageDescription`. We declare only the
+        // write-only `NSPhotoLibraryAddUsageDescription`, so the read-time
+        // fetch crashed the app on iOS 26 ("attempted to access privacy-
+        // sensitive data without a usage description"). Dropping the album
+        // keeps us strictly write-only — the saved video lands in Recents
+        // either way and the user can move it into any album from Photos.
         return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            var localIdentifier: String? = nil
             PHPhotoLibrary.shared().performChanges {
                 let request = PHAssetCreationRequest.creationRequestForAssetFromVideo(atFileURL: url)
                 request?.creationDate = .now
                 request?.location = nil
-                localIdentifier = request?.placeholderForCreatedAsset?.localIdentifier
             } completionHandler: { success, error in
-                guard success, let identifier = localIdentifier else {
-                    if let error {
-                        Task { @MainActor [weak self] in
-                            self?.state.surfaceError(
-                                RecordingSessionError.photosWriteFailed(error.localizedDescription)
-                                    .localizedDescription ?? ""
-                            )
-                        }
+                if let error, !success {
+                    Task { @MainActor [weak self] in
+                        self?.state.surfaceError(
+                            RecordingSessionError.photosWriteFailed(error.localizedDescription)
+                                .localizedDescription ?? ""
+                        )
                     }
-                    continuation.resume(returning: false)
-                    return
                 }
-                Self.addAssetToOpenPrompterAlbum(localIdentifier: identifier) {
-                    continuation.resume(returning: true)
-                }
-            }
-        }
-    }
-
-    /// Find or create the "Open Prompter" album, then add the new asset to
-    /// it. Failure here is non-fatal — the asset is still in Recents.
-    nonisolated private static func addAssetToOpenPrompterAlbum(
-        localIdentifier: String,
-        completion: @escaping () -> Void
-    ) {
-        let albumName = "Open Prompter"
-
-        // Find an existing album with this title.
-        let fetch = PHAssetCollection.fetchAssetCollections(
-            with: .album,
-            subtype: .albumRegular,
-            options: nil
-        )
-        var existing: PHAssetCollection? = nil
-        fetch.enumerateObjects { collection, _, stop in
-            if collection.localizedTitle == albumName {
-                existing = collection
-                stop.pointee = true
-            }
-        }
-
-        let assetFetch = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
-        guard let newAsset = assetFetch.firstObject else {
-            completion()
-            return
-        }
-
-        if let collection = existing {
-            PHPhotoLibrary.shared().performChanges {
-                guard let request = PHAssetCollectionChangeRequest(for: collection) else { return }
-                request.addAssets([newAsset] as NSArray)
-            } completionHandler: { _, _ in
-                completion()
-            }
-        } else {
-            // Create the album, then add the asset in a follow-up edit.
-            var albumPlaceholder: PHObjectPlaceholder?
-            PHPhotoLibrary.shared().performChanges {
-                let create = PHAssetCollectionChangeRequest.creationRequestForAssetCollection(
-                    withTitle: albumName
-                )
-                albumPlaceholder = create.placeholderForCreatedAssetCollection
-            } completionHandler: { success, _ in
-                guard success, let placeholder = albumPlaceholder else {
-                    completion()
-                    return
-                }
-                let createdFetch = PHAssetCollection.fetchAssetCollections(
-                    withLocalIdentifiers: [placeholder.localIdentifier],
-                    options: nil
-                )
-                guard let collection = createdFetch.firstObject else {
-                    completion()
-                    return
-                }
-                PHPhotoLibrary.shared().performChanges {
-                    guard let request = PHAssetCollectionChangeRequest(for: collection) else { return }
-                    request.addAssets([newAsset] as NSArray)
-                } completionHandler: { _, _ in
-                    completion()
-                }
+                continuation.resume(returning: success)
             }
         }
     }
@@ -907,8 +912,13 @@ final class RecordingSession {
         }
     }
 
-    /// Resolve the writer's output dimensions from the capture session's
-    /// active video device.
+    /// Fallback dimension resolver — kept for any callsite that needs to
+    /// pre-compute writer dimensions BEFORE a sample buffer arrives. The
+    /// primary recording path no longer uses this: it waits for the first
+    /// frame and reads dimensions from `CMSampleBufferGetFormatDescription`,
+    /// which is always the truth. This helper guesses based on
+    /// `device.dynamicDimensions` (iOS 26+) and falls back to applying the
+    /// requested aspect ratio to native sensor dims — both can lie.
     ///
     /// Resolution priority:
     ///   1. iOS 26+ `device.dynamicDimensions` — the post-reshape buffer
@@ -916,11 +926,7 @@ final class RecordingSession {
     ///   2. If we know the requested aspect (`requestedAspectRaw` is set)
     ///      but `dynamicDimensions` is {0,0} — the API is async and the
     ///      reshape hasn't published yet — apply the requested aspect to
-    ///      the native format dimensions ourselves. This is the dogfood-
-    ///      pass-2 fix for the "3024×4032 file" smoking gun: before this
-    ///      path existed, we'd fall through to native 4032×3024 dims and
-    ///      the bitrate scaler would misbudget for a buffer that actually
-    ///      arrives at 3024×3024.
+    ///      the native format dimensions ourselves.
     ///   3. Otherwise: native `formatDescription` dims.
     ///
     /// IMPORTANT: dimensions returned here are buffer-native (landscape on
@@ -1001,22 +1007,6 @@ final class RecordingSession {
             targetH = nativeW * aspectH / aspectW
         }
         return (targetW, targetH)
-    }
-
-    /// Resolve the user's pinned mic source, if currently connected.
-    nonisolated private static func preferredAudioDevice() -> AVCaptureDevice? {
-        let pin = Prefs.recordingMicSource ?? "builtin"
-        if pin == "auto" || pin == "builtin" {
-            return AVCaptureDevice.default(for: .audio)
-        }
-        // The pin holds a port UID. Find a matching capture device by
-        // scanning AVCaptureDevice.DiscoverySession's audio device list.
-        let session = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.microphone],
-            mediaType: .audio,
-            position: .unspecified
-        )
-        return session.devices.first { $0.uniqueID == pin } ?? AVCaptureDevice.default(for: .audio)
     }
 
     // MARK: - Live Activity

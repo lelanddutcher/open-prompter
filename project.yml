@@ -69,9 +69,13 @@ targets:
         # permission once Feature 5 lands; the prompt mentions both so the
         # user makes one informed decision.
         NSMicrophoneUsageDescription: "Open Prompter records audio with your video and follows along with your reading on-device. Audio is processed locally and never leaves your device."
-        # Photos write-only scope — the recording feature creates and adds
-        # to an "Open Prompter" album. We never request the broader read
-        # permission (`NSPhotoLibraryUsageDescription`).
+        # Photos write-only scope — the recording feature saves new videos
+        # directly to the user's library (Recents). We never request the
+        # broader read permission (`NSPhotoLibraryUsageDescription`); a
+        # previous version tried to maintain a custom "Open Prompter" album
+        # but album-enumeration via `PHAssetCollection.fetchAssetCollections`
+        # is a READ operation that crashes apps with only `addOnly` scope on
+        # iOS 26. Dropping the album keeps us strictly write-only.
         NSPhotoLibraryAddUsageDescription: "Open Prompter saves your finished recordings to Photos so you can edit and share them."
         # Live Activities — required so the recording chip can post a
         # `Activity.request(...)` for the Dynamic Island indicator.

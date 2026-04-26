@@ -96,6 +96,29 @@ final class CameraStore {
     /// Currently-attached camera input. `nil` until `start()` succeeds.
     nonisolated(unsafe) private var currentInput: AVCaptureDeviceInput?
 
+    /// Currently-attached audio input. Nil until `configureInputsLocked()`
+    /// runs OR if no audio device is available. Attached at session-config
+    /// time (NOT at recording-start time) so the dynamic aspect ratio
+    /// reshape and the audio-input addition don't fight over the same
+    /// session-config bracket. Adding the audio input mid-recording was
+    /// the dogfood-pass-3 cause of the "PiP stretches when REC tap fires"
+    /// symptom — the begin/commit configuration block needed to attach
+    /// audio re-published the format and the iOS 26 dynamic-aspect reshape
+    /// reverted to nominal 4:3 until the next reshape tick. Attaching
+    /// audio at session-config time keeps the reshape stable across
+    /// recording start. The audio data output (the bit that actually
+    /// captures audio samples to the writer) lives in RecordingSession;
+    /// the input being attached when recording isn't active is harmless.
+    nonisolated(unsafe) private var currentAudioInput: AVCaptureDeviceInput?
+
+    /// Read-only accessor exposed to RecordingSession so it knows whether
+    /// to attach an audio input itself (legacy fallback) or rely on the
+    /// session-level pre-attached one. Production callers go through
+    /// `currentAudioInputDevice` to read the current AVCaptureDeviceInput.
+    nonisolated var currentAudioInputDevice: AVCaptureDeviceInput? {
+        currentAudioInput
+    }
+
     /// Raw aspect-ratio string we requested via `setDynamicAspectRatio` on
     /// iOS 26+, kept so RecordingSession can compute the post-reshape buffer
     /// dimensions even when `device.dynamicDimensions` reads {0,0} (the API
@@ -350,6 +373,10 @@ final class CameraStore {
                     self.session.removeInput(input)
                 }
                 self.currentInput = nil
+                if let audio = self.currentAudioInput {
+                    self.session.removeInput(audio)
+                }
+                self.currentAudioInput = nil
                 self.session.commitConfiguration()
                 Task { @MainActor in
                     self.isSessionRunning = false
@@ -447,6 +474,59 @@ final class CameraStore {
             // Lock failed (another app holds the device, etc.). The session
             // still runs at the device default — non-fatal.
         }
+
+        // Attach the audio input AT SESSION-CONFIG TIME (not at REC-tap
+        // time). Doing this here means the dynamic-aspect reshape and the
+        // audio-input attachment share the same begin/commit bracket — so
+        // when the user later taps REC, the only thing happening is the
+        // data-output addition (which doesn't re-publish the format).
+        // Before this fix, recording-start added the audio input inside its
+        // own configuration bracket, which on iPhone 17 + iOS 26 caused the
+        // 1×1 reshape to revert to nominal 4:3 for one frame — the user's
+        // "PiP stretches when REC starts" report. The audio device is
+        // harmless when recording isn't active: only the audio data output
+        // (added at REC tap) gates whether samples reach the writer.
+        attachAudioInputLocked()
+    }
+
+    /// Attach the user's preferred mic (or system default) to the session.
+    /// Must be called inside a `beginConfiguration` bracket. Failure is
+    /// non-fatal — the writer can still record video; the file just has no
+    /// audio track and the chip surfaces a strikethrough-mic glyph during
+    /// the take.
+    nonisolated private func attachAudioInputLocked() {
+        guard let audioDevice = Self.preferredAudioDevice() ?? AVCaptureDevice.default(for: .audio) else {
+            return
+        }
+        do {
+            let audioInput = try AVCaptureDeviceInput(device: audioDevice)
+            if session.canAddInput(audioInput) {
+                session.addInput(audioInput)
+                currentAudioInput = audioInput
+            }
+        } catch {
+            // Audio device input failed — non-fatal. RecordingSession's
+            // mic-unavailable signal flips when the writer setup later
+            // detects no input is attached.
+        }
+    }
+
+    /// Resolve the user's pinned mic source, if currently connected.
+    /// Mirrors the helper RecordingSession used to own; we hoist it here
+    /// because audio attachment now lives at session-config time.
+    nonisolated private static func preferredAudioDevice() -> AVCaptureDevice? {
+        let pin = Prefs.recordingMicSource ?? "builtin"
+        if pin == "auto" || pin == "builtin" {
+            return AVCaptureDevice.default(for: .audio)
+        }
+        // The pin holds a port UID. Find a matching capture device by
+        // scanning AVCaptureDevice.DiscoverySession's audio device list.
+        let session = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone],
+            mediaType: .audio,
+            position: .unspecified
+        )
+        return session.devices.first { $0.uniqueID == pin } ?? AVCaptureDevice.default(for: .audio)
     }
 
     /// Probe both `.builtInWideAngleCamera` and `.builtInUltraWideCamera`
