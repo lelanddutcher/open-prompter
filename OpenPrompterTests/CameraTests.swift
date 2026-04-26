@@ -18,6 +18,7 @@
 //  startRunning/stopRunning calls.
 //
 
+import AVFoundation
 import XCTest
 import SwiftUI
 @testable import OpenPrompter
@@ -346,95 +347,159 @@ final class CameraTests: XCTestCase {
         XCTAssertFalse(state.isRecording)
     }
 
-    // MARK: - 4:3 format selection (Bug 1: open-gate)
+    // MARK: - Open-gate format selection (Bug 1: corrective pass)
+    //
+    // The previous fix filtered to 4:3 and stopped there. That's wrong on the
+    // iPhone 17 family — its front camera has a 1:1 square sensor and forcing
+    // a 4:3 readout discards ~25 % of the vertical pixels. The corrective
+    // algorithm is tiered:
+    //
+    //   1. iOS 26 + iPhone 17 family: pick a format that exposes
+    //      `supportedDynamicAspectRatios` and switch to 1×1 if available
+    //      (full square sensor readout, ~3024×3024 reshaped).
+    //   2. Fallback: pick the largest pixel-area format whose framerate
+    //      range covers the user's target. The native sensor IS the open
+    //      gate when the OS / hardware can't do dynamic aspect.
 
-    /// The dogfood report flagged that recordings were 1440×1080 wrappers
-    /// with 16:9 letterboxed content — the front camera was running its
-    /// default 16:9 format and the writer was stretching black bars in.
-    /// `pickFourThreeFormatIndex` is the pure decision helper called by
-    /// `CameraStore.configureInputsLocked` after acquiring the device; if
-    /// it picks correctly the writer gets a true 4:3 source and the PiP
-    /// preview no longer shows side bars.
-    func testPickFourThreeFormatPicksHighestResolutionAt30fps() {
-        // iPhone 17 simulator front camera reports these formats. Mix in
-        // a couple of 16:9 distractors so the test exercises the filter.
+    /// Largest-pixel-area pick when no candidate declares dynamic-aspect
+    /// support. Mixing 16:9, 4:3, and 1:1 candidates — the algorithm should
+    /// pick the largest by pixel count regardless of aspect.
+    func testOpenGatePicksLargestFormatRegardlessOfAspect() {
         let descriptors: [CameraStore.FormatDescriptor] = [
-            // 16:9 distractors — must not be picked.
-            CameraStore.FormatDescriptor(width: 1920, height: 1080,
-                                         frameRateRanges: [(1, 60)]),
+            // 1280×720 — 16:9.
             CameraStore.FormatDescriptor(width: 1280, height: 720,
                                          frameRateRanges: [(1, 60)]),
-            // 4:3 candidates.
-            CameraStore.FormatDescriptor(width: 960, height: 720,
-                                         frameRateRanges: [(1, 60)]),
-            CameraStore.FormatDescriptor(width: 1440, height: 1080,
-                                         frameRateRanges: [(1, 60)]),
+            // 1920×1440 — 4:3.
             CameraStore.FormatDescriptor(width: 1920, height: 1440,
                                          frameRateRanges: [(1, 60)]),
+            // 1080×1080 — 1:1 (no dynamic-aspect support — should still be
+            // a valid candidate, just not preferred over a larger format).
+            CameraStore.FormatDescriptor(width: 1080, height: 1080,
+                                         frameRateRanges: [(1, 60)]),
+            // 4032×3024 — 4:3, the biggest. Should win.
             CameraStore.FormatDescriptor(width: 4032, height: 3024,
                                          frameRateRanges: [(1, 30)])
         ]
-
-        // 30 fps — every 4:3 format covers it; pick the highest area.
-        let chosen30 = CameraStore.pickFourThreeFormatIndex(
+        let pick = CameraStore.pickOpenGateFormat(
             descriptors: descriptors, preferredFPS: 30
         )
-        XCTAssertEqual(chosen30, 5,
-                       "30fps must pick the 4032×3024 4:3 format (the largest).")
+        XCTAssertEqual(pick?.index, 3,
+                       "30fps fallback must pick the largest pixel-area format.")
+        XCTAssertNil(pick?.dynamicAspectRaw,
+                     "No descriptor declares dynamic-aspect support → no aspect to apply.")
     }
 
-    func testPickFourThreeFormatPicksHighest60fpsFormat() {
-        // At 60fps the 4032×3024 format is excluded (its range tops at
-        // 30fps); we should pick 1920×1440, the largest 4:3 that supports
-        // 60fps.
+    /// iPhone 17 family pathway: a format that declares `supportedDynamicAspectRatios`
+    /// containing 1×1 should be picked even when there's a larger plain
+    /// format alongside it. The algorithm prefers dynamic-aspect-capable
+    /// formats because they unlock the full square-sensor readout.
+    func testOpenGatePrefers1x1WhenDynamicAspectAvailable() {
+        if #available(iOS 26.0, *) {
+            // The dynamic-aspect format is smaller than the plain 4032×3024,
+            // but the algorithm prefers it because it can reshape to 1×1
+            // (the iPhone 17 full square readout — ~3024×3024 of usable
+            // sensor that 4:3 would crop away).
+            let descriptors: [CameraStore.FormatDescriptor] = [
+                CameraStore.FormatDescriptor(width: 4032, height: 3024,
+                                             frameRateRanges: [(1, 30)],
+                                             supportsDynamicAspectRatios: false,
+                                             dynamicAspectRatios: []),
+                CameraStore.FormatDescriptor(
+                    width: 3024, height: 4032,
+                    frameRateRanges: [(1, 30)],
+                    supportsDynamicAspectRatios: true,
+                    dynamicAspectRatios: [
+                        AVCaptureDevice.AspectRatio.ratio4x3.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio16x9.rawValue
+                    ]
+                )
+            ]
+            let pick = CameraStore.pickOpenGateFormat(
+                descriptors: descriptors, preferredFPS: 30
+            )
+            XCTAssertEqual(pick?.index, 1,
+                           "Dynamic-aspect format must win over a larger plain format.")
+            XCTAssertEqual(pick?.dynamicAspectRaw,
+                           AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
+                           "1×1 aspect must be selected when declared (full square readout).")
+        }
+    }
+
+    /// Older OS / older hardware: no descriptor has dynamic-aspect support.
+    /// The algorithm falls through to the largest pixel-area candidate and
+    /// returns no aspect override.
+    func testOpenGateFallsBackWhenNoDynamicAspect() {
         let descriptors: [CameraStore.FormatDescriptor] = [
+            // 16:9 distractor.
             CameraStore.FormatDescriptor(width: 1920, height: 1080,
-                                         frameRateRanges: [(1, 60)]),
-            CameraStore.FormatDescriptor(width: 960, height: 720,
-                                         frameRateRanges: [(1, 60)]),
+                                         frameRateRanges: [(1, 60)],
+                                         supportsDynamicAspectRatios: false,
+                                         dynamicAspectRatios: []),
+            // 4:3 mid.
             CameraStore.FormatDescriptor(width: 1440, height: 1080,
-                                         frameRateRanges: [(1, 60)]),
+                                         frameRateRanges: [(1, 60)],
+                                         supportsDynamicAspectRatios: false,
+                                         dynamicAspectRatios: []),
+            // 4:3 large — the open gate on a non-iPhone-17 sensor.
+            CameraStore.FormatDescriptor(width: 1920, height: 1440,
+                                         frameRateRanges: [(1, 60)],
+                                         supportsDynamicAspectRatios: false,
+                                         dynamicAspectRatios: [])
+        ]
+        let pick = CameraStore.pickOpenGateFormat(
+            descriptors: descriptors, preferredFPS: 30
+        )
+        XCTAssertEqual(pick?.index, 2,
+                       "Fallback path must pick the largest pixel-area candidate.")
+        XCTAssertNil(pick?.dynamicAspectRaw,
+                     "No dynamic-aspect support → no aspect override applied.")
+    }
+
+    /// Framerate filtering still wins. A high-resolution format that maxes
+    /// out at 30 fps must NOT be picked when the user wants 60 fps; the
+    /// algorithm falls through to the largest format that DOES cover 60.
+    func testOpenGateRespectsFramerateRange() {
+        let descriptors: [CameraStore.FormatDescriptor] = [
+            // 4032×3024 caps at 30fps — must not be picked when fps == 60.
+            CameraStore.FormatDescriptor(width: 4032, height: 3024,
+                                         frameRateRanges: [(1, 30)]),
+            // 1920×1440 covers 60fps — should be the pick at 60fps.
             CameraStore.FormatDescriptor(width: 1920, height: 1440,
                                          frameRateRanges: [(1, 60)]),
-            CameraStore.FormatDescriptor(width: 4032, height: 3024,
-                                         frameRateRanges: [(1, 30)])
+            // 1280×720 covers 60fps — smaller, shouldn't win at 60fps.
+            CameraStore.FormatDescriptor(width: 1280, height: 720,
+                                         frameRateRanges: [(1, 60)])
         ]
-        let chosen = CameraStore.pickFourThreeFormatIndex(
+        let pick60 = CameraStore.pickOpenGateFormat(
             descriptors: descriptors, preferredFPS: 60
         )
-        XCTAssertEqual(chosen, 3,
-                       "60fps must pick 1920×1440 — the largest 4:3 that covers 60fps.")
+        XCTAssertEqual(pick60?.index, 1,
+                       "60fps must pick the 1920×1440 format (largest that covers 60fps).")
+
+        // At 30fps the 4032×3024 format wins again.
+        let pick30 = CameraStore.pickOpenGateFormat(
+            descriptors: descriptors, preferredFPS: 30
+        )
+        XCTAssertEqual(pick30?.index, 0,
+                       "30fps must pick the 4032×3024 format (largest covering 30fps).")
     }
 
-    func testPickFourThreeFormatReturnsNilWhenNoFormatSupportsFramerate() {
-        // No 4:3 format covers 120 fps — fall back to nil so the caller
-        // can leave the device default in place rather than mis-configuring.
+    /// Impossible request: every candidate caps below the user's fps. The
+    /// algorithm returns nil so the caller leaves the device default
+    /// untouched rather than misconfiguring it.
+    func testOpenGateReturnsNilWhenNoFormatSupportsFramerate() {
         let descriptors: [CameraStore.FormatDescriptor] = [
             CameraStore.FormatDescriptor(width: 1920, height: 1080,
                                          frameRateRanges: [(1, 60)]),
             CameraStore.FormatDescriptor(width: 1440, height: 1080,
                                          frameRateRanges: [(1, 60)])
         ]
-        let chosen = CameraStore.pickFourThreeFormatIndex(
+        let pick = CameraStore.pickOpenGateFormat(
             descriptors: descriptors, preferredFPS: 120
         )
-        XCTAssertNil(chosen,
-                     "No 4:3 format covers 120fps — selection must return nil.")
-    }
-
-    func testPickFourThreeFormatRejectsNon43Aspects() {
-        // Only 16:9 inputs — selection must return nil.
-        let descriptors: [CameraStore.FormatDescriptor] = [
-            CameraStore.FormatDescriptor(width: 1920, height: 1080,
-                                         frameRateRanges: [(1, 60)]),
-            CameraStore.FormatDescriptor(width: 1280, height: 720,
-                                         frameRateRanges: [(1, 60)])
-        ]
-        let chosen = CameraStore.pickFourThreeFormatIndex(
-            descriptors: descriptors, preferredFPS: 30
-        )
-        XCTAssertNil(chosen,
-                     "No 4:3 format in the list — selection must return nil.")
+        XCTAssertNil(pick,
+                     "No format covers 120fps — selection must return nil.")
     }
 
     // MARK: - Behind-mode reliability (Bug 2)

@@ -318,19 +318,27 @@ final class CameraStore {
     /// Position is hardcoded `.front` — the rear camera affordance was
     /// dropped in the post-merge dogfooding pass.
     ///
-    /// We also pick a true 4:3 `activeFormat` here. Without this, the device
-    /// defaults to a 16:9 HD format and our 1440×1080 writer ends up with
-    /// the source letterboxed inside (black bars left/right of the PiP
-    /// preview confirmed it). Selecting a 4:3 format gives the front camera
-    /// its full sensor readout — true open-gate framing — and the PiP tile
-    /// no longer shows side bars because the buffer matches the 3:4 portrait
-    /// aspect.
+    /// Open-gate selection is tiered (see `selectOpenGateFormat`):
+    ///   1. iOS 26 + iPhone 17 family → pick a format that exposes
+    ///      `supportedDynamicAspectRatios` and switch the buffer to 1×1
+    ///      (full square sensor readout, ~3024×3024).
+    ///   2. Older iOS / older hardware → pick the largest pixel-area format
+    ///      whose framerate range covers the user's fps target. The native
+    ///      4:3 sensor IS the open gate on those devices.
+    ///
+    /// We probe BOTH `.builtInWideAngleCamera` and `.builtInUltraWideCamera`
+    /// for the front position — Apple ships the iPhone 17 square sensor
+    /// under `.builtInUltraWideCamera`. We pick whichever device exposes
+    /// formats with `supportedDynamicAspectRatios` populated; otherwise we
+    /// fall back to whichever device exists (preferring wide-angle).
+    ///
+    /// Critical: `session.sessionPreset = .inputPriority` MUST be set
+    /// before we assign `device.activeFormat` — otherwise the next
+    /// `commitConfiguration` silently overrides our format choice with the
+    /// preset's default. The caller already holds open `beginConfiguration`,
+    /// so we set the preset here while we're inside the bracket.
     nonisolated private func configureInputsLocked() {
-        guard let device = AVCaptureDevice.default(
-            .builtInWideAngleCamera,
-            for: .video,
-            position: .front
-        ) else {
+        guard let device = Self.selectFrontCameraDevice() else {
             return
         }
         do {
@@ -346,73 +354,212 @@ final class CameraStore {
             return
         }
 
-        // Pick a 4:3 format that supports the user's framerate target.
-        // Selection logic lives in `selectFourThreeFormat(...)` (pure,
-        // unit-testable) — this function just resolves the framerate from
-        // prefs and applies the chosen format under `lockForConfiguration`.
+        // Set sessionPreset = .inputPriority BEFORE writing activeFormat.
+        // Named presets (.high, .hd1920x1080, etc.) silently win over
+        // explicit format assignments at commitConfiguration time.
+        session.sessionPreset = .inputPriority
+
+        // Resolve the user's fps target, then run the tiered selection.
         let framerate = RecordingFramerate(rawValue: Prefs.recordingFramerate) ?? .default
-        if let chosen = Self.selectFourThreeFormat(
+        let fps = Double(framerate.fps)
+        guard let choice = Self.selectOpenGateFormat(
             from: device.formats,
-            preferredFPS: Double(framerate.fps)
-        ) {
-            do {
-                try device.lockForConfiguration()
-                device.activeFormat = chosen
-                device.unlockForConfiguration()
-            } catch {
-                // Lock failed (another app holds the device, etc.). The
-                // session still runs at the device default — non-fatal.
-            }
-        } else {
-            // No 4:3 format supported the requested framerate. Log and
-            // fall through to the device default.
+            preferredFPS: fps
+        ) else {
+            // No format covers the requested framerate. Leave the device
+            // default in place rather than misconfiguring it.
             #if DEBUG
-            print("[CameraStore] No 4:3 format supports \(framerate.fps) fps; using device default.")
+            print("[CameraStore] No format supports \(framerate.fps) fps; using device default.")
             #endif
+            return
+        }
+
+        do {
+            try device.lockForConfiguration()
+            device.activeFormat = choice.format
+
+            // iOS 26+ dynamic aspect — reshape the buffer to 1×1 (or first
+            // declared aspect) when the format supports it. On iPhone 17
+            // family front camera this is what gives us the full square
+            // sensor readout (true open gate).
+            if #available(iOS 26.0, *), let aspect = choice.dynamicAspect {
+                device.setDynamicAspectRatio(aspect, completionHandler: nil)
+            }
+
+            // Pin the framerate while we're inside lockForConfiguration —
+            // we already verified the chosen format supports `fps` in
+            // selectOpenGateFormat, so it's safe to lock both bounds.
+            device.activeVideoMinFrameDuration = framerate.frameDuration
+            device.activeVideoMaxFrameDuration = framerate.frameDuration
+
+            device.unlockForConfiguration()
+        } catch {
+            // Lock failed (another app holds the device, etc.). The session
+            // still runs at the device default — non-fatal.
         }
     }
 
-    /// Pure 4:3-format selection helper. Filters `formats` to those whose
-    /// `formatDescription` dimensions are within 0.01 of 4:3 and whose
-    /// `videoSupportedFrameRateRanges` cover `preferredFPS`, then returns
-    /// the highest-resolution match (by pixel area). Returns nil if no
-    /// format qualifies — caller falls back to the device default.
+    /// Probe both `.builtInWideAngleCamera` and `.builtInUltraWideCamera`
+    /// for the front position. On iPhone 17 family the square sensor is
+    /// exposed as `.builtInUltraWideCamera`; on older phones only
+    /// `.builtInWideAngleCamera` exists. We prefer whichever device has any
+    /// format with `supportedDynamicAspectRatios` populated (iOS 26+) — that's
+    /// the indicator that this hardware can do dynamic 1×1. Otherwise we
+    /// prefer wide-angle (the historic default), then ultra-wide.
+    nonisolated static func selectFrontCameraDevice() -> AVCaptureDevice? {
+        // Build a discovery session probing both device types so iPhone 17's
+        // ultra-wide square sensor is visible alongside the legacy wide-angle.
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .builtInUltraWideCamera],
+            mediaType: .video,
+            position: .front
+        )
+        let candidates = discovery.devices
+        guard !candidates.isEmpty else { return nil }
+
+        // iOS 26+: prefer the device that exposes dynamic-aspect formats —
+        // that's the iPhone 17 square sensor pathway.
+        if #available(iOS 26.0, *) {
+            let dynamicRich = candidates
+                .map { device -> (device: AVCaptureDevice, count: Int) in
+                    let count = device.formats.reduce(0) { acc, f in
+                        acc + (f.supportedDynamicAspectRatios.isEmpty ? 0 : 1)
+                    }
+                    return (device, count)
+                }
+                .filter { $0.count > 0 }
+                .max(by: { $0.count < $1.count })
+            if let pick = dynamicRich {
+                return pick.device
+            }
+        }
+
+        // Fallback ordering: wide-angle first (historic default), then
+        // ultra-wide. On iPhone 17 with iOS < 26 this lands on wide-angle
+        // (which still has a sensible 4:3 readout); on older devices it
+        // matches what we shipped before.
+        if let wide = candidates.first(where: { $0.deviceType == .builtInWideAngleCamera }) {
+            return wide
+        }
+        return candidates.first
+    }
+
+    /// Tiered open-gate format selection.
     ///
-    /// On the iPhone 17e simulator the front-camera reports formats at
-    /// 4032×3024, 1920×1440, 1440×1080, and 960×720 (all 4:3 readouts).
-    /// At 30 fps we land on 4032×3024; at 60 fps on whichever 4:3 format
-    /// has 60 fps in its supported ranges (typically 1920×1440 or lower).
-    nonisolated static func selectFourThreeFormat(
+    /// - Step 1: filter `formats` to those whose `videoSupportedFrameRateRanges`
+    ///   cover `preferredFPS`.
+    /// - Step 2 (iOS 26+): if any candidate has a non-empty
+    ///   `supportedDynamicAspectRatios`, pick the largest such format and
+    ///   return it with a `dynamicAspect` of `.ratio1x1` if 1×1 is in the
+    ///   list (full square sensor on iPhone 17), else the first declared
+    ///   aspect.
+    /// - Step 3 (fallback): pick the largest pixel-area candidate regardless
+    ///   of aspect; return with `dynamicAspect = nil` so the caller skips
+    ///   the iOS 26 reshape call.
+    /// Returns nil if no format covers `preferredFPS`.
+    nonisolated static func selectOpenGateFormat(
         from formats: [AVCaptureDevice.Format],
         preferredFPS: Double
-    ) -> AVCaptureDevice.Format? {
-        // Map each format to the (width, height, [(min, max)]) shape so
-        // we can run the decision through the pure helper. We have to do
-        // this two-pass to associate the chosen tuple back to its source
-        // format; we keep parallel arrays.
+    ) -> OpenGateChoice? {
         let summaries: [(format: AVCaptureDevice.Format, descriptor: FormatDescriptor)] = formats.map { format in
-            let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-            let ranges = format.videoSupportedFrameRateRanges.map { range in
-                (min: range.minFrameRate, max: range.maxFrameRate)
-            }
-            return (format, FormatDescriptor(width: Int(dims.width), height: Int(dims.height), frameRateRanges: ranges))
+            Self.summarize(format)
         }
-        guard let chosenIndex = pickFourThreeFormatIndex(
+        guard let pick = pickOpenGateFormat(
             descriptors: summaries.map { $0.descriptor },
             preferredFPS: preferredFPS
         ) else {
             return nil
         }
-        return summaries[chosenIndex].format
+        let format = summaries[pick.index].format
+
+        // The raw aspect string is stored verbatim; the typed accessor
+        // (`OpenGateChoice.dynamicAspect`) gates on iOS 26 at read time.
+        return OpenGateChoice(format: format, dynamicAspectRaw: pick.dynamicAspectRaw)
+    }
+
+    /// Summarize an AVCaptureDevice.Format into the pure FormatDescriptor.
+    /// Pulls dynamic-aspect support from the iOS 26 API when available.
+    nonisolated private static func summarize(
+        _ format: AVCaptureDevice.Format
+    ) -> (format: AVCaptureDevice.Format, descriptor: FormatDescriptor) {
+        let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        let ranges = format.videoSupportedFrameRateRanges.map { range in
+            (min: range.minFrameRate, max: range.maxFrameRate)
+        }
+        var dynamicRatios: [String] = []
+        if #available(iOS 26.0, *) {
+            dynamicRatios = format.supportedDynamicAspectRatios.map { $0.rawValue }
+        }
+        return (
+            format,
+            FormatDescriptor(
+                width: Int(dims.width),
+                height: Int(dims.height),
+                frameRateRanges: ranges,
+                supportsDynamicAspectRatios: !dynamicRatios.isEmpty,
+                dynamicAspectRatios: dynamicRatios
+            )
+        )
+    }
+
+    /// Pure-value choice surfaced from the open-gate algorithm. The format
+    /// reference is the AVFoundation object the caller assigns to
+    /// `device.activeFormat`; the optional `dynamicAspect` is the iOS 26+
+    /// aspect to apply via `setDynamicAspectRatio`. Nil means "leave the
+    /// format's native aspect alone" (older OS, or a format that doesn't
+    /// declare dynamic-aspect support).
+    struct OpenGateChoice {
+        let format: AVCaptureDevice.Format
+        @available(iOS 26.0, *)
+        var dynamicAspect: AVCaptureDevice.AspectRatio? {
+            get {
+                guard let raw = _dynamicAspectRaw else { return nil }
+                return AVCaptureDevice.AspectRatio(rawValue: raw)
+            }
+        }
+        fileprivate let _dynamicAspectRaw: String?
+
+        @available(iOS 26.0, *)
+        init(format: AVCaptureDevice.Format, dynamicAspect: AVCaptureDevice.AspectRatio?) {
+            self.format = format
+            self._dynamicAspectRaw = dynamicAspect?.rawValue
+        }
+
+        init(format: AVCaptureDevice.Format, dynamicAspectRaw: String?) {
+            self.format = format
+            self._dynamicAspectRaw = dynamicAspectRaw
+        }
     }
 
     /// Lightweight value-type description of an AVCaptureDevice.Format —
-    /// only the fields that drive the 4:3 + framerate decision. Pure value
-    /// type so tests can construct fake formats without AVFoundation.
+    /// only the fields that drive the open-gate decision. Pure value type
+    /// so tests can construct fake formats without AVFoundation.
+    ///
+    /// `supportsDynamicAspectRatios` mirrors whether
+    /// `format.supportedDynamicAspectRatios` is non-empty (iOS 26+); the
+    /// `dynamicAspectRatios` array carries the raw values
+    /// (e.g. "AVCaptureAspectRatio1x1") so the pure helper can pick 1×1
+    /// without referencing AVFoundation.
     struct FormatDescriptor: Equatable, Sendable {
         let width: Int
         let height: Int
         let frameRateRanges: [(min: Double, max: Double)]
+        let supportsDynamicAspectRatios: Bool
+        let dynamicAspectRatios: [String]
+
+        init(
+            width: Int,
+            height: Int,
+            frameRateRanges: [(min: Double, max: Double)],
+            supportsDynamicAspectRatios: Bool = false,
+            dynamicAspectRatios: [String] = []
+        ) {
+            self.width = width
+            self.height = height
+            self.frameRateRanges = frameRateRanges
+            self.supportsDynamicAspectRatios = supportsDynamicAspectRatios
+            self.dynamicAspectRatios = dynamicAspectRatios
+        }
 
         static func == (lhs: FormatDescriptor, rhs: FormatDescriptor) -> Bool {
             guard lhs.width == rhs.width, lhs.height == rhs.height else { return false }
@@ -420,33 +567,64 @@ final class CameraStore {
             for (l, r) in zip(lhs.frameRateRanges, rhs.frameRateRanges) {
                 if l.min != r.min || l.max != r.max { return false }
             }
-            return true
+            guard lhs.supportsDynamicAspectRatios == rhs.supportsDynamicAspectRatios else { return false }
+            return lhs.dynamicAspectRatios == rhs.dynamicAspectRatios
         }
     }
 
-    /// Pure decision helper — returns the index of the 4:3 format that
-    /// supports `preferredFPS` and has the highest pixel area, or nil if
-    /// no format qualifies. Tests target this directly.
-    nonisolated static func pickFourThreeFormatIndex(
+    /// Pure decision helper. Returns the index of the chosen format and the
+    /// raw aspect-ratio string to apply via `setDynamicAspectRatio` (or nil
+    /// to leave the format's native aspect alone). Tests target this directly.
+    ///
+    /// The algorithm:
+    ///   1. Filter to formats whose framerate range covers `preferredFPS`.
+    ///   2. If any candidate has `supportsDynamicAspectRatios == true`, pick
+    ///      the largest such format. If 1×1 is in its declared list, return
+    ///      `dynamicAspectRaw = "AVCaptureAspectRatio1x1"`; else the first
+    ///      declared aspect.
+    ///   3. Else pick the largest pixel-area candidate, `dynamicAspectRaw = nil`.
+    nonisolated static func pickOpenGateFormat(
         descriptors: [FormatDescriptor],
         preferredFPS: Double
-    ) -> Int? {
-        let target: Double = 4.0 / 3.0
+    ) -> (index: Int, dynamicAspectRaw: String?)? {
+        // Step 1: filter by framerate support.
         let candidates: [(index: Int, descriptor: FormatDescriptor)] = descriptors
             .enumerated()
             .compactMap { (index, d) in
                 guard d.height > 0 else { return nil }
-                let ratio = Double(d.width) / Double(d.height)
-                guard abs(ratio - target) < 0.01 else { return nil }
                 let coversFPS = d.frameRateRanges.contains { range in
                     preferredFPS >= range.min - 0.01 && preferredFPS <= range.max + 0.01
                 }
                 return coversFPS ? (index, d) : nil
             }
-        return candidates.max { lhs, rhs in
-            (lhs.descriptor.width * lhs.descriptor.height) <
+        guard !candidates.isEmpty else { return nil }
+
+        // Step 2: dynamic-aspect-capable candidates win when present.
+        let dynamic = candidates.filter { $0.descriptor.supportsDynamicAspectRatios }
+        if let best = dynamic.max(by: byPixelArea) {
+            // Prefer 1×1 (square sensor full readout) if declared; else the
+            // first listed aspect (which iOS 26 also makes the default).
+            let supported = best.descriptor.dynamicAspectRatios
+            let oneByOne = "AVCaptureAspectRatio1x1"
+            let aspect = supported.contains(oneByOne) ? oneByOne : supported.first
+            return (best.index, aspect)
+        }
+
+        // Step 3: fallback — largest pixel-area candidate, native aspect.
+        if let best = candidates.max(by: byPixelArea) {
+            return (best.index, nil)
+        }
+        return nil
+    }
+
+    /// Sort comparator — a < b when a's pixel area is smaller. Used with
+    /// `Sequence.max(by:)` to find the largest.
+    nonisolated private static func byPixelArea(
+        _ lhs: (index: Int, descriptor: FormatDescriptor),
+        _ rhs: (index: Int, descriptor: FormatDescriptor)
+    ) -> Bool {
+        (lhs.descriptor.width * lhs.descriptor.height) <
             (rhs.descriptor.width * rhs.descriptor.height)
-        }?.index
     }
 
     // MARK: - Persistence

@@ -31,6 +31,50 @@ final class PreviewView: UIView {
         // swiftlint:disable:next force_cast
         return layer as! AVCaptureVideoPreviewLayer
     }
+
+    /// KVO observation token for the active video device's `dynamicDimensions`
+    /// (iOS 26+). When the buffer aspect changes (e.g. iPhone 17 1×1 → 4:3
+    /// transition under setDynamicAspectRatio), we trigger a layout pass so
+    /// the layer re-runs `.resizeAspect` against its bounds. With
+    /// `videoGravity = .resizeAspect` on the layer, the layer itself handles
+    /// the actual fit; our job is just to invalidate layout on every aspect
+    /// flip so any parent containers reflow if they bind to bounds.
+    private var dynamicDimensionsObserver: NSKeyValueObservation?
+    private weak var observedDevice: AVCaptureDevice?
+
+    /// Refresh the dynamic-dimensions observer against the current session.
+    /// Called from `updateUIView` after the session pointer is verified.
+    /// No-op below iOS 26 (the API isn't there).
+    func refreshDynamicDimensionsObservation() {
+        if #available(iOS 26.0, *) {
+            let device = (previewLayer.session?.inputs
+                .compactMap { $0 as? AVCaptureDeviceInput }
+                .first { $0.device.hasMediaType(.video) })?.device
+            // Same device → keep the existing observer.
+            if device === observedDevice { return }
+
+            // Tear down the old observer.
+            dynamicDimensionsObserver?.invalidate()
+            dynamicDimensionsObserver = nil
+            observedDevice = device
+
+            guard let device else { return }
+            dynamicDimensionsObserver = device.observe(
+                \.dynamicDimensions,
+                options: [.new]
+            ) { [weak self] _, _ in
+                // KVO can fire on a background queue. Hop to main before
+                // touching UIKit / CoreAnimation.
+                DispatchQueue.main.async {
+                    self?.setNeedsLayout()
+                }
+            }
+        }
+    }
+
+    deinit {
+        dynamicDimensionsObserver?.invalidate()
+    }
 }
 
 /// SwiftUI representable for the camera preview. The owner constructs the
@@ -54,6 +98,7 @@ struct CameraPreview: UIViewRepresentable {
         view.previewLayer.videoGravity = gravity
         view.backgroundColor = .black
         applyMirrorTransform(to: view)
+        view.refreshDynamicDimensionsObservation()
         return view
     }
 
@@ -70,6 +115,9 @@ struct CameraPreview: UIViewRepresentable {
             uiView.previewLayer.session = session
         }
         applyMirrorTransform(to: uiView)
+        // Re-bind the iOS 26 dynamic-dimensions observer in case the input
+        // device changed underneath us (camera-store reconfigure).
+        uiView.refreshDynamicDimensionsObservation()
     }
 
     /// The mirror transform composes against the preview layer (or its

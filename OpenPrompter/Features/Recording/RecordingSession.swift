@@ -127,6 +127,13 @@ final class RecordingSession {
         /// flip mid-recording doesn't change the destination list.
         var lockedDestinations: SaveDestinations = .default
         var sampleBufferRouter: SampleBufferRouter?
+        /// Buffer dimensions the writer was configured with — sourced from
+        /// the active capture device's `dynamicDimensions` (iOS 26 dynamic
+        /// aspect) or `activeFormat.formatDescription` (everywhere else).
+        /// Zero means "we couldn't determine a dimension — start the writer
+        /// session lazily on the first sample buffer".
+        var outputWidth: Int = 0
+        var outputHeight: Int = 0
     }
 
     /// Lock guarding all writer-pipeline properties. Held briefly — copy
@@ -355,14 +362,33 @@ final class RecordingSession {
         }
         writer.shouldOptimizeForNetworkUse = false
 
+        // Resolve writer dimensions from the active capture device. On iOS
+        // 26+ when dynamic aspect is in play, prefer `dynamicDimensions`
+        // (the actual reshaped buffer); otherwise read `activeFormat`'s
+        // CMVideoFormatDescription. If both fail (no input attached, mid-
+        // reconfigure), we use a safe 1440×1080 4:3 default — the writer
+        // would otherwise fail at construction with zero dimensions.
+        // AVFoundation will scale the source buffer if there's a mismatch
+        // (in practice: there isn't, the camera store just attached the
+        // input three configuration steps ago).
+        let resolvedDims = Self.resolveWriterDimensions(from: cameraSession)
+        let writerWidth = resolvedDims.width > 0 ? resolvedDims.width : 1440
+        let writerHeight = resolvedDims.height > 0 ? resolvedDims.height : 1080
+
+        // Short-edge dimension drives the bitrate scaling. After the writer
+        // applies the 90° transform, the on-disk video's "short edge" is
+        // the smaller of (width, height); that's what we hand to the
+        // bitrate calculator.
+        let shortEdge = max(1, min(writerWidth, writerHeight))
+
         // Video input — HEVC at the chosen bitrate, ITU-R 709 color (no HDR
         // for selfie content).
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: quality.codec,
-            AVVideoWidthKey: 1080,
-            AVVideoHeightKey: 1440, // 4:3 portrait — front-camera open-gate-friendly
+            AVVideoWidthKey: writerWidth,
+            AVVideoHeightKey: writerHeight,
             AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: quality.bitsPerSecond(forShortDimension: 1080),
+                AVVideoAverageBitRateKey: quality.bitsPerSecond(forShortDimension: shortEdge),
                 AVVideoExpectedSourceFrameRateKey: framerate.fps
             ],
             AVVideoColorPropertiesKey: [
@@ -409,6 +435,8 @@ final class RecordingSession {
             state.hasStartedSession = false
             state.sessionStartTime = nil
             state.sampleBufferRouter = router
+            state.outputWidth = writerWidth
+            state.outputHeight = writerHeight
         }
 
         // Capture the lock + recordingQueue into locals so the cameraSessionQueue
@@ -484,30 +512,12 @@ final class RecordingSession {
                     lock.withLock { $0.audioOutput = audioOut }
                 }
 
-                // Lock framerate at the device level so the writer sees a
-                // stable cadence. The active format (selected by CameraStore
-                // for true 4:3 open-gate) MUST cover this framerate or we
-                // skip the lock — the dogfood crash on 60fps + High traced
-                // back to setting `activeVideoMinFrameDuration` past the
-                // active format's supported range. The writer then expected
-                // 60fps but the source delivered ~30fps, the buffer pacing
-                // built memory pressure, and the OS killed the app.
-                if let device = (cameraSession.inputs.compactMap { $0 as? AVCaptureDeviceInput }
-                    .first { $0.device.hasMediaType(.video) })?.device {
-                    let fps = Double(framerate.fps)
-                    let supported = device.activeFormat.videoSupportedFrameRateRanges.contains {
-                        fps >= $0.minFrameRate - 0.01 && fps <= $0.maxFrameRate + 0.01
-                    }
-                    if supported, (try? device.lockForConfiguration()) != nil {
-                        device.activeVideoMinFrameDuration = framerate.frameDuration
-                        device.activeVideoMaxFrameDuration = framerate.frameDuration
-                        device.unlockForConfiguration()
-                    } else if !supported {
-                        #if DEBUG
-                        print("[RecordingSession] Active format does not support \(framerate.fps) fps; leaving device default.")
-                        #endif
-                    }
-                }
+                // Framerate pinning is handled by `CameraStore.configureInputsLocked`
+                // when the active format is chosen — it locks both
+                // `activeVideoMinFrameDuration` and `activeVideoMaxFrameDuration`
+                // inside the same `lockForConfiguration` block as the format
+                // assignment. We rely on that pin here; re-locking from the
+                // recording side races the camera store's own lock holders.
 
                 continuation.resume()
             }
@@ -864,6 +874,44 @@ final class RecordingSession {
             // Audio-session activation is best-effort. The writer falls
             // back to the system route if we can't lock our category.
         }
+    }
+
+    /// Resolve the writer's output dimensions from the capture session's
+    /// active video device. iOS 26+ prefers `dynamicDimensions` (the actual
+    /// reshaped buffer when dynamic aspect is in play); otherwise we fall
+    /// back to `activeFormat.formatDescription`. Returns (0, 0) only if
+    /// neither path produces valid dimensions, in which case the writer is
+    /// configured with zeros and the appendSampleBuffer path lazily kicks
+    /// in once the first frame's CMFormatDescription is known.
+    ///
+    /// IMPORTANT: dimensions returned here are buffer-native (landscape on
+    /// the front camera). The writer applies a 90° rotation transform on
+    /// the video input so the resulting MOV plays right-side-up, but the
+    /// writer's `AVVideoWidthKey`/`AVVideoHeightKey` describe the source
+    /// buffer's pre-rotation shape — landscape (width > height) for the
+    /// 4:3 path, square (width == height) for the iPhone 17 1×1 path.
+    nonisolated private static func resolveWriterDimensions(
+        from cameraSession: AVCaptureSession
+    ) -> (width: Int, height: Int) {
+        guard let device = (cameraSession.inputs
+            .compactMap { $0 as? AVCaptureDeviceInput }
+            .first { $0.device.hasMediaType(.video) })?.device
+        else {
+            return (width: 0, height: 0)
+        }
+
+        // iOS 26+: dynamicDimensions reflects the post-reshape buffer when
+        // setDynamicAspectRatio has been applied. {0,0} when no dynamic
+        // aspect is active — fall through to activeFormat in that case.
+        if #available(iOS 26.0, *) {
+            let dyn = device.dynamicDimensions
+            if dyn.width > 0 && dyn.height > 0 {
+                return (Int(dyn.width), Int(dyn.height))
+            }
+        }
+
+        let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        return (Int(dims.width), Int(dims.height))
     }
 
     /// Resolve the user's pinned mic source, if currently connected.
