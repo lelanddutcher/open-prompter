@@ -270,12 +270,24 @@ enum RecordingSelfTest {
         guard let docs = try? FileManager.default.url(
             for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: false
         ) else { return nil }
-        let recordings = docs.appendingPathComponent("Recordings", isDirectory: true)
 
+        // First-choice path: the DEBUG-only canonical copy that
+        // RecordingSession stashes BEFORE Photos save deletes the original.
+        // We can't scan Documents/Recordings/ for the real file because
+        // production deletes it post-save to avoid spurious recovery
+        // banners on next launch.
+        let canonical = docs.appendingPathComponent("SelfTestLastRecording.mov")
+        if FileManager.default.fileExists(atPath: canonical.path) {
+            return canonical
+        }
+
+        // Fallback: a stale .mov in Documents/Recordings/ (the recovery-
+        // flow surface — only present after a force-quit interrupted a
+        // take). Useful for testing the recovery path itself.
+        let recordings = docs.appendingPathComponent("Recordings", isDirectory: true)
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: recordings, includingPropertiesForKeys: [.creationDateKey, .contentModificationDateKey]
         ) else { return nil }
-
         let movies = entries.filter { $0.pathExtension.lowercased() == "mov" }
         let sorted = movies.sorted { lhs, rhs in
             let lhsDate = (try? lhs.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast

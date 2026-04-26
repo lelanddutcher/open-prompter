@@ -948,6 +948,21 @@ final class RecordingSession {
         // If Photos failed, keep the sandbox file so the user can recover
         // it via Files app or via the recovery banner.
         if photosOK {
+            #if DEBUG
+            // Stash a canonical "last recording" copy at a stable path
+            // BEFORE the post-save delete fires. The self-test harness
+            // reads from this path because Documents/Recordings/ would
+            // otherwise be empty (the file we just saved is removed below
+            // to avoid spurious recovery banners). Production builds skip
+            // the copy entirely.
+            if let docs = try? FileManager.default.url(
+                for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: false
+            ) {
+                let lastRec = docs.appendingPathComponent("SelfTestLastRecording.mov")
+                try? FileManager.default.removeItem(at: lastRec)
+                try? FileManager.default.copyItem(at: url, to: lastRec)
+            }
+            #endif
             RecordingFileStore.removeRecording(at: url)
         }
         writerStateLock.withLock { state in
