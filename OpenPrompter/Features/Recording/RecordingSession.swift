@@ -404,10 +404,17 @@ final class RecordingSession {
         // dynamic-aspect reshape stable across REC tap (the dogfood-pass-3
         // "PiP stretches when REC starts" bug). We just attach the audio
         // DATA OUTPUT here to gate samples into the writer.
+        // Snapshot the dynamic-aspect-ratio request from the camera store so we
+        // can re-apply it AFTER the begin/commit cycle below. Adding outputs
+        // forces a session reconfigure on iOS 26 which silently resets the
+        // dynamic aspect ratio back to the format's native (the dogfood-pass-4
+        // "PiP stretches when REC tap fires" smoking gun — moving the audio
+        // INPUT to session-config time fixed the input side, but adding the
+        // video + audio data OUTPUTs here still triggered the same reset).
+        let cameraStoreRef = cameraStore
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             cameraSessionQueue.async {
                 cameraSession.beginConfiguration()
-                defer { cameraSession.commitConfiguration() }
 
                 let videoOut = AVCaptureVideoDataOutput()
                 videoOut.alwaysDiscardsLateVideoFrames = false
@@ -432,6 +439,19 @@ final class RecordingSession {
                             connection.automaticallyAdjustsVideoMirroring = false
                             connection.isVideoMirrored = false
                         }
+                        // Pre-rotate buffers at capture time (iOS 17+ API).
+                        // This avoids the AVAssetWriter post-write rotation
+                        // transform (`videoInput.transform`) that produced a
+                        // black first frame on iOS 26 — the writer-level
+                        // transform sometimes generates a black placeholder
+                        // for frame 0 before the encoder's rotated output
+                        // catches up. Pre-rotating at the connection means
+                        // sample buffers arrive already in portrait
+                        // orientation; the writer just stores them without
+                        // any transform.
+                        if connection.isVideoRotationAngleSupported(90) {
+                            connection.videoRotationAngle = 90
+                        }
                     }
                 }
                 let audioOut = AVCaptureAudioDataOutput()
@@ -447,6 +467,37 @@ final class RecordingSession {
                 // inside the same `lockForConfiguration` block as the format
                 // assignment. We rely on that pin here; re-locking from the
                 // recording side races the camera store's own lock holders.
+
+                cameraSession.commitConfiguration()
+
+                // RE-APPLY the dynamic aspect ratio after commit. Adding the
+                // video + audio outputs above forced a reconfigure that
+                // silently reset iOS 26's dynamic aspect to the format's
+                // native (4:3). Without this re-application the live preview
+                // and the captured buffers reshape from 1:1 back to 4:3 the
+                // moment recording starts — the user-visible "PiP stretches"
+                // symptom. The lock-then-set-then-unlock sequence is async
+                // because `setDynamicAspectRatio` is async; we don't wait on
+                // its completion here because the next sample buffer carrying
+                // the reshaped dimensions is what the lazy-writer reads
+                // anyway, and the preview layer picks up the reshape on its
+                // own KVO cycle.
+                if #available(iOS 26.0, *),
+                   let aspectRaw = cameraStoreRef?.requestedDynamicAspectRaw,
+                   let device = (cameraSession.inputs
+                       .compactMap { $0 as? AVCaptureDeviceInput }
+                       .first { $0.device.hasMediaType(.video) })?.device {
+                    let aspect = AVCaptureDevice.AspectRatio(rawValue: aspectRaw)
+                    do {
+                        try device.lockForConfiguration()
+                        device.setDynamicAspectRatio(aspect, completionHandler: nil)
+                        device.unlockForConfiguration()
+                    } catch {
+                        // Lock failed — non-fatal. The recording still proceeds
+                        // at the format's native aspect; the preview will look
+                        // wrong but the file is intact.
+                    }
+                }
 
                 continuation.resume()
             }
@@ -561,10 +612,14 @@ final class RecordingSession {
 
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = true
-        // Rotate to portrait — front-camera connection is landscape-right by
-        // default; rotating 90° via the writer input gives Photos a file
-        // that plays the right way up.
-        videoInput.transform = CGAffineTransform(rotationAngle: .pi / 2)
+        // Rotation is now handled at the AVCaptureConnection level
+        // (`connection.videoRotationAngle = 90`, set when the data output is
+        // attached). Sample buffers arrive in portrait orientation already;
+        // the writer stores them without any post-rotation transform. This
+        // path replaces the previous `videoInput.transform = rotation(90°)`
+        // which sometimes produced a black first frame on iOS 26 because
+        // the post-write rotation generated a placeholder before the
+        // encoder's rotated output caught up.
 
         // Audio input — AAC, voiceover bitrate.
         let audioSettings: [String: Any] = [

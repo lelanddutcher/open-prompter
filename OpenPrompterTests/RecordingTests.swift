@@ -248,44 +248,45 @@ final class RecordingTests: XCTestCase {
         }
     }
 
-    /// Dogfood-pass-3 bug 2: bitrates are FIXED per tier — we don't scale
-    /// with pixel count. HEVC compresses very efficiently and the iPhone 17
-    /// hardware encoder dropped frames at the previous 150 Mbps cap (the
-    /// 22.68 fps actual / 24 fps requested smoking gun). Real iOS Camera
-    /// ships HEVC at 50 Mbps for 4K30 and the world is fine.
-    func testRecordingQualityStandardBitrateIs50Mbps() {
-        XCTAssertEqual(RecordingQuality.standard.averageBitRate, 50_000_000,
-                       "Standard must be 50 Mbps — matches iOS Camera 4K.")
+    /// Dogfood-pass-4 bitrate retune: previous 50/120 Mbps targets matched
+    /// iOS Camera's cinema-grade defaults but produced 200+ MB files for
+    /// short selfie takes. The user's expectation for a teleprompter app
+    /// is social-share-friendly file sizes, so Standard drops to 25 Mbps
+    /// and High drops to 50 Mbps. HEVC at these rates is still high quality
+    /// for talking-head content.
+    func testRecordingQualityStandardBitrateIs25Mbps() {
+        XCTAssertEqual(RecordingQuality.standard.averageBitRate, 25_000_000,
+                       "Standard must be 25 Mbps — social-share friendly for selfie content.")
     }
 
-    func testRecordingQualityHighBitrateIs120Mbps() {
-        XCTAssertEqual(RecordingQuality.high.averageBitRate, 120_000_000,
-                       "High must be 120 Mbps — pro-creator headroom.")
+    func testRecordingQualityHighBitrateIs50Mbps() {
+        XCTAssertEqual(RecordingQuality.high.averageBitRate, 50_000_000,
+                       "High must be 50 Mbps — matches iOS Camera 4K HEVC.")
     }
 
     /// 60 fps gets a 50% bonus to maintain visible quality on motion. Frame
     /// rate effectively doubles per-frame compression demand.
-    func testRecordingQualityStandard60FpsIs75Mbps() {
+    func testRecordingQualityStandard60FpsIs37_5Mbps() {
         XCTAssertEqual(RecordingQuality.standard.averageBitRate(framerate: 60),
-                       75_000_000,
-                       "Standard @ 60 fps must be 50 Mbps × 1.5 = 75 Mbps.")
+                       37_500_000,
+                       "Standard @ 60 fps must be 25 Mbps × 1.5 = 37.5 Mbps.")
     }
 
-    func testRecordingQualityHigh60FpsIs180Mbps() {
+    func testRecordingQualityHigh60FpsIs75Mbps() {
         XCTAssertEqual(RecordingQuality.high.averageBitRate(framerate: 60),
-                       180_000_000,
-                       "High @ 60 fps must be 120 Mbps × 1.5 = 180 Mbps.")
+                       75_000_000,
+                       "High @ 60 fps must be 50 Mbps × 1.5 = 75 Mbps.")
     }
 
     /// 24 and 30 fps get the unscaled base bitrate — only 60 fps triggers
     /// the bonus.
     func testRecordingQualityFramerateBonusOnlyAt60Fps() {
         XCTAssertEqual(RecordingQuality.standard.averageBitRate(framerate: 24),
-                       50_000_000)
+                       25_000_000)
         XCTAssertEqual(RecordingQuality.standard.averageBitRate(framerate: 30),
-                       50_000_000)
+                       25_000_000)
         XCTAssertEqual(RecordingQuality.high.averageBitRate(framerate: 30),
-                       120_000_000)
+                       50_000_000)
     }
 
     func testRecordingFramerateRoundTrip() throws {

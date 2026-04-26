@@ -42,14 +42,26 @@ enum RecordingQuality: String, CaseIterable, Codable, Hashable, Sendable {
     /// Average bitrate in bits per second. Fixed per tier; we don't scale
     /// with pixel count because HEVC scales encoding effort with resolution
     /// and the iPhone 17 hardware encoder works hard to keep within budget.
-    /// Asking it for 150 Mbps at 12 MP causes frame drops (the 22.68 fps
-    /// dogfood symptom). Real iOS Camera ships HEVC at 50 Mbps for 4K30 and
-    /// the world is fine — HEVC compresses very efficiently and we don't
-    /// need to scale bitrate with pixel count for selfie content.
+    ///
+    /// Targeting *social-creator* file sizes rather than cinema-grade:
+    /// - Standard 25 Mbps ≈ 11 MB / 30 s — close to iPhone Camera's 1080p
+    ///   HEVC default scaled up for 9 MP square output. Plenty of quality
+    ///   for talking-head selfie content; manageable file sizes for sharing.
+    /// - High 50 Mbps ≈ 22 MB / 30 s — matches iPhone Camera's 4K30 HEVC
+    ///   default. Pro headroom for users who plan to do significant grading
+    ///   or reframing in post.
+    ///
+    /// Earlier iterations shipped 150 Mbps Standard / 360 Mbps High because
+    /// the formula scaled by pixel count, which produced absurd file sizes
+    /// (213 MB for a 4 s file) AND blew the hardware encoder budget at
+    /// 30/60 fps (22.68 fps recorded vs 24 requested — the encoder dropped
+    /// frames trying to satisfy the bitrate). The numbers below match the
+    /// user's social-share expectations and stay well under the encoder
+    /// ceiling on iPhone 17.
     var averageBitRate: Int {
         switch self {
-        case .standard: return 50_000_000     // 50 Mbps — matches iOS Camera 4K
-        case .high:     return 120_000_000    // 120 Mbps — pro-creator headroom
+        case .standard: return 25_000_000     // 25 Mbps — social-share friendly
+        case .high:     return 50_000_000     // 50 Mbps — matches iOS Camera 4K
         }
     }
 
