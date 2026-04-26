@@ -87,6 +87,13 @@ final class RecordingSession {
     /// happening on the same queue.
     private let cameraSessionQueue: DispatchQueue?
 
+    /// Reference back to the camera store so we can read the requested
+    /// dynamic-aspect on iOS 26 (used to compute post-reshape dims when
+    /// `device.dynamicDimensions` hasn't caught up to the async reshape).
+    /// Weak — the store outlives the session, but in tests we may hand
+    /// `nil`.
+    private weak var cameraStore: CameraStore?
+
     /// Active script's URL — captured when the prompter mounts so the
     /// iCloud-next-to-script copy knows where to land. Updated when the
     /// user opens a different script.
@@ -174,6 +181,7 @@ final class RecordingSession {
         suppressDeviceWork: Bool = false
     ) {
         self.state = state
+        self.cameraStore = cameraStore
         self.cameraSession = cameraStore?.session
         self.cameraSessionQueue = cameraStore?.sessionQueueRef
         self.suppressDeviceWork = suppressDeviceWork
@@ -368,18 +376,28 @@ final class RecordingSession {
         // CMVideoFormatDescription. If both fail (no input attached, mid-
         // reconfigure), we use a safe 1440×1080 4:3 default — the writer
         // would otherwise fail at construction with zero dimensions.
-        // AVFoundation will scale the source buffer if there's a mismatch
-        // (in practice: there isn't, the camera store just attached the
-        // input three configuration steps ago).
-        let resolvedDims = Self.resolveWriterDimensions(from: cameraSession)
+        //
+        // Dogfood-pass-2: `setDynamicAspectRatio(.ratio1x1, completionHandler: nil)`
+        // is async — the reshape completes on a later AVFoundation tick, so
+        // `dynamicDimensions` reads {0,0} synchronously after the call.
+        // Before this fix the writer was configured with the 4032×3024
+        // formatDescription fallback (the user's "3024×4032 file" smoking
+        // gun), and the resulting bitrate scaling was sized for that big
+        // buffer rather than the 3024×3024 reshape that actually arrives.
+        // Resolving here picks {0,0} first; the appendSampleBuffer path
+        // then re-resolves dimensions from the first frame's
+        // CMFormatDescription and (re)configures the writer once.
+        let resolvedDims = Self.resolveWriterDimensions(
+            from: cameraSession,
+            requestedAspectRaw: cameraStore?.requestedDynamicAspectRaw
+        )
         let writerWidth = resolvedDims.width > 0 ? resolvedDims.width : 1440
         let writerHeight = resolvedDims.height > 0 ? resolvedDims.height : 1080
 
-        // Short-edge dimension drives the bitrate scaling. After the writer
-        // applies the 90° transform, the on-disk video's "short edge" is
-        // the smaller of (width, height); that's what we hand to the
-        // bitrate calculator.
-        let shortEdge = max(1, min(writerWidth, writerHeight))
+        // Bitrate scales by ACTUAL pixel count — the previous formula
+        // assumed the long edge was `shortEdge × 16/9`, inflating square-
+        // sensor (1×1) bitrates by ~78% (3024² square treated as 3024×5376).
+        let bitrate = quality.bitsPerSecond(forWidth: writerWidth, height: writerHeight)
 
         // Video input — HEVC at the chosen bitrate, ITU-R 709 color (no HDR
         // for selfie content).
@@ -388,8 +406,12 @@ final class RecordingSession {
             AVVideoWidthKey: writerWidth,
             AVVideoHeightKey: writerHeight,
             AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: quality.bitsPerSecond(forShortDimension: shortEdge),
-                AVVideoExpectedSourceFrameRateKey: framerate.fps
+                AVVideoAverageBitRateKey: bitrate,
+                AVVideoExpectedSourceFrameRateKey: framerate.fps,
+                // Cap keyframe interval at 1 keyframe per second of video.
+                // Without this hint the encoder can pick GOP lengths that
+                // fight the average-bitrate budget on motion-heavy content.
+                AVVideoMaxKeyFrameIntervalKey: framerate.fps
             ],
             AVVideoColorPropertiesKey: [
                 AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
@@ -397,6 +419,15 @@ final class RecordingSession {
                 AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
             ]
         ]
+        #if DEBUG
+        let recLog = Logger(
+            subsystem: "app.openprompter.recording",
+            category: "Writer-Dims-Debug"
+        )
+        recLog.info(
+            "writer setup quality=\(quality.rawValue, privacy: .public) fps=\(framerate.fps, privacy: .public) bitrate=\(bitrate, privacy: .public) dims=\(writerWidth)x\(writerHeight)"
+        )
+        #endif
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = true
         // Rotate to portrait — front-camera connection is landscape-right by
@@ -877,12 +908,20 @@ final class RecordingSession {
     }
 
     /// Resolve the writer's output dimensions from the capture session's
-    /// active video device. iOS 26+ prefers `dynamicDimensions` (the actual
-    /// reshaped buffer when dynamic aspect is in play); otherwise we fall
-    /// back to `activeFormat.formatDescription`. Returns (0, 0) only if
-    /// neither path produces valid dimensions, in which case the writer is
-    /// configured with zeros and the appendSampleBuffer path lazily kicks
-    /// in once the first frame's CMFormatDescription is known.
+    /// active video device.
+    ///
+    /// Resolution priority:
+    ///   1. iOS 26+ `device.dynamicDimensions` — the post-reshape buffer
+    ///      when `setDynamicAspectRatio` has been applied. Most accurate.
+    ///   2. If we know the requested aspect (`requestedAspectRaw` is set)
+    ///      but `dynamicDimensions` is {0,0} — the API is async and the
+    ///      reshape hasn't published yet — apply the requested aspect to
+    ///      the native format dimensions ourselves. This is the dogfood-
+    ///      pass-2 fix for the "3024×4032 file" smoking gun: before this
+    ///      path existed, we'd fall through to native 4032×3024 dims and
+    ///      the bitrate scaler would misbudget for a buffer that actually
+    ///      arrives at 3024×3024.
+    ///   3. Otherwise: native `formatDescription` dims.
     ///
     /// IMPORTANT: dimensions returned here are buffer-native (landscape on
     /// the front camera). The writer applies a 90° rotation transform on
@@ -890,8 +929,9 @@ final class RecordingSession {
     /// writer's `AVVideoWidthKey`/`AVVideoHeightKey` describe the source
     /// buffer's pre-rotation shape — landscape (width > height) for the
     /// 4:3 path, square (width == height) for the iPhone 17 1×1 path.
-    nonisolated private static func resolveWriterDimensions(
-        from cameraSession: AVCaptureSession
+    nonisolated internal static func resolveWriterDimensions(
+        from cameraSession: AVCaptureSession,
+        requestedAspectRaw: String? = nil
     ) -> (width: Int, height: Int) {
         guard let device = (cameraSession.inputs
             .compactMap { $0 as? AVCaptureDeviceInput }
@@ -900,9 +940,7 @@ final class RecordingSession {
             return (width: 0, height: 0)
         }
 
-        // iOS 26+: dynamicDimensions reflects the post-reshape buffer when
-        // setDynamicAspectRatio has been applied. {0,0} when no dynamic
-        // aspect is active — fall through to activeFormat in that case.
+        // Step 1: iOS 26+ dynamicDimensions when populated.
         if #available(iOS 26.0, *) {
             let dyn = device.dynamicDimensions
             if dyn.width > 0 && dyn.height > 0 {
@@ -910,8 +948,59 @@ final class RecordingSession {
             }
         }
 
-        let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
-        return (Int(dims.width), Int(dims.height))
+        let nativeDims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        let nativeW = Int(nativeDims.width)
+        let nativeH = Int(nativeDims.height)
+
+        // Step 2: apply the requested aspect to native dims if we know we
+        // asked for a reshape but dynamicDimensions hasn't caught up.
+        if let raw = requestedAspectRaw,
+           let resized = applyAspectRatio(rawAspect: raw, toNativeWidth: nativeW, height: nativeH)
+        {
+            return resized
+        }
+
+        // Step 3: native format dims.
+        return (nativeW, nativeH)
+    }
+
+    /// Pure helper — given a raw `AVCaptureDevice.AspectRatio` string and
+    /// the native sensor width/height (e.g. 4032×3024 on iPhone 17 front),
+    /// compute the dimensions of the buffer the camera will emit after the
+    /// dynamic-aspect reshape. Returns nil if the raw value is unrecognized.
+    /// Pure value-in / value-out so unit tests don't need AVFoundation.
+    nonisolated internal static func applyAspectRatio(
+        rawAspect: String,
+        toNativeWidth nativeW: Int,
+        height nativeH: Int
+    ) -> (width: Int, height: Int)? {
+        guard nativeW > 0 && nativeH > 0 else { return nil }
+        // Apple's raw values for the iOS 26 enum. Match Apple's string
+        // form so we don't gate this helper behind iOS 26 availability.
+        let (aspectW, aspectH): (Int, Int)
+        switch rawAspect {
+        case "AVCaptureAspectRatio1x1":  (aspectW, aspectH) = (1, 1)
+        case "AVCaptureAspectRatio4x3":  (aspectW, aspectH) = (4, 3)
+        case "AVCaptureAspectRatio16x9": (aspectW, aspectH) = (16, 9)
+        default:                          return nil
+        }
+        // Reshape preserves the smaller axis at full sensor and crops the
+        // longer axis to match the requested ratio. Compute target dims
+        // that fit inside the native frame and match `aspectW:aspectH`.
+        // For native 4032×3024 (4:3) → 1:1 means crop to 3024×3024.
+        // For native 4032×3024 (4:3) → 16:9 means crop to 4032×2268.
+        let targetW: Int
+        let targetH: Int
+        if nativeW * aspectH >= nativeH * aspectW {
+            // Native is "wider than" target ratio — height stays, crop width.
+            targetH = nativeH
+            targetW = nativeH * aspectW / aspectH
+        } else {
+            // Native is "taller than" target ratio — width stays, crop height.
+            targetW = nativeW
+            targetH = nativeW * aspectH / aspectW
+        }
+        return (targetW, targetH)
     }
 
     /// Resolve the user's pinned mic source, if currently connected.

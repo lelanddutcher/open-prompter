@@ -26,9 +26,23 @@
 import AVFoundation
 import Foundation
 import Observation
+import os
 
 #if canImport(UIKit)
 import UIKit
+#endif
+
+#if DEBUG
+/// `os_log` channel tagged `[Behind-Mode-Debug]`. Tracing the chip-tap →
+/// session-flip → preview-mount sequence on real iPhone 17 hardware is the
+/// only way to verify the pip → behind path; lab + simulator can't repro
+/// because there's no real camera. Filter Console.app on the subsystem to
+/// follow a take. Kept behind `#if DEBUG` so production builds don't carry
+/// the cost.
+fileprivate let behindLog = Logger(
+    subsystem: "app.openprompter.camera",
+    category: "Behind-Mode-Debug"
+)
 #endif
 
 @Observable
@@ -82,6 +96,23 @@ final class CameraStore {
     /// Currently-attached camera input. `nil` until `start()` succeeds.
     nonisolated(unsafe) private var currentInput: AVCaptureDeviceInput?
 
+    /// Raw aspect-ratio string we requested via `setDynamicAspectRatio` on
+    /// iOS 26+, kept so RecordingSession can compute the post-reshape buffer
+    /// dimensions even when `device.dynamicDimensions` reads {0,0} (the API
+    /// is async; reads can race the actual reshape on first session start).
+    /// Nil on older OS / older hardware where dynamic aspect isn't in play.
+    /// Read-only via `requestedDynamicAspectRaw`.
+    nonisolated(unsafe) private var _requestedDynamicAspectRaw: String?
+
+    /// Read-only mirror of the last requested dynamic aspect ratio (raw
+    /// string). RecordingSession reads this to compute post-reshape dims.
+    nonisolated var requestedDynamicAspectRaw: String? {
+        // Loaded from a single property write inside `configureInputsLocked`;
+        // a torn read isn't possible because `String?` writes are atomic at
+        // pointer width. Direct read is fine.
+        _requestedDynamicAspectRaw
+    }
+
     /// Set by tests to skip the actual AVCaptureSession plumbing. Production
     /// callers leave it false. Tests that exercise state-machine transitions
     /// flip this on so we don't try to acquire a real camera in a unit test
@@ -113,11 +144,14 @@ final class CameraStore {
     /// correct. Without this, the chip froze for 2-3s whenever the user
     /// re-enabled the camera (the dogfood report that triggered the fix).
     ///
-    /// Post-dogfood guard: after awaiting `start()`, we verify
-    /// `isSessionRunning` is true. Behind-mode was unreliable (2-3 taps to
-    /// register) because the optimistic flip left `style = .behind` even
-    /// when the session quietly failed to start. Now we revert and surface
-    /// a banner so the user isn't staring at a black screen.
+    /// Post-dogfood-pass-2: revert-on-failure now ONLY fires when we're
+    /// transitioning from `.off` (i.e. starting the session for real). On a
+    /// non-off → non-off transition (pip → behind, behind → pip) the session
+    /// is already running and we don't need to verify it again. The
+    /// over-aggressive revert from the previous fixup pass was the actual
+    /// pip → behind bug — it tripped on a stale `isSessionRunning` read
+    /// during the brief begin/commit window AVFoundation opens whenever a
+    /// SwiftUI view-tree change re-mounts the preview layer.
     func setStyle(_ new: CameraStyle) async {
         guard new != style else { return }
         let previous = style
@@ -125,6 +159,9 @@ final class CameraStore {
         if new == .off {
             // Flip the UI state first — there's no permission gate to wait
             // on, and the user wants the chip to show "off" instantly.
+            #if DEBUG
+            behindLog.info("setStyle entry old=\(previous.rawValue, privacy: .public) new=off")
+            #endif
             style = .off
             persistStyle()
             await stop()
@@ -141,6 +178,7 @@ final class CameraStore {
             await stop()
             return
         }
+
         // Optimistic update: flip `style` before awaiting the session start.
         // The PiP tile renders the moment SwiftUI reads `style == .pip`,
         // even if the first preview frame hasn't arrived. The user sees the
@@ -148,24 +186,31 @@ final class CameraStore {
         style = new
         persistStyle()
         #if DEBUG
-        print("[CameraStore] setStyle \(previous.rawValue) -> \(new.rawValue), starting session")
+        behindLog.info(
+            "setStyle entry old=\(previous.rawValue, privacy: .public) new=\(new.rawValue, privacy: .public) (calling start)"
+        )
         #endif
         await start()
+        #if DEBUG
+        behindLog.info(
+            "setStyle post-start running=\(self.isSessionRunning, privacy: .public) style=\(self.style.rawValue, privacy: .public)"
+        )
+        #endif
 
-        // Verify the session is actually running. If it isn't, we'd be
-        // leaving the user with a black `.behind` background or a frozen
-        // PiP tile. Revert to the previous style so the UI matches reality.
-        if !isSessionRunning && !suppressDeviceWork {
+        // Revert is ONLY relevant when we just kicked the session up from
+        // an off state. Non-off → non-off transitions (pip → behind, etc.)
+        // are config-only — the session is still running, so don't second-
+        // guess it. The previous pass's blanket revert was the actual
+        // pip → behind bug.
+        if previous == .off, !isSessionRunning, !suppressDeviceWork {
             #if DEBUG
-            print("[CameraStore] start() failed — reverting style to \(previous.rawValue)")
+            behindLog.error(
+                "start() did not produce a running session — reverting to off"
+            )
             #endif
-            style = previous
+            style = .off
             persistStyle()
-            // If the previous style was non-off, leave the (still-stopped)
-            // session alone; if it was .off, make sure we're truly stopped.
-            if previous == .off {
-                await stop()
-            }
+            await stop()
         }
     }
 
@@ -246,14 +291,15 @@ final class CameraStore {
     /// `start()` is idempotent — re-entry while the session is already
     /// running is a no-op (`if !session.isRunning`).
     ///
-    /// We also enforce the configuration brackets on the start path: even
-    /// when the session is already running, we re-check that an input is
-    /// attached. The behind-mode dogfood report traced back to a path
-    /// where the session had been started, then a config block tore down
-    /// inputs without restoring them. Re-running `configureInputsLocked`
-    /// inside a configuration block is cheap when the input is already
-    /// there (the `canAddInput` guard short-circuits) and fixes the
-    /// "session running but no input" stuck state.
+    /// Dogfood-pass-2: the previous pass wrapped a begin/commit configuration
+    /// block around every `start()` call, even when the input was already
+    /// attached. That empty bracket on iOS 26 caused a brief frame-delivery
+    /// window where the preview layer drew its background color — the actual
+    /// "PiP goes black" symptom on .pip → .behind. We now only enter a config
+    /// bracket if we ACTUALLY need to add the input. On a non-off → non-off
+    /// transition this short-circuits to a no-op `if !session.isRunning`
+    /// check (which also returns false → skip `startRunning`), and the
+    /// running session keeps delivering frames uninterrupted.
     private func start() async {
         if suppressDeviceWork {
             isSessionRunning = true
@@ -261,21 +307,22 @@ final class CameraStore {
         }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             sessionQueue.async {
-                // Wrap the input attach in begin/commit so concurrent
-                // session-config from RecordingSession can't race us.
-                self.session.beginConfiguration()
+                // Only wrap a begin/commit when we actually need to attach
+                // an input. Empty brackets on a running session interrupt
+                // frame delivery on iOS 26 — the dogfood symptom.
                 if self.currentInput == nil {
+                    self.session.beginConfiguration()
                     self.configureInputsLocked()
+                    self.session.commitConfiguration()
                 }
-                self.session.commitConfiguration()
                 if !self.session.isRunning {
                     self.session.startRunning()
                 }
                 let running = self.session.isRunning
                 #if DEBUG
-                if !running {
-                    print("[CameraStore] startRunning() did not produce a running session")
-                }
+                behindLog.info(
+                    "start() complete running=\(running, privacy: .public) hasInput=\(self.currentInput != nil, privacy: .public)"
+                )
                 #endif
                 Task { @MainActor in
                     self.isSessionRunning = running
@@ -384,6 +431,9 @@ final class CameraStore {
             // sensor readout (true open gate).
             if #available(iOS 26.0, *), let aspect = choice.dynamicAspect {
                 device.setDynamicAspectRatio(aspect, completionHandler: nil)
+                _requestedDynamicAspectRaw = aspect.rawValue
+            } else {
+                _requestedDynamicAspectRaw = nil
             }
 
             // Pin the framerate while we're inside lockForConfiguration —

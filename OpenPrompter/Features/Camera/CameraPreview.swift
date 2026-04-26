@@ -19,6 +19,16 @@
 import AVFoundation
 import SwiftUI
 import UIKit
+import os
+
+#if DEBUG
+/// Debug logger tagged `[Behind-Mode-Debug]` for verifying preview-layer
+/// mounts during chip transitions. Filter Console.app on the subsystem.
+fileprivate let behindLog = Logger(
+    subsystem: "app.openprompter.camera",
+    category: "Behind-Mode-Debug"
+)
+#endif
 
 /// UIView subclass whose backing layer is an `AVCaptureVideoPreviewLayer`.
 /// The `+layerClass` override is the standard pattern documented by Apple;
@@ -99,25 +109,30 @@ struct CameraPreview: UIViewRepresentable {
         view.backgroundColor = .black
         applyMirrorTransform(to: view)
         view.refreshDynamicDimensionsObservation()
+        #if DEBUG
+        behindLog.info("CameraPreview.makeUIView gravity=\(String(describing: gravity), privacy: .public)")
+        #endif
         return view
     }
 
     func updateUIView(_ uiView: PreviewView, context: Context) {
-        // Re-apply gravity in case mode changed.
+        // Re-apply gravity in case mode changed (e.g. user-driven pip →
+        // behind-with-different-fill swap; the SwiftUI struct is rebuilt
+        // but the same UIView is reused if SwiftUI deems identity stable).
         uiView.previewLayer.videoGravity = gravity
-        // The session reference is stable across the camera store's lifetime,
-        // but during a `.pip → .behind` transition the layer can occasionally
-        // lose its session pointer (dogfood report — black screen on swap).
-        // Defensively re-attach if the layer's session ever drifts from the
-        // store's. Cheap when they match (identity check); fixes the stuck
-        // state when they don't.
-        if uiView.previewLayer.session !== session {
-            uiView.previewLayer.session = session
-        }
         applyMirrorTransform(to: uiView)
         // Re-bind the iOS 26 dynamic-dimensions observer in case the input
         // device changed underneath us (camera-store reconfigure).
         uiView.refreshDynamicDimensionsObservation()
+        // We deliberately do NOT re-assign `previewLayer.session` here. The
+        // session pointer is set in makeUIView and is stable for the
+        // lifetime of CameraStore. The previous fixup did re-assign it
+        // defensively on every update, which on iOS 26 caused a frame-
+        // delivery hiccup whenever SwiftUI re-evaluated the body — the
+        // exact symptom the dogfood reproduced ("PiP tile goes black").
+        #if DEBUG
+        behindLog.debug("CameraPreview.updateUIView gravity=\(String(describing: gravity), privacy: .public)")
+        #endif
     }
 
     /// The mirror transform composes against the preview layer (or its

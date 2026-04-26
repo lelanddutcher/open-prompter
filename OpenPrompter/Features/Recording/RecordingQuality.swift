@@ -51,21 +51,47 @@ enum RecordingQuality: String, CaseIterable, Codable, Hashable, Sendable {
         }
     }
 
-    /// Bitrate scaled to a given shorter-dimension resolution. Linear in
-    /// pixel count (pixels² ratio) — quick approximation of the headroom
-    /// 4K needs over 1080p without going full perceptual modeling.
+    /// Bitrate scaled to the actual recorded pixel count. Linear in pixel
+    /// count — quick approximation of the headroom 4K / square sensor needs
+    /// over 1080p without going full perceptual modeling.
     ///
-    /// Note: the formula assumes `shortDimension * 16 / 9` for the long
-    /// edge, but the writer actually produces 4:3 (1080×1440) for the
-    /// front-camera open-gate path. We treat `shortDimension` as the
-    /// *long* edge target and the 16:9 ratio is a deliberate generosity —
-    /// it estimates ~slightly higher than the 4:3 case needs, giving the
-    /// encoder a touch of headroom rather than starving it on motion.
-    func bitsPerSecond(forShortDimension shortDimension: Int) -> Int {
+    /// IMPORTANT: pass the ACTUAL output dimensions of what's hitting the
+    /// writer. The previous fixup pass took only `shortDimension` and
+    /// inferred a 16:9 long edge, which on iPhone 17's 1×1 dynamic-aspect
+    /// path inflated the bitrate ~80% (3024 short edge × inferred 5376
+    /// long edge = 16M pixels vs the real 9M). That produced 213 MB four-
+    /// second files at "Standard" — the dogfood smoking gun.
+    ///
+    /// Cap at ~3× the 1080p baseline so a buffer dimension we mis-detect
+    /// can't blow the encoder's hardware budget. The cap is well above the
+    /// realistic 4K HEVC working bitrate, so legitimate 4K writes still
+    /// land within budget.
+    func bitsPerSecond(forPixelCount pixelCount: Int) -> Int {
         let baselinePixels = 1080 * 1920
-        let pixels = shortDimension * (shortDimension * 16 / 9)
-        let scaled = Double(bitrate1080p) * Double(pixels) / Double(baselinePixels)
-        return max(20_000_000, Int(scaled))
+        let safePixels = max(pixelCount, baselinePixels / 4) // floor on stupid-small inputs
+        let scaled = Double(bitrate1080p) * Double(safePixels) / Double(baselinePixels)
+        // Floor: never less than 20 Mbps (the bitrate we'd want for a
+        // hypothetical 720p tier — a sane minimum for HEVC selfie video).
+        // Ceiling: at most 3× the 1080p target, so a misdetected dimension
+        // can't drive the encoder past hardware limits.
+        let bounded = min(Double(bitrate1080p) * 3.0, max(20_000_000.0, scaled))
+        return Int(bounded)
+    }
+
+    /// Convenience overload — pass width × height directly. Common at the
+    /// writer-config callsite where we already have both dimensions.
+    func bitsPerSecond(forWidth width: Int, height: Int) -> Int {
+        bitsPerSecond(forPixelCount: max(1, width) * max(1, height))
+    }
+
+    /// Legacy short-edge API used by the Settings storage estimator. Kept
+    /// for callers that need a "what's the bitrate at 1080p / 4K" guess
+    /// without an actual buffer size. Routes through the new pixel-count
+    /// formula assuming 16:9 (the short-dim → long-dim relation that the
+    /// Settings UI displays storage for).
+    func bitsPerSecond(forShortDimension shortDimension: Int) -> Int {
+        let inferredLong = shortDimension * 16 / 9
+        return bitsPerSecond(forPixelCount: shortDimension * inferredLong)
     }
 
     /// Approximate storage rate in megabytes per minute, displayed live in

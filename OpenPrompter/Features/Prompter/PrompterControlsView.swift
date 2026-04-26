@@ -20,27 +20,12 @@ struct PrompterControlsView: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            // Row 1 — primary actions
+            // Row 1 — primary action. The MIRROR button lived alongside
+            // PLAY here until the post-merge dogfood-pass-2 control move
+            // centralized mirror handling on the bottom chip strip
+            // (`TeleprompterView.mirrorStatusPill` does the toggle there).
+            // PLAY now spans the row width.
             HStack(spacing: 8) {
-                Button(action: { vm.toggleMirror() }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: vm.mirroredHorizontal ? "rectangle.2.swap" : "rectangle")
-                            .font(.system(size: 12, weight: .bold))
-                        Text("MIRROR")
-                            .font(.system(size: 12, weight: .bold, design: .monospaced))
-                            .tracking(1.0)
-                    }
-                    .frame(height: buttonHeight)
-                    .frame(maxWidth: .infinity)
-                    .background(vm.mirroredHorizontal ? Theme.red : Theme.surface)
-                    .foregroundStyle(Color.white)
-                    .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: corner, style: .continuous)
-                            .stroke(vm.mirroredHorizontal ? Theme.red : Theme.border, lineWidth: 1)
-                    )
-                }
-
                 Button(action: { vm.togglePlay() }) {
                     HStack(spacing: 6) {
                         Image(systemName: vm.isPlaying ? "pause.fill" : "play.fill")

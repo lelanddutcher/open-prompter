@@ -548,6 +548,33 @@ final class CameraTests: XCTestCase {
         XCTAssertFalse(store.isSessionRunning)
     }
 
+    /// Dogfood-pass-2 Bug 1: the previous fixup reverted `style` to the
+    /// previous value if `isSessionRunning` ever read false after `start()`.
+    /// On a non-off → non-off transition the session is already running and
+    /// the empty begin/commit dance shouldn't second-guess it. Verify a
+    /// deliberate sequence behind → pip → behind ALL stick — none of them
+    /// should silently revert during the config-only flip.
+    func testStoreNonOffToNonOffStyleSticksThroughTransition() async {
+        let store = CameraStore(suppressDeviceWork: true)
+        store.prepareTestAuthorization(.authorized)
+
+        await store.setStyle(.pip)
+        XCTAssertEqual(store.style, .pip)
+        XCTAssertTrue(store.isSessionRunning)
+
+        // pip → behind. The previous fixup would mis-revert to .pip on a
+        // race with `isSessionRunning`. The pass-2 fix only reverts when
+        // we transitioned FROM .off, so this must hold steady.
+        await store.setStyle(.behind)
+        XCTAssertEqual(store.style, .behind,
+                       "pip → behind must not revert mid-flight.")
+
+        // behind → pip — same path in reverse.
+        await store.setStyle(.pip)
+        XCTAssertEqual(store.style, .pip,
+                       "behind → pip must not revert mid-flight.")
+    }
+
     // MARK: - Pref defaults match spec
 
     func testPrefDefaultsMatchSpec() {

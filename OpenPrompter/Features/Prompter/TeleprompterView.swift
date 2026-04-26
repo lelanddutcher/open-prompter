@@ -25,6 +25,13 @@ struct TeleprompterView: View {
     @State private var keyboardSource: KeyboardEventSource?
     @State private var mediaSource: MediaCommandSource?
     @State private var volumeSource: VolumeEventSource?
+    /// Editor sheet visibility — bound to the new bottom-row Edit chip.
+    /// Lived in PrompterTopBarView before the dogfood-pass-2 control move.
+    @State private var showEditor: Bool = false
+    /// Tick clock for the relative-time formatter on the sync chip. Lived
+    /// in PrompterTopBarView before the move; refreshed once per minute
+    /// while the prompter is on screen.
+    @State private var nowForSync: Date = .now
     /// SwiftUI focus binding for the keyboard event source. Must be true
     /// while the prompter is the active scene or `.onKeyPress` will not
     /// fire. Defaults to true on appear and resets to false on disappear.
@@ -203,25 +210,13 @@ struct TeleprompterView: View {
         }
         .overlay(alignment: .bottom) {
             VStack(spacing: 6) {
-                // Camera Style chip lives just above the existing controls,
-                // visible whenever Labs is on or the user has picked a non-
-                // off style. The recording chip sits next to it when the
-                // recording feature is enabled and a camera mode is active
-                // (you can't record without a session).
-                if showCameraChip || showRecordingChip {
-                    HStack(spacing: 8) {
-                        Spacer()
-                        if showCameraChip {
-                            CameraStyleChip(store: appState.cameraStore)
-                        }
-                        if showRecordingChip {
-                            RecordingChip(state: appState.recordingState) {
-                                handleRecordingChipTap()
-                            }
-                        }
-                        Spacer()
-                    }
-                }
+                // Bottom chip strip — centralized control row per the
+                // dogfood-pass-2 reshuffle. From left to right:
+                //   [Edit] [Sync/Edited] [Camera Style] [REC] [Mirror status]
+                //
+                // Camera Style and REC are gated by their respective Labs/
+                // permission flags; the others always render.
+                bottomChipStrip
                 PrompterControlsView(vm: vm)
             }
             .padding(.bottom, 6)
@@ -831,5 +826,165 @@ struct TeleprompterView: View {
                 .stroke(Theme.green.opacity(0.6), lineWidth: 1)
         )
         .padding(.horizontal, 10)
+    }
+
+    // MARK: - Bottom chip strip (dogfood pass 2)
+
+    /// Relative-time formatter for the sync chip. Static so we don't
+    /// rebuild the formatter on every render.
+    private static let syncRelativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
+    /// Fallback short-date formatter for files modified more than a week
+    /// ago, where relative phrasing ("2w AGO") is less scannable than a
+    /// fixed "APR 21" date.
+    private static let syncShortDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d"
+        return f
+    }()
+
+    /// Centralized chip strip — Edit + Sync + (Camera Style) + (REC) +
+    /// Mirror status, in that order. Camera Style and REC are conditional
+    /// on Labs/style state; Edit/Sync/Mirror always render so the user has
+    /// a stable visual frame for the strip.
+    @ViewBuilder
+    private var bottomChipStrip: some View {
+        HStack(spacing: 8) {
+            editChip
+            syncChip
+            Spacer(minLength: 4)
+            if showCameraChip {
+                CameraStyleChip(store: appState.cameraStore)
+            }
+            if showRecordingChip {
+                RecordingChip(state: appState.recordingState) {
+                    handleRecordingChipTap()
+                }
+            }
+            Spacer(minLength: 4)
+            mirrorStatusPill
+        }
+        .padding(.horizontal, 10)
+        .sheet(isPresented: $showEditor) {
+            ScriptEditorSheet(
+                file: vm.file,
+                cachedSource: vm.rawText.isEmpty ? nil : vm.rawText,
+                initialOffset: vm.sourceOffsetForCurrentView(),
+                onSaved: {
+                    Task { await vm.reload() }
+                }
+            )
+        }
+        // Refresh the "x min ago" label once a minute while visible.
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                nowForSync = .now
+            }
+        }
+    }
+
+    /// Edit chip — pencil glyph. Tap pauses any in-flight playback and
+    /// presents the script editor sheet.
+    @ViewBuilder
+    private var editChip: some View {
+        Button(action: {
+            // Pause first if the prompter is mid-take so the script doesn't
+            // keep scrolling behind the editor sheet. We don't auto-resume
+            // on dismiss — the user can reach for play intentionally when
+            // they're ready.
+            if vm.isPlaying { vm.togglePlay() }
+            showEditor = true
+        }) {
+            Image(systemName: "pencil")
+                .font(.system(size: 13, weight: .bold))
+                .frame(width: 36, height: 32)
+                .background(Theme.surface, in: Capsule())
+                .foregroundStyle(Theme.fg)
+                .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Edit script")
+    }
+
+    /// Sync/edited chip — shows the on-disk last-edited time, or a RELOAD
+    /// affordance when the watcher sees a newer mtime than what's loaded.
+    @ViewBuilder
+    private var syncChip: some View {
+        if vm.reloadAvailable {
+            Button(action: { Task { await vm.reload() } }) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Theme.amber)
+                        .frame(width: 6, height: 6)
+                        .shadow(color: Theme.amber.opacity(0.85), radius: 3)
+                    Text("RELOAD")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .tracking(0.8)
+                        .foregroundStyle(Theme.amber)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .frame(minHeight: Theme.hitMin)
+                .background(Theme.surface, in: Capsule())
+                .overlay(Capsule().stroke(Theme.amber.opacity(0.6), lineWidth: 1))
+            }
+        } else if let mtime = vm.fileMTime {
+            // After the dogfood-pass-2 strip move there's less width to
+            // burn — drop the "EDITED · " prefix and let the green dot +
+            // relative-time text carry the meaning ("3M AGO"). Tooltip /
+            // VoiceOver still reads the full phrasing.
+            LiveChip(status: .live, label: syncLabelText(for: mtime))
+        } else if vm.isLoading {
+            LiveChip(status: .syncing, label: "LOADING…", pulse: true)
+        } else {
+            LiveChip(status: .live, label: "READY")
+        }
+    }
+
+    /// Compound mirror status pill — H, V, H+V, OFF. Tap toggles the
+    /// horizontal axis (matches the existing PrompterControlsView behavior
+    /// so the user has a single tap-target for the most common case).
+    @ViewBuilder
+    private var mirrorStatusPill: some View {
+        Button(action: { vm.toggleMirror() }) {
+            if vm.mirroredHorizontal || vm.mirroredVertical {
+                Pill(text: mirrorPillText, alert: true)
+            } else {
+                Pill(text: "MIRROR OFF")
+            }
+        }
+        .accessibilityLabel("Toggle horizontal mirror")
+        .accessibilityValue(Text(mirrorPillText))
+    }
+
+    private var mirrorPillText: String {
+        switch (vm.mirroredHorizontal, vm.mirroredVertical) {
+        case (true, true): return "MIRROR H+V"
+        case (true, false): return "MIRROR H"
+        case (false, true): return "MIRROR V"
+        default: return "MIRROR OFF"
+        }
+    }
+
+    /// Human-readable "time since edit" for the sync chip.
+    /// - < 15s: "NOW"
+    /// - < 7 days: RelativeDateTimeFormatter abbreviated ("30S AGO", "12M AGO", "3H AGO", "2D AGO")
+    /// - >= 7 days: short date ("APR 21") — relative phrasing stops being scannable past a week
+    private func syncLabelText(for mtime: Date) -> String {
+        let delta = nowForSync.timeIntervalSince(mtime)
+        if delta < 15 { return "NOW" }
+        let week: TimeInterval = 7 * 24 * 60 * 60
+        if delta >= week {
+            return Self.syncShortDateFormatter.string(from: mtime).uppercased()
+        }
+        return Self.syncRelativeFormatter
+            .localizedString(for: mtime, relativeTo: nowForSync)
+            .uppercased()
     }
 }

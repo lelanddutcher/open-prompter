@@ -15,6 +15,14 @@
 //
 
 import SwiftUI
+import os
+
+#if DEBUG
+fileprivate let behindLog = Logger(
+    subsystem: "app.openprompter.camera",
+    category: "Behind-Mode-Debug"
+)
+#endif
 
 struct CameraStyleChip: View {
     @Bindable var store: CameraStore
@@ -25,8 +33,14 @@ struct CameraStyleChip: View {
             // the "snap back to off" path on denial. Style flips
             // optimistically so the chip label updates instantly even
             // before the AVCaptureSession finishes starting.
+            let next = store.style.nextStyle
+            #if DEBUG
+            behindLog.info(
+                "chip tap current=\(store.style.rawValue, privacy: .public) -> \(next.rawValue, privacy: .public)"
+            )
+            #endif
             Task {
-                await store.setStyle(store.style.nextStyle)
+                await store.setStyle(next)
                 Haptics.tap()
             }
         } label: {
@@ -51,15 +65,13 @@ struct CameraStyleChip: View {
         .accessibilityAddTraits(.isButton)
         .accessibilityAdjustableAction { direction in
             // Adjustable widget: swipe up = forward, down = backward.
-            Task {
-                let next: CameraStyle
-                switch direction {
-                case .increment: next = store.style.nextStyle
-                case .decrement: next = store.style.nextStyle.nextStyle
-                @unknown default: return
-                }
-                await store.setStyle(next)
+            let next: CameraStyle
+            switch direction {
+            case .increment: next = store.style.nextStyle
+            case .decrement: next = store.style.nextStyle.nextStyle
+            @unknown default: return
             }
+            Task { await store.setStyle(next) }
         }
     }
 }
