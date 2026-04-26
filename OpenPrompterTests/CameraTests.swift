@@ -390,15 +390,11 @@ final class CameraTests: XCTestCase {
     }
 
     /// iPhone 17 family pathway: a format that declares `supportedDynamicAspectRatios`
-    /// containing 1×1 should be picked even when there's a larger plain
-    /// format alongside it. The algorithm prefers dynamic-aspect-capable
-    /// formats because they unlock the full square-sensor readout.
-    func testOpenGatePrefers1x1WhenDynamicAspectAvailable() {
+    /// containing 3×4 should be picked, with `.ratio3x4` selected. Portrait
+    /// 3:4 matches the PiP tile and the prompter viewport better than any
+    /// landscape format and avoids letterboxing / aspect-jump on REC tap.
+    func testOpenGatePrefers3x4PortraitWhenDynamicAspectAvailable() {
         if #available(iOS 26.0, *) {
-            // The dynamic-aspect format is smaller than the plain 4032×3024,
-            // but the algorithm prefers it because it can reshape to 1×1
-            // (the iPhone 17 full square readout — ~3024×3024 of usable
-            // sensor that 4:3 would crop away).
             let descriptors: [CameraStore.FormatDescriptor] = [
                 CameraStore.FormatDescriptor(width: 4032, height: 3024,
                                              frameRateRanges: [(1, 30)],
@@ -406,6 +402,36 @@ final class CameraTests: XCTestCase {
                                              dynamicAspectRatios: []),
                 CameraStore.FormatDescriptor(
                     width: 3024, height: 4032,
+                    frameRateRanges: [(1, 30)],
+                    supportsDynamicAspectRatios: true,
+                    dynamicAspectRatios: [
+                        AVCaptureDevice.AspectRatio.ratio4x3.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio3x4.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio16x9.rawValue
+                    ]
+                )
+            ]
+            let pick = CameraStore.pickOpenGateFormat(
+                descriptors: descriptors, preferredFPS: 30
+            )
+            XCTAssertEqual(pick?.index, 1,
+                           "Dynamic-aspect format must win over a larger plain format.")
+            XCTAssertEqual(pick?.dynamicAspectRaw,
+                           AVCaptureDevice.AspectRatio.ratio3x4.rawValue,
+                           "3×4 portrait aspect must be selected first when declared.")
+        }
+    }
+
+    /// Aspect-preference fallback: 1×1 wins when 3×4 isn't declared. Maps to
+    /// the original "full square readout" goal — keeps the iPhone 17 forward
+    /// path lit up if a future iOS adds 1×1 to the front camera's supported
+    /// aspect set.
+    func testOpenGateFallsBackTo1x1When3x4Unavailable() {
+        if #available(iOS 26.0, *) {
+            let descriptors: [CameraStore.FormatDescriptor] = [
+                CameraStore.FormatDescriptor(
+                    width: 4032, height: 4032,
                     frameRateRanges: [(1, 30)],
                     supportsDynamicAspectRatios: true,
                     dynamicAspectRatios: [
@@ -418,11 +444,34 @@ final class CameraTests: XCTestCase {
             let pick = CameraStore.pickOpenGateFormat(
                 descriptors: descriptors, preferredFPS: 30
             )
-            XCTAssertEqual(pick?.index, 1,
-                           "Dynamic-aspect format must win over a larger plain format.")
             XCTAssertEqual(pick?.dynamicAspectRaw,
                            AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
-                           "1×1 aspect must be selected when declared (full square readout).")
+                           "Algorithm must pick 1×1 when 3×4 isn't declared.")
+        }
+    }
+
+    /// Aspect-preference fallback: 4×3 wins when neither 3×4 nor 1×1 are
+    /// declared. Last resort before falling through to the algorithm's
+    /// "first declared" tiebreaker.
+    func testOpenGateFallsBackTo4x3WhenSquareAndPortraitUnavailable() {
+        if #available(iOS 26.0, *) {
+            let descriptors: [CameraStore.FormatDescriptor] = [
+                CameraStore.FormatDescriptor(
+                    width: 4032, height: 3024,
+                    frameRateRanges: [(1, 30)],
+                    supportsDynamicAspectRatios: true,
+                    dynamicAspectRatios: [
+                        AVCaptureDevice.AspectRatio.ratio4x3.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio16x9.rawValue
+                    ]
+                )
+            ]
+            let pick = CameraStore.pickOpenGateFormat(
+                descriptors: descriptors, preferredFPS: 30
+            )
+            XCTAssertEqual(pick?.dynamicAspectRaw,
+                           AVCaptureDevice.AspectRatio.ratio4x3.rawValue,
+                           "Algorithm must pick 4×3 when 3×4 and 1×1 aren't declared.")
         }
     }
 

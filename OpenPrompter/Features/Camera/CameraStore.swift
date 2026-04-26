@@ -732,11 +732,38 @@ final class CameraStore {
         // Step 2: dynamic-aspect-capable candidates win when present.
         let dynamic = candidates.filter { $0.descriptor.supportsDynamicAspectRatios }
         if let best = dynamic.max(by: byPixelArea) {
-            // Prefer 1×1 (square sensor full readout) if declared; else the
-            // first listed aspect (which iOS 26 also makes the default).
+            // Aspect preference order — driven by what actually works on
+            // iPhone 17 + iOS 26 dogfooding:
+            //
+            // 1. .ratio3x4 (portrait 3024×4032) — matches the PiP tile's 3:4
+            //    aspect AND the prompter's 9:19.5 portrait viewport better
+            //    than any landscape format. Buffer arrives portrait, no
+            //    rotation needed in the writer, no letterbox in PiP, no
+            //    aspect "jump" when REC tap reconfigures the session.
+            // 2. .ratio1x1 (full square) — the original goal, but iOS 26.0
+            //    on iPhone 17 currently doesn't expose 1:1 in the front
+            //    camera's `supportedDynamicAspectRatios` (Apple's stock
+            //    Camera also center-crops 1:1; documented as "by design"
+            //    for 26.0). Kept as second preference so this code lights
+            //    up automatically when a future iOS expands the aspect set.
+            // 3. .ratio4x3 (landscape 4032×3024) — last resort. Requires
+            //    writer-level rotation transform to produce a portrait file
+            //    and letterboxes in the PiP tile.
+            // 4. First declared — total fallback.
             let supported = best.descriptor.dynamicAspectRatios
+            let threeByFour = "AVCaptureAspectRatio3x4"
             let oneByOne = "AVCaptureAspectRatio1x1"
-            let aspect = supported.contains(oneByOne) ? oneByOne : supported.first
+            let fourByThree = "AVCaptureAspectRatio4x3"
+            let aspect: String?
+            if supported.contains(threeByFour) {
+                aspect = threeByFour
+            } else if supported.contains(oneByOne) {
+                aspect = oneByOne
+            } else if supported.contains(fourByThree) {
+                aspect = fourByThree
+            } else {
+                aspect = supported.first
+            }
             return (best.index, aspect)
         }
 

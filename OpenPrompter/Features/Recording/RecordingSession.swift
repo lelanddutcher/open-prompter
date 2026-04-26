@@ -147,6 +147,14 @@ final class RecordingSession {
         /// The .mov destination URL the lazy writer construction will use.
         /// Set in `configureWriter`, cleared after the writer is built.
         var pendingWriterURL: URL?
+        /// Count of video sample buffers received since recording started.
+        /// We DROP the first `RecordingSession.warmupVideoFrames` buffers
+        /// because the iOS 26 hardware encoder + sensor emit half-rendered
+        /// or near-black frames during the first ~125 ms after a session
+        /// reconfigure. The session start time is anchored to the FIRST
+        /// non-warmup buffer (frame N+1) instead of frame 1, so the file's
+        /// timeline begins at the first frame the user actually sees.
+        var videoFramesReceived: Int = 0
     }
 
     /// Lock guarding all writer-pipeline properties. Held briefly — copy
@@ -164,6 +172,17 @@ final class RecordingSession {
     /// machine without touching real hardware. Mirrors `CameraStore`'s
     /// `suppressDeviceWork` pattern.
     private let suppressDeviceWork: Bool
+
+    /// Drop this many video sample buffers at the start of every take. The
+    /// iOS 26 hardware encoder + the camera sensor's settling pass after a
+    /// session reconfigure produce half-rendered or near-black frames for
+    /// roughly the first 100-150 ms of capture (the dogfood-pass-4
+    /// "first frames are oddly black / 50% opacity" report). Three frames
+    /// at 24 fps is ~125 ms — enough warmup to consistently start the file
+    /// on a fully-rendered frame without sacrificing perceptible content.
+    /// Bumped to 4 if dogfooding still shows black frames; reduced to 2 if
+    /// the warmup is overkill on a future iOS / device.
+    fileprivate static let warmupVideoFrames: Int = 3
 
     /// Live Activity handle for the in-flight recording, if any. Held
     /// strongly through the recording phase; ended on stop or failure.
@@ -612,14 +631,17 @@ final class RecordingSession {
 
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = true
-        // Rotation is now handled at the AVCaptureConnection level
-        // (`connection.videoRotationAngle = 90`, set when the data output is
-        // attached). Sample buffers arrive in portrait orientation already;
-        // the writer stores them without any post-rotation transform. This
-        // path replaces the previous `videoInput.transform = rotation(90°)`
-        // which sometimes produced a black first frame on iOS 26 because
-        // the post-write rotation generated a placeholder before the
-        // encoder's rotated output caught up.
+        // Conditional writer-level rotation. We try `connection.videoRotationAngle = 90`
+        // at capture time first (set when the data output is attached), but
+        // on iPhone 17 + iOS 26 the front camera's Ultra Wide connection
+        // doesn't actually honor that property — buffers arrive landscape.
+        // If the buffer is wider than tall, fall back to the writer-level
+        // transform so Photos plays the file in portrait. If the buffer is
+        // already portrait (preferred `.ratio3x4` path lit up), no transform
+        // is needed.
+        if writerWidth > writerHeight {
+            videoInput.transform = CGAffineTransform(rotationAngle: .pi / 2)
+        }
 
         // Audio input — AAC, voiceover bitrate.
         let audioSettings: [String: Any] = [
@@ -766,7 +788,12 @@ final class RecordingSession {
             (state.writer, state.videoInput, state.audioInput, state.hasStartedSession, state.pendingWriterURL)
         }
 
-        // Lazy writer construction on the first video sample buffer.
+        // Lazy writer construction on the first video sample buffer. The
+        // writer is BUILT here but `startSession(atSourceTime:)` is deferred
+        // until the first non-warmup buffer (see below) — that way the
+        // file's timeline begins on a fully-rendered frame instead of one
+        // of the half-rendered / black warmup frames the encoder + sensor
+        // emit during the first ~125 ms of capture.
         if snapshot.writer == nil, output is AVCaptureVideoDataOutput {
             guard let url = snapshot.pendingWriterURL else { return }
             guard let built = lazilyStartWriterOnFirstSample(url: url, firstBuffer: sampleBuffer) else {
@@ -778,9 +805,6 @@ final class RecordingSession {
                 }
                 return
             }
-            // Start the writer session at the first frame's PTS.
-            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            built.writer.startSession(atSourceTime: pts)
 
             let bufferDims = CMVideoFormatDescriptionGetDimensions(
                 CMSampleBufferGetFormatDescription(sampleBuffer)!
@@ -791,14 +815,12 @@ final class RecordingSession {
                 state.audioInput = built.audio
                 state.outputWidth = Int(bufferDims.width)
                 state.outputHeight = Int(bufferDims.height)
-                state.hasStartedSession = true
-                state.sessionStartTime = pts
+                state.hasStartedSession = false       // session not started yet
+                state.sessionStartTime = nil
                 state.pendingWriterURL = nil
+                state.videoFramesReceived = 1         // count this triggering frame
             }
-            // Append this triggering frame.
-            if built.video.isReadyForMoreMediaData {
-                built.video.append(sampleBuffer)
-            }
+            // Drop this triggering buffer — it's the first warmup frame.
             return
         }
 
@@ -821,18 +843,59 @@ final class RecordingSession {
             }
             return
         }
-        guard writer.status == .writing else { return }
-        guard snapshot.hasStartedSession else { return }
+        guard writer.status == .writing || writer.status == .unknown else { return }
 
         if output is AVCaptureVideoDataOutput {
-            if let input = snapshot.videoInput, input.isReadyForMoreMediaData {
-                input.append(sampleBuffer)
+            // Warmup-frame gate. The first `warmupVideoFrames` video buffers
+            // after writer construction are dropped because the encoder +
+            // sensor emit half-rendered / black frames during settling.
+            // `startSession(atSourceTime:)` is deferred to the FIRST frame
+            // we actually keep, so the file's timeline begins with content.
+            let action: WarmupAction = writerStateLock.withLock { state in
+                state.videoFramesReceived += 1
+                if !state.hasStartedSession {
+                    if state.videoFramesReceived <= Self.warmupVideoFrames {
+                        return .dropWarmup
+                    }
+                    // Past warmup. Start the session at THIS frame's PTS,
+                    // mark it started, and append.
+                    state.hasStartedSession = true
+                    return .startSessionAndAppend
+                }
+                return .append
+            }
+            switch action {
+            case .dropWarmup:
+                return
+            case .startSessionAndAppend:
+                let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                writer.startSession(atSourceTime: pts)
+                writerStateLock.withLock { $0.sessionStartTime = pts }
+                if let input = snapshot.videoInput, input.isReadyForMoreMediaData {
+                    input.append(sampleBuffer)
+                }
+            case .append:
+                if let input = snapshot.videoInput, input.isReadyForMoreMediaData {
+                    input.append(sampleBuffer)
+                }
             }
         } else if output is AVCaptureAudioDataOutput {
+            // Audio waits for the video session to actually start — until
+            // then there's no `startSession(atSourceTime:)` anchor for the
+            // writer to align audio buffers against.
+            guard snapshot.hasStartedSession else { return }
             if let input = snapshot.audioInput, input.isReadyForMoreMediaData {
                 input.append(sampleBuffer)
             }
         }
+    }
+
+    /// Branch decision for an incoming video sample buffer when warmup is
+    /// in flight.
+    private enum WarmupAction {
+        case dropWarmup
+        case startSessionAndAppend
+        case append
     }
 
     // MARK: - Save flow
