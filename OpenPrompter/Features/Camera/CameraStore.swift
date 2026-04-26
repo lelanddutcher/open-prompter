@@ -732,35 +732,47 @@ final class CameraStore {
         // Step 2: dynamic-aspect-capable candidates win when present.
         let dynamic = candidates.filter { $0.descriptor.supportsDynamicAspectRatios }
         if let best = dynamic.max(by: byPixelArea) {
-            // Aspect preference order — driven by what actually works on
-            // iPhone 17 + iOS 26 dogfooding:
+            // Aspect preference — pinned to .ratio4x3 (landscape 4032×3024)
+            // because iOS 26.0 on iPhone 17 reshapes the buffer's reported
+            // W/H labels but does NOT rotate the underlying pixel content
+            // when a portrait aspect like .ratio3x4 is selected. That means
+            // .ratio3x4 produces a portrait-shaped container holding
+            // sensor-landscape data: the file's dimensions claim 3024×4032
+            // but the actual image inside is sideways. Photos plays it
+            // rotated; the PiP tile letterboxes a wide-content frame inside
+            // a 3:4 portrait container, both of which the user surfaced in
+            // dogfood pass 6.
             //
-            // 1. .ratio3x4 (portrait 3024×4032) — matches the PiP tile's 3:4
-            //    aspect AND the prompter's 9:19.5 portrait viewport better
-            //    than any landscape format. Buffer arrives portrait, no
-            //    rotation needed in the writer, no letterbox in PiP, no
-            //    aspect "jump" when REC tap reconfigures the session.
-            // 2. .ratio1x1 (full square) — the original goal, but iOS 26.0
-            //    on iPhone 17 currently doesn't expose 1:1 in the front
-            //    camera's `supportedDynamicAspectRatios` (Apple's stock
-            //    Camera also center-crops 1:1; documented as "by design"
-            //    for 26.0). Kept as second preference so this code lights
-            //    up automatically when a future iOS expands the aspect set.
-            // 3. .ratio4x3 (landscape 4032×3024) — last resort. Requires
-            //    writer-level rotation transform to produce a portrait file
-            //    and letterboxes in the PiP tile.
-            // 4. First declared — total fallback.
+            // Keeping the buffer at 4:3 landscape — sensor's natural
+            // orientation — means the content arrives correctly oriented.
+            // We then attach a 90° rotation transform at the writer level
+            // (always, for the front camera) so playback shows portrait
+            // 3024×4032 with the right-way-up image. The PiP preview
+            // letterboxes the 4:3 landscape buffer inside the 3:4 portrait
+            // tile (thin black bars top/bottom), matching how iOS Camera
+            // shows its small picture-in-picture previews.
+            //
+            // Order:
+            //   1. .ratio4x3 — preferred, sensor-natural orientation.
+            //   2. .ratio1x1 — full square sensor readout. iOS 26.0 doesn't
+            //      currently expose this in the front camera's supported
+            //      aspect set (Apple's stock Camera center-crops 1:1) but
+            //      a future iOS may; keeping this as a fallback so the
+            //      code path lights up automatically when it does.
+            //   3. .ratio3x4 — last resort, only if neither 4:3 nor 1:1 is
+            //      declared. Will look rotated until iOS reshapes content.
+            //   4. First declared — total fallback.
             let supported = best.descriptor.dynamicAspectRatios
-            let threeByFour = "AVCaptureAspectRatio3x4"
-            let oneByOne = "AVCaptureAspectRatio1x1"
             let fourByThree = "AVCaptureAspectRatio4x3"
+            let oneByOne = "AVCaptureAspectRatio1x1"
+            let threeByFour = "AVCaptureAspectRatio3x4"
             let aspect: String?
-            if supported.contains(threeByFour) {
-                aspect = threeByFour
+            if supported.contains(fourByThree) {
+                aspect = fourByThree
             } else if supported.contains(oneByOne) {
                 aspect = oneByOne
-            } else if supported.contains(fourByThree) {
-                aspect = fourByThree
+            } else if supported.contains(threeByFour) {
+                aspect = threeByFour
             } else {
                 aspect = supported.first
             }

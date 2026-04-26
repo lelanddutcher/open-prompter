@@ -390,18 +390,20 @@ final class CameraTests: XCTestCase {
     }
 
     /// iPhone 17 family pathway: a format that declares `supportedDynamicAspectRatios`
-    /// containing 3×4 should be picked, with `.ratio3x4` selected. Portrait
-    /// 3:4 matches the PiP tile and the prompter viewport better than any
-    /// landscape format and avoids letterboxing / aspect-jump on REC tap.
-    func testOpenGatePrefers3x4PortraitWhenDynamicAspectAvailable() {
+    /// Dynamic-aspect-capable format wins; .ratio4x3 is picked first
+    /// because iOS 26.0 reshapes the W/H labels without rotating the
+    /// underlying pixel content for portrait aspects. 4:3 matches the
+    /// sensor's native landscape orientation; the writer applies a 90°
+    /// rotation transform downstream for portrait playback.
+    func testOpenGatePrefers4x3WhenDynamicAspectAvailable() {
         if #available(iOS 26.0, *) {
             let descriptors: [CameraStore.FormatDescriptor] = [
-                CameraStore.FormatDescriptor(width: 4032, height: 3024,
+                CameraStore.FormatDescriptor(width: 3024, height: 4032,
                                              frameRateRanges: [(1, 30)],
                                              supportsDynamicAspectRatios: false,
                                              dynamicAspectRatios: []),
                 CameraStore.FormatDescriptor(
-                    width: 3024, height: 4032,
+                    width: 4032, height: 4032,
                     frameRateRanges: [(1, 30)],
                     supportsDynamicAspectRatios: true,
                     dynamicAspectRatios: [
@@ -418,16 +420,15 @@ final class CameraTests: XCTestCase {
             XCTAssertEqual(pick?.index, 1,
                            "Dynamic-aspect format must win over a larger plain format.")
             XCTAssertEqual(pick?.dynamicAspectRaw,
-                           AVCaptureDevice.AspectRatio.ratio3x4.rawValue,
-                           "3×4 portrait aspect must be selected first when declared.")
+                           AVCaptureDevice.AspectRatio.ratio4x3.rawValue,
+                           "4×3 (sensor-natural landscape) must be selected first.")
         }
     }
 
-    /// Aspect-preference fallback: 1×1 wins when 3×4 isn't declared. Maps to
-    /// the original "full square readout" goal — keeps the iPhone 17 forward
-    /// path lit up if a future iOS adds 1×1 to the front camera's supported
-    /// aspect set.
-    func testOpenGateFallsBackTo1x1When3x4Unavailable() {
+    /// Aspect-preference fallback: 1×1 wins when 4×3 isn't declared.
+    /// Future-compat — light up iPhone 17 full-square readout if a future
+    /// iOS adds 1:1 to the front camera's supported aspect set.
+    func testOpenGateFallsBackTo1x1When4x3Unavailable() {
         if #available(iOS 26.0, *) {
             let descriptors: [CameraStore.FormatDescriptor] = [
                 CameraStore.FormatDescriptor(
@@ -435,7 +436,7 @@ final class CameraTests: XCTestCase {
                     frameRateRanges: [(1, 30)],
                     supportsDynamicAspectRatios: true,
                     dynamicAspectRatios: [
-                        AVCaptureDevice.AspectRatio.ratio4x3.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio3x4.rawValue,
                         AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
                         AVCaptureDevice.AspectRatio.ratio16x9.rawValue
                     ]
@@ -446,22 +447,24 @@ final class CameraTests: XCTestCase {
             )
             XCTAssertEqual(pick?.dynamicAspectRaw,
                            AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
-                           "Algorithm must pick 1×1 when 3×4 isn't declared.")
+                           "Algorithm must pick 1×1 when 4×3 isn't declared.")
         }
     }
 
-    /// Aspect-preference fallback: 4×3 wins when neither 3×4 nor 1×1 are
-    /// declared. Last resort before falling through to the algorithm's
-    /// "first declared" tiebreaker.
-    func testOpenGateFallsBackTo4x3WhenSquareAndPortraitUnavailable() {
+    /// Aspect-preference fallback: 3×4 wins when neither 4×3 nor 1×1 are
+    /// declared. Last resort before the algorithm's "first declared"
+    /// tiebreaker. The user-facing rotation issues we hit on iOS 26.0
+    /// would still apply, but at that point we've exhausted the better
+    /// options.
+    func testOpenGateFallsBackTo3x4WhenSquareAndLandscapeUnavailable() {
         if #available(iOS 26.0, *) {
             let descriptors: [CameraStore.FormatDescriptor] = [
                 CameraStore.FormatDescriptor(
-                    width: 4032, height: 3024,
+                    width: 3024, height: 4032,
                     frameRateRanges: [(1, 30)],
                     supportsDynamicAspectRatios: true,
                     dynamicAspectRatios: [
-                        AVCaptureDevice.AspectRatio.ratio4x3.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio3x4.rawValue,
                         AVCaptureDevice.AspectRatio.ratio16x9.rawValue
                     ]
                 )
@@ -470,8 +473,8 @@ final class CameraTests: XCTestCase {
                 descriptors: descriptors, preferredFPS: 30
             )
             XCTAssertEqual(pick?.dynamicAspectRaw,
-                           AVCaptureDevice.AspectRatio.ratio4x3.rawValue,
-                           "Algorithm must pick 4×3 when 3×4 and 1×1 aren't declared.")
+                           AVCaptureDevice.AspectRatio.ratio3x4.rawValue,
+                           "Algorithm must pick 3×4 when 4×3 and 1×1 aren't declared.")
         }
     }
 

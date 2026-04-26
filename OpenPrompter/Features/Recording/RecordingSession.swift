@@ -631,17 +631,19 @@ final class RecordingSession {
 
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = true
-        // Conditional writer-level rotation. We try `connection.videoRotationAngle = 90`
-        // at capture time first (set when the data output is attached), but
-        // on iPhone 17 + iOS 26 the front camera's Ultra Wide connection
-        // doesn't actually honor that property — buffers arrive landscape.
-        // If the buffer is wider than tall, fall back to the writer-level
-        // transform so Photos plays the file in portrait. If the buffer is
-        // already portrait (preferred `.ratio3x4` path lit up), no transform
-        // is needed.
-        if writerWidth > writerHeight {
-            videoInput.transform = CGAffineTransform(rotationAngle: .pi / 2)
-        }
+        // Always apply writer-level 90° rotation for the front camera.
+        // The iPhone 17 front Ultra Wide connection does NOT honor
+        // `connection.videoRotationAngle = 90` (we tried it; buffers
+        // ignored the request), and iOS 26's `setDynamicAspectRatio`
+        // reshapes the buffer's W/H labels without rotating the actual
+        // pixel content. So the most reliable path is: capture at 4:3
+        // landscape (sensor-natural orientation, content correctly
+        // oriented), and tag the file with a 90° transform so Photos
+        // plays it portrait. The conditional `if writerWidth > writerHeight`
+        // gate from the previous round is gone — we always rotate the
+        // writer because the sensor is mounted landscape regardless of
+        // what dynamic aspect we request.
+        videoInput.transform = CGAffineTransform(rotationAngle: .pi / 2)
 
         // Audio input — AAC, voiceover bitrate.
         let audioSettings: [String: Any] = [
