@@ -60,8 +60,15 @@ struct CameraPreview: UIViewRepresentable {
     func updateUIView(_ uiView: PreviewView, context: Context) {
         // Re-apply gravity in case mode changed.
         uiView.previewLayer.videoGravity = gravity
-        // Session reference is stable — it's the same object owned by the
-        // store across mode changes — so we don't reassign it here.
+        // The session reference is stable across the camera store's lifetime,
+        // but during a `.pip → .behind` transition the layer can occasionally
+        // lose its session pointer (dogfood report — black screen on swap).
+        // Defensively re-attach if the layer's session ever drifts from the
+        // store's. Cheap when they match (identity check); fixes the stuck
+        // state when they don't.
+        if uiView.previewLayer.session !== session {
+            uiView.previewLayer.session = session
+        }
         applyMirrorTransform(to: uiView)
     }
 

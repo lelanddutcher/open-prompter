@@ -346,6 +346,143 @@ final class CameraTests: XCTestCase {
         XCTAssertFalse(state.isRecording)
     }
 
+    // MARK: - 4:3 format selection (Bug 1: open-gate)
+
+    /// The dogfood report flagged that recordings were 1440×1080 wrappers
+    /// with 16:9 letterboxed content — the front camera was running its
+    /// default 16:9 format and the writer was stretching black bars in.
+    /// `pickFourThreeFormatIndex` is the pure decision helper called by
+    /// `CameraStore.configureInputsLocked` after acquiring the device; if
+    /// it picks correctly the writer gets a true 4:3 source and the PiP
+    /// preview no longer shows side bars.
+    func testPickFourThreeFormatPicksHighestResolutionAt30fps() {
+        // iPhone 17 simulator front camera reports these formats. Mix in
+        // a couple of 16:9 distractors so the test exercises the filter.
+        let descriptors: [CameraStore.FormatDescriptor] = [
+            // 16:9 distractors — must not be picked.
+            CameraStore.FormatDescriptor(width: 1920, height: 1080,
+                                         frameRateRanges: [(1, 60)]),
+            CameraStore.FormatDescriptor(width: 1280, height: 720,
+                                         frameRateRanges: [(1, 60)]),
+            // 4:3 candidates.
+            CameraStore.FormatDescriptor(width: 960, height: 720,
+                                         frameRateRanges: [(1, 60)]),
+            CameraStore.FormatDescriptor(width: 1440, height: 1080,
+                                         frameRateRanges: [(1, 60)]),
+            CameraStore.FormatDescriptor(width: 1920, height: 1440,
+                                         frameRateRanges: [(1, 60)]),
+            CameraStore.FormatDescriptor(width: 4032, height: 3024,
+                                         frameRateRanges: [(1, 30)])
+        ]
+
+        // 30 fps — every 4:3 format covers it; pick the highest area.
+        let chosen30 = CameraStore.pickFourThreeFormatIndex(
+            descriptors: descriptors, preferredFPS: 30
+        )
+        XCTAssertEqual(chosen30, 5,
+                       "30fps must pick the 4032×3024 4:3 format (the largest).")
+    }
+
+    func testPickFourThreeFormatPicksHighest60fpsFormat() {
+        // At 60fps the 4032×3024 format is excluded (its range tops at
+        // 30fps); we should pick 1920×1440, the largest 4:3 that supports
+        // 60fps.
+        let descriptors: [CameraStore.FormatDescriptor] = [
+            CameraStore.FormatDescriptor(width: 1920, height: 1080,
+                                         frameRateRanges: [(1, 60)]),
+            CameraStore.FormatDescriptor(width: 960, height: 720,
+                                         frameRateRanges: [(1, 60)]),
+            CameraStore.FormatDescriptor(width: 1440, height: 1080,
+                                         frameRateRanges: [(1, 60)]),
+            CameraStore.FormatDescriptor(width: 1920, height: 1440,
+                                         frameRateRanges: [(1, 60)]),
+            CameraStore.FormatDescriptor(width: 4032, height: 3024,
+                                         frameRateRanges: [(1, 30)])
+        ]
+        let chosen = CameraStore.pickFourThreeFormatIndex(
+            descriptors: descriptors, preferredFPS: 60
+        )
+        XCTAssertEqual(chosen, 3,
+                       "60fps must pick 1920×1440 — the largest 4:3 that covers 60fps.")
+    }
+
+    func testPickFourThreeFormatReturnsNilWhenNoFormatSupportsFramerate() {
+        // No 4:3 format covers 120 fps — fall back to nil so the caller
+        // can leave the device default in place rather than mis-configuring.
+        let descriptors: [CameraStore.FormatDescriptor] = [
+            CameraStore.FormatDescriptor(width: 1920, height: 1080,
+                                         frameRateRanges: [(1, 60)]),
+            CameraStore.FormatDescriptor(width: 1440, height: 1080,
+                                         frameRateRanges: [(1, 60)])
+        ]
+        let chosen = CameraStore.pickFourThreeFormatIndex(
+            descriptors: descriptors, preferredFPS: 120
+        )
+        XCTAssertNil(chosen,
+                     "No 4:3 format covers 120fps — selection must return nil.")
+    }
+
+    func testPickFourThreeFormatRejectsNon43Aspects() {
+        // Only 16:9 inputs — selection must return nil.
+        let descriptors: [CameraStore.FormatDescriptor] = [
+            CameraStore.FormatDescriptor(width: 1920, height: 1080,
+                                         frameRateRanges: [(1, 60)]),
+            CameraStore.FormatDescriptor(width: 1280, height: 720,
+                                         frameRateRanges: [(1, 60)])
+        ]
+        let chosen = CameraStore.pickFourThreeFormatIndex(
+            descriptors: descriptors, preferredFPS: 30
+        )
+        XCTAssertNil(chosen,
+                     "No 4:3 format in the list — selection must return nil.")
+    }
+
+    // MARK: - Behind-mode reliability (Bug 2)
+
+    /// The dogfood report on `.pip → .behind` transitions: setting the
+    /// style optimistically before awaiting `start()` left the user with
+    /// `style = .behind` but no running session — black background. The
+    /// fix verifies `isSessionRunning` after `start()` returns; if the
+    /// session never started, `style` reverts to its previous value.
+    ///
+    /// This test exercises the happy path: pre-seed authorization to
+    /// `.authorized`, drive `.pip → .behind`, assert both the style flip
+    /// and the session-running state.
+    func testStorePipToBehindFlipsStyleAndKeepsSessionRunning() async {
+        let store = CameraStore(suppressDeviceWork: true)
+        // Pre-seed authorization so the suppress-device-work request path
+        // returns true rather than falling through to the .notDetermined
+        // → denied branch.
+        store.prepareTestAuthorization(.authorized)
+
+        // off → pip
+        await store.setStyle(.pip)
+        XCTAssertEqual(store.style, .pip,
+                       "Authorized .pip must persist after start().")
+        XCTAssertTrue(store.isSessionRunning,
+                      "Session must be running once setStyle returns.")
+
+        // pip → behind
+        await store.setStyle(.behind)
+        XCTAssertEqual(store.style, .behind,
+                       "Authorized .pip → .behind must complete the style flip.")
+        XCTAssertTrue(store.isSessionRunning,
+                      "Session must remain running across mode swap.")
+    }
+
+    /// Round-trip the cycle so the persistence path (Prefs.cameraStyle) is
+    /// also exercised across two non-off transitions.
+    func testStoreFullCycleAuthorizedKeepsStateConsistent() async {
+        let store = CameraStore(suppressDeviceWork: true)
+        store.prepareTestAuthorization(.authorized)
+
+        await store.setStyle(.pip)
+        await store.setStyle(.behind)
+        await store.setStyle(.off)
+        XCTAssertEqual(store.style, .off)
+        XCTAssertFalse(store.isSessionRunning)
+    }
+
     // MARK: - Pref defaults match spec
 
     func testPrefDefaultsMatchSpec() {

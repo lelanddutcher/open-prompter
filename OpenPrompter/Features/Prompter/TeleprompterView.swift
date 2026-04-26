@@ -240,6 +240,18 @@ struct TeleprompterView: View {
                 isActive: appState.recordingState.isRecording && tallyLightAllowedByPref
             )
         }
+        // In-app Dynamic-Island-style pill. ActivityKit suppresses the
+        // real Live Activity presentation while the originating app is
+        // foreground, so this fills the in-app gap with a capsule that
+        // mimics the island's content (REC dot + timer / countdown
+        // numeral). Anchored to the top safe-area inset so it sits just
+        // below the device's actual island shape.
+        .overlay(alignment: .top) {
+            InAppIslandIndicator(state: appState.recordingState)
+                .padding(.top, 4)
+                .allowsHitTesting(false)
+                .animation(.easeInOut(duration: 0.18), value: appState.recordingState.phase)
+        }
         // Countdown 3-2-1 overlay. Renders only during the countdown phase;
         // tap-anywhere on the dim cancels back to idle.
         .overlay {

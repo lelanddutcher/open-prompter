@@ -112,8 +112,15 @@ final class CameraStore {
     /// state flip, so the preview catches up while the chip already looks
     /// correct. Without this, the chip froze for 2-3s whenever the user
     /// re-enabled the camera (the dogfood report that triggered the fix).
+    ///
+    /// Post-dogfood guard: after awaiting `start()`, we verify
+    /// `isSessionRunning` is true. Behind-mode was unreliable (2-3 taps to
+    /// register) because the optimistic flip left `style = .behind` even
+    /// when the session quietly failed to start. Now we revert and surface
+    /// a banner so the user isn't staring at a black screen.
     func setStyle(_ new: CameraStyle) async {
         guard new != style else { return }
+        let previous = style
 
         if new == .off {
             // Flip the UI state first — there's no permission gate to wait
@@ -140,7 +147,26 @@ final class CameraStore {
         // tile instantly with a black preview that fills in shortly after.
         style = new
         persistStyle()
+        #if DEBUG
+        print("[CameraStore] setStyle \(previous.rawValue) -> \(new.rawValue), starting session")
+        #endif
         await start()
+
+        // Verify the session is actually running. If it isn't, we'd be
+        // leaving the user with a black `.behind` background or a frozen
+        // PiP tile. Revert to the previous style so the UI matches reality.
+        if !isSessionRunning && !suppressDeviceWork {
+            #if DEBUG
+            print("[CameraStore] start() failed — reverting style to \(previous.rawValue)")
+            #endif
+            style = previous
+            persistStyle()
+            // If the previous style was non-off, leave the (still-stopped)
+            // session alone; if it was .off, make sure we're truly stopped.
+            if previous == .off {
+                await stop()
+            }
+        }
     }
 
     /// Resume session if we should be running (mode != off, permission granted).
@@ -172,6 +198,14 @@ final class CameraStore {
     /// `true` if we're authorized (or were already), `false` if denied or
     /// restricted. iOS shows its system prompt for `.notDetermined`.
     private func requestAccessIfNeeded() async -> Bool {
+        // Test seam: when device work is suppressed AND a test pre-seeded
+        // an authorized status via `prepareTestAuthorization(_:)`, honor
+        // it directly. Lets unit tests exercise the .pip → .behind happy
+        // path without requiring an Info.plist NSCameraUsageDescription
+        // in the test bundle.
+        if suppressDeviceWork && authorization == .authorized {
+            return true
+        }
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         switch status {
         case .authorized:
@@ -196,6 +230,14 @@ final class CameraStore {
         }
     }
 
+    /// Test seam — pre-seed the authorization status. Only honored when
+    /// `suppressDeviceWork: true`. Production callers should never use
+    /// this; the real authorization status comes from AVFoundation.
+    func prepareTestAuthorization(_ status: AVAuthorizationStatus) {
+        guard suppressDeviceWork else { return }
+        self.authorization = status
+    }
+
     // MARK: - AVCaptureSession plumbing
 
     /// Configure inputs (front camera) and start the session. The blocking
@@ -203,6 +245,15 @@ final class CameraStore {
     /// the @MainActor caller can flip UI state once the session is live.
     /// `start()` is idempotent — re-entry while the session is already
     /// running is a no-op (`if !session.isRunning`).
+    ///
+    /// We also enforce the configuration brackets on the start path: even
+    /// when the session is already running, we re-check that an input is
+    /// attached. The behind-mode dogfood report traced back to a path
+    /// where the session had been started, then a config block tore down
+    /// inputs without restoring them. Re-running `configureInputsLocked`
+    /// inside a configuration block is cheap when the input is already
+    /// there (the `canAddInput` guard short-circuits) and fixes the
+    /// "session running but no input" stuck state.
     private func start() async {
         if suppressDeviceWork {
             isSessionRunning = true
@@ -210,12 +261,24 @@ final class CameraStore {
         }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             sessionQueue.async {
-                self.configureInputsLocked()
+                // Wrap the input attach in begin/commit so concurrent
+                // session-config from RecordingSession can't race us.
+                self.session.beginConfiguration()
+                if self.currentInput == nil {
+                    self.configureInputsLocked()
+                }
+                self.session.commitConfiguration()
                 if !self.session.isRunning {
                     self.session.startRunning()
                 }
+                let running = self.session.isRunning
+                #if DEBUG
+                if !running {
+                    print("[CameraStore] startRunning() did not produce a running session")
+                }
+                #endif
                 Task { @MainActor in
-                    self.isSessionRunning = self.session.isRunning
+                    self.isSessionRunning = running
                     continuation.resume()
                 }
             }
@@ -254,6 +317,14 @@ final class CameraStore {
     /// reconfigure path both set up configuration brackets around the call).
     /// Position is hardcoded `.front` — the rear camera affordance was
     /// dropped in the post-merge dogfooding pass.
+    ///
+    /// We also pick a true 4:3 `activeFormat` here. Without this, the device
+    /// defaults to a 16:9 HD format and our 1440×1080 writer ends up with
+    /// the source letterboxed inside (black bars left/right of the PiP
+    /// preview confirmed it). Selecting a 4:3 format gives the front camera
+    /// its full sensor readout — true open-gate framing — and the PiP tile
+    /// no longer shows side bars because the buffer matches the 3:4 portrait
+    /// aspect.
     nonisolated private func configureInputsLocked() {
         guard let device = AVCaptureDevice.default(
             .builtInWideAngleCamera,
@@ -272,7 +343,110 @@ final class CameraStore {
             // No usable input — leave currentInput nil. The preview layer
             // will draw black and the UI will still function (e.g. the user
             // can switch back to .off without crashing).
+            return
         }
+
+        // Pick a 4:3 format that supports the user's framerate target.
+        // Selection logic lives in `selectFourThreeFormat(...)` (pure,
+        // unit-testable) — this function just resolves the framerate from
+        // prefs and applies the chosen format under `lockForConfiguration`.
+        let framerate = RecordingFramerate(rawValue: Prefs.recordingFramerate) ?? .default
+        if let chosen = Self.selectFourThreeFormat(
+            from: device.formats,
+            preferredFPS: Double(framerate.fps)
+        ) {
+            do {
+                try device.lockForConfiguration()
+                device.activeFormat = chosen
+                device.unlockForConfiguration()
+            } catch {
+                // Lock failed (another app holds the device, etc.). The
+                // session still runs at the device default — non-fatal.
+            }
+        } else {
+            // No 4:3 format supported the requested framerate. Log and
+            // fall through to the device default.
+            #if DEBUG
+            print("[CameraStore] No 4:3 format supports \(framerate.fps) fps; using device default.")
+            #endif
+        }
+    }
+
+    /// Pure 4:3-format selection helper. Filters `formats` to those whose
+    /// `formatDescription` dimensions are within 0.01 of 4:3 and whose
+    /// `videoSupportedFrameRateRanges` cover `preferredFPS`, then returns
+    /// the highest-resolution match (by pixel area). Returns nil if no
+    /// format qualifies — caller falls back to the device default.
+    ///
+    /// On the iPhone 17e simulator the front-camera reports formats at
+    /// 4032×3024, 1920×1440, 1440×1080, and 960×720 (all 4:3 readouts).
+    /// At 30 fps we land on 4032×3024; at 60 fps on whichever 4:3 format
+    /// has 60 fps in its supported ranges (typically 1920×1440 or lower).
+    nonisolated static func selectFourThreeFormat(
+        from formats: [AVCaptureDevice.Format],
+        preferredFPS: Double
+    ) -> AVCaptureDevice.Format? {
+        // Map each format to the (width, height, [(min, max)]) shape so
+        // we can run the decision through the pure helper. We have to do
+        // this two-pass to associate the chosen tuple back to its source
+        // format; we keep parallel arrays.
+        let summaries: [(format: AVCaptureDevice.Format, descriptor: FormatDescriptor)] = formats.map { format in
+            let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            let ranges = format.videoSupportedFrameRateRanges.map { range in
+                (min: range.minFrameRate, max: range.maxFrameRate)
+            }
+            return (format, FormatDescriptor(width: Int(dims.width), height: Int(dims.height), frameRateRanges: ranges))
+        }
+        guard let chosenIndex = pickFourThreeFormatIndex(
+            descriptors: summaries.map { $0.descriptor },
+            preferredFPS: preferredFPS
+        ) else {
+            return nil
+        }
+        return summaries[chosenIndex].format
+    }
+
+    /// Lightweight value-type description of an AVCaptureDevice.Format —
+    /// only the fields that drive the 4:3 + framerate decision. Pure value
+    /// type so tests can construct fake formats without AVFoundation.
+    struct FormatDescriptor: Equatable, Sendable {
+        let width: Int
+        let height: Int
+        let frameRateRanges: [(min: Double, max: Double)]
+
+        static func == (lhs: FormatDescriptor, rhs: FormatDescriptor) -> Bool {
+            guard lhs.width == rhs.width, lhs.height == rhs.height else { return false }
+            guard lhs.frameRateRanges.count == rhs.frameRateRanges.count else { return false }
+            for (l, r) in zip(lhs.frameRateRanges, rhs.frameRateRanges) {
+                if l.min != r.min || l.max != r.max { return false }
+            }
+            return true
+        }
+    }
+
+    /// Pure decision helper — returns the index of the 4:3 format that
+    /// supports `preferredFPS` and has the highest pixel area, or nil if
+    /// no format qualifies. Tests target this directly.
+    nonisolated static func pickFourThreeFormatIndex(
+        descriptors: [FormatDescriptor],
+        preferredFPS: Double
+    ) -> Int? {
+        let target: Double = 4.0 / 3.0
+        let candidates: [(index: Int, descriptor: FormatDescriptor)] = descriptors
+            .enumerated()
+            .compactMap { (index, d) in
+                guard d.height > 0 else { return nil }
+                let ratio = Double(d.width) / Double(d.height)
+                guard abs(ratio - target) < 0.01 else { return nil }
+                let coversFPS = d.frameRateRanges.contains { range in
+                    preferredFPS >= range.min - 0.01 && preferredFPS <= range.max + 0.01
+                }
+                return coversFPS ? (index, d) : nil
+            }
+        return candidates.max { lhs, rhs in
+            (lhs.descriptor.width * lhs.descriptor.height) <
+            (rhs.descriptor.width * rhs.descriptor.height)
+        }?.index
     }
 
     // MARK: - Persistence

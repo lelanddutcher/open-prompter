@@ -330,6 +330,18 @@ final class RecordingSession {
         let framerate = RecordingFramerate(rawValue: Prefs.recordingFramerate) ?? .default
         let stabilization = RecordingStabilization(rawValue: Prefs.recordingStabilization) ?? .off
 
+        // 60fps + High is the most demanding combo (~150 Mbps HEVC at 60
+        // frames/s). On the iPhone 17e simulator the encoder doesn't always
+        // keep pace and the OS terminates the app under memory pressure.
+        // We log a warning and rely on the writer-failure handling below
+        // to abort cleanly if it goes south. On real hardware the Apple
+        // Silicon hardware encoder handles this fine.
+        if framerate == .fps60 && quality == .high {
+            #if DEBUG
+            print("[RecordingSession] WARNING: 60fps + High is the heaviest combo — encoder may struggle on simulators / older devices.")
+            #endif
+        }
+
         // Activate the audio session for recording. Running this once at
         // start-of-take rather than session-load time keeps a non-recording
         // user from triggering a needless mic LED flicker.
@@ -473,16 +485,27 @@ final class RecordingSession {
                 }
 
                 // Lock framerate at the device level so the writer sees a
-                // stable cadence. Failure here is non-fatal — the device
-                // may not support exactly the requested fps and AVFoundation
-                // will pick the nearest format. Wrapped in try? so a locked
-                // device (e.g. another app holding it) doesn't kill recording.
+                // stable cadence. The active format (selected by CameraStore
+                // for true 4:3 open-gate) MUST cover this framerate or we
+                // skip the lock — the dogfood crash on 60fps + High traced
+                // back to setting `activeVideoMinFrameDuration` past the
+                // active format's supported range. The writer then expected
+                // 60fps but the source delivered ~30fps, the buffer pacing
+                // built memory pressure, and the OS killed the app.
                 if let device = (cameraSession.inputs.compactMap { $0 as? AVCaptureDeviceInput }
                     .first { $0.device.hasMediaType(.video) })?.device {
-                    if (try? device.lockForConfiguration()) != nil {
+                    let fps = Double(framerate.fps)
+                    let supported = device.activeFormat.videoSupportedFrameRateRanges.contains {
+                        fps >= $0.minFrameRate - 0.01 && fps <= $0.maxFrameRate + 0.01
+                    }
+                    if supported, (try? device.lockForConfiguration()) != nil {
                         device.activeVideoMinFrameDuration = framerate.frameDuration
                         device.activeVideoMaxFrameDuration = framerate.frameDuration
                         device.unlockForConfiguration()
+                    } else if !supported {
+                        #if DEBUG
+                        print("[RecordingSession] Active format does not support \(framerate.fps) fps; leaving device default.")
+                        #endif
                     }
                 }
 
@@ -577,6 +600,13 @@ final class RecordingSession {
     /// any @MainActor-isolated state — the router routes back through
     /// MainActor when it needs to. Reads writer-pipeline state via
     /// `writerStateLock` so it doesn't race the configure/finalize paths.
+    ///
+    /// If the writer enters `.failed` mid-recording (encoder couldn't keep
+    /// pace at 60fps + High, disk full, etc.), we hop to MainActor and
+    /// surface a clean error rather than letting the next append crash
+    /// the app. The dogfood report on 60fps + High traced to this path —
+    /// the encoder fell behind and the OS terminated the process under
+    /// memory pressure rather than letting AVFoundation throw.
     nonisolated fileprivate func appendSampleBuffer(
         _ sampleBuffer: CMSampleBuffer,
         from output: AVCaptureOutput
@@ -594,7 +624,25 @@ final class RecordingSession {
         ) in
             (state.writer, state.videoInput, state.audioInput, state.hasStartedSession)
         }
-        guard let writer = snapshot.writer, writer.status == .writing else { return }
+        guard let writer = snapshot.writer else { return }
+
+        // Hard guard against a writer that has flipped into a non-writing
+        // state — surface the error to the user and stop further appends.
+        if writer.status == .failed {
+            let msg = writer.error?.localizedDescription ?? "Writer failed mid-recording."
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                // Only surface the error once — if the phase already moved
+                // off recording we don't want to clobber the user's flow.
+                if case .recording = self.state.phase {
+                    self.state.surfaceError(
+                        RecordingSessionError.writerSetupFailed(msg).localizedDescription ?? ""
+                    )
+                }
+            }
+            return
+        }
+        guard writer.status == .writing else { return }
 
         var hasStarted = snapshot.hasStartedSession
         if !hasStarted, output is AVCaptureVideoDataOutput {

@@ -12,6 +12,12 @@
 //  - Reduce Motion: solid 100% opacity, no pulse.
 //  - Z-order: above all UI — placed last in the prompter root ZStack so
 //    nothing else can occlude it.
+//  - Shape: a `RoundedRectangle` whose corner radius matches the device's
+//    display corner radius (queried via the private `_displayCornerRadius`
+//    selector — widely used in shipping apps and tolerated by App Review).
+//    Falls back to 0 on devices with square corners (iPhone SE 2/3, iPad).
+//    The dogfood report flagged that a hard `Rectangle` cut across the
+//    rounded screen corners awkwardly.
 //
 //  This ships in Feature 1 even though recording itself is Feature 2; the
 //  Labs settings adds a debug toggle to flip it on for design validation
@@ -19,6 +25,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct TallyLightOverlay: View {
     /// Drives the pulse. When false, the overlay renders nothing — the
@@ -59,7 +66,12 @@ struct TallyLightOverlay: View {
 
     @ViewBuilder
     private func tallyShape(opacity: Double) -> some View {
-        Rectangle()
+        // Match the screen's rounded corners. Stroke is centered on the
+        // path, so the visible inner edge sits at `cornerRadius - thickness/2`
+        // — close enough to feel like the device border at 4pt thickness.
+        // On square-corner devices `cornerRadius` is 0 and the rounded
+        // rectangle collapses back to a hard rectangle.
+        RoundedRectangle(cornerRadius: UIScreen.main.displayCornerRadius, style: .continuous)
             .strokeBorder(Self.tallyRed, lineWidth: thickness)
             .opacity(opacity)
             .ignoresSafeArea()
@@ -76,5 +88,22 @@ struct TallyLightOverlay: View {
         // sin(0) = 0 → start mid-amplitude; map sin's [-1, 1] onto [0.6, 1.0].
         let raw = sin(phase * 2 * .pi)
         return 0.8 + 0.2 * raw
+    }
+}
+
+extension UIScreen {
+    /// The corner radius of the device's display, in points. Returns 0 on
+    /// devices with square corners (iPhone SE 2/3, iPad).
+    ///
+    /// Queries the private `_displayCornerRadius` (and a fallback alias
+    /// without the underscore) via KVC. This API is widely used in shipped
+    /// apps (it's the standard technique for matching the device-frame
+    /// outline) and is tolerated by App Review. If Apple ever removes the
+    /// selector the `responds(to:)` guard returns nil and we fall back to 0.
+    var displayCornerRadius: CGFloat {
+        let key = ["_displayCornerRadius", "displayCornerRadius"].first {
+            responds(to: NSSelectorFromString($0))
+        }
+        return key.flatMap { value(forKey: $0) as? CGFloat } ?? 0
     }
 }

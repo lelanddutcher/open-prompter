@@ -464,4 +464,32 @@ final class RecordingTests: XCTestCase {
         session.tapCancelDuringCountdown()
         XCTAssertEqual(state.phase, .idle)
     }
+
+    // MARK: - InAppIslandIndicator visibility (Bug 5)
+
+    /// The in-app island pill must be visible during every phase where the
+    /// system Live Activity would normally drive the Dynamic Island —
+    /// countdown, recording, finalizing, saving — so the user gets a
+    /// top-of-screen indicator while the app is foreground (the OS
+    /// suppresses Live Activity presentations for the originating app).
+    func testInAppIslandIndicatorShowsForActivePhases() {
+        XCTAssertTrue(InAppIslandIndicator.shouldShow(for: .countdown(remaining: 3)),
+                      "Pill must show during countdown so REC tap has immediate feedback.")
+        XCTAssertTrue(InAppIslandIndicator.shouldShow(for: .recording(startedAt: .now)),
+                      "Pill must show during active recording.")
+        XCTAssertTrue(InAppIslandIndicator.shouldShow(for: .finalizing),
+                      "Pill must show during writer finalize.")
+        XCTAssertTrue(InAppIslandIndicator.shouldShow(
+            for: .saving(destinations: .default)),
+                      "Pill must show during Photos / iCloud save.")
+    }
+
+    /// And conversely, hide for idle / error so the user doesn't see a
+    /// stray pill outside an in-flight take.
+    func testInAppIslandIndicatorHidesForInactivePhases() {
+        XCTAssertFalse(InAppIslandIndicator.shouldShow(for: .idle),
+                       "Pill must hide when no take is in flight.")
+        XCTAssertFalse(InAppIslandIndicator.shouldShow(for: .error("bad")),
+                       "Pill must hide on error so the banner takes the user's focus.")
+    }
 }
