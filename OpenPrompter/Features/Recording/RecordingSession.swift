@@ -632,18 +632,23 @@ final class RecordingSession {
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = true
         // Always apply writer-level 90° rotation for the front camera.
+        // Direction: -π/2 (90° counterclockwise in iOS display coordinates,
+        // since iOS uses Y-down with positive angles = clockwise visually).
+        //
+        // The previous +π/2 (clockwise) shipped upside-down recordings —
+        // the iOS 26 dynamic-aspect API reshapes the buffer's W/H labels
+        // for `.ratio3x4` without rotating the underlying pixel content,
+        // so the buffer arrives "labeled portrait but content sensor-
+        // landscape." A clockwise rotation on top of sideways content
+        // gave us 180° off (upside down). Counterclockwise corrects
+        // that 90°-CW source skew to upright portrait.
+        //
         // The iPhone 17 front Ultra Wide connection does NOT honor
-        // `connection.videoRotationAngle = 90` (we tried it; buffers
-        // ignored the request), and iOS 26's `setDynamicAspectRatio`
-        // reshapes the buffer's W/H labels without rotating the actual
-        // pixel content. So the most reliable path is: capture at 4:3
-        // landscape (sensor-natural orientation, content correctly
-        // oriented), and tag the file with a 90° transform so Photos
-        // plays it portrait. The conditional `if writerWidth > writerHeight`
-        // gate from the previous round is gone — we always rotate the
-        // writer because the sensor is mounted landscape regardless of
-        // what dynamic aspect we request.
-        videoInput.transform = CGAffineTransform(rotationAngle: .pi / 2)
+        // `connection.videoRotationAngle = 90` (we tried earlier; buffers
+        // arrive in the same orientation regardless), so writer-level
+        // metadata rotation is the most reliable path until / unless
+        // Apple lights up the connection rotation API for that camera.
+        videoInput.transform = CGAffineTransform(rotationAngle: -.pi / 2)
 
         // Audio input — AAC, voiceover bitrate.
         let audioSettings: [String: Any] = [

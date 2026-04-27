@@ -197,11 +197,35 @@ final class PrompterViewModel {
         Haptics.tap()
     }
 
+    /// Cycles through all four mirror states so a single tap on the in-
+    /// prompter mirror chip exposes every combination without forcing the
+    /// user into Settings:
+    ///     off (─, ─) → H (•, ─) → V (─, •) → both (•, •) → off
+    /// "tap once for horizontal, twice for vertical, three times for both,
+    /// four to reset." The remote-control `.mirrorToggle` event also routes
+    /// here, so a Bluetooth button cycles the same four states.
     func toggleMirror() {
-        mirroredHorizontal.toggle()
+        switch (mirroredHorizontal, mirroredVertical) {
+        case (false, false):
+            mirroredHorizontal = true
+            mirroredVertical = false
+        case (true, false):
+            mirroredHorizontal = false
+            mirroredVertical = true
+        case (false, true):
+            mirroredHorizontal = true
+            mirroredVertical = true
+        case (true, true):
+            mirroredHorizontal = false
+            mirroredVertical = false
+        }
         Haptics.tap(.medium)
     }
 
+    /// Direct vertical-only toggle. Kept for Settings (where each axis has
+    /// its own switch) and for any future remote binding that wants to
+    /// flip just the vertical axis. The in-prompter chip uses
+    /// `toggleMirror()` (the four-state cycle) instead.
     func toggleMirrorVertical() {
         mirroredVertical.toggle()
         Haptics.tap(.medium)

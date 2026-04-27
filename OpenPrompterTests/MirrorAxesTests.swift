@@ -151,19 +151,42 @@ final class MirrorAxesTests: XCTestCase {
 
     // MARK: - View model toggling
 
-    func testToggleHorizontalFlipsOnlyHorizontal() {
+    /// Dogfood pass 7: `toggleMirror()` is now a four-state cycle on the
+    /// in-prompter chip so users can reach all combinations without going
+    /// into Settings:
+    ///     off (─, ─) → H (•, ─) → V (─, •) → both (•, •) → off
+    func testToggleMirrorCyclesAllFourStatesFromOff() {
         let vm = PrompterViewModel(file: makeFile())
-        let startH = vm.mirroredHorizontal
-        let startV = vm.mirroredVertical
+        // Force both off.
+        if vm.mirroredHorizontal { vm.toggleMirror() }
+        while vm.mirroredHorizontal || vm.mirroredVertical {
+            vm.toggleMirror()
+        }
+        XCTAssertFalse(vm.mirroredHorizontal)
+        XCTAssertFalse(vm.mirroredVertical)
 
+        // Tap 1: → H only.
         vm.toggleMirror()
+        XCTAssertTrue(vm.mirroredHorizontal)
+        XCTAssertFalse(vm.mirroredVertical)
 
-        XCTAssertEqual(vm.mirroredHorizontal, !startH,
-                       "toggleMirror() must invert the horizontal axis.")
-        XCTAssertEqual(vm.mirroredVertical, startV,
-                       "toggleMirror() must not touch the vertical axis.")
+        // Tap 2: → V only.
+        vm.toggleMirror()
+        XCTAssertFalse(vm.mirroredHorizontal)
+        XCTAssertTrue(vm.mirroredVertical)
+
+        // Tap 3: → both.
+        vm.toggleMirror()
+        XCTAssertTrue(vm.mirroredHorizontal)
+        XCTAssertTrue(vm.mirroredVertical)
+
+        // Tap 4: → both off (cycle complete).
+        vm.toggleMirror()
+        XCTAssertFalse(vm.mirroredHorizontal)
+        XCTAssertFalse(vm.mirroredVertical)
     }
 
+    /// Vertical-only path (used by Settings toggles, not the prompter chip).
     func testToggleVerticalFlipsOnlyVertical() {
         let vm = PrompterViewModel(file: makeFile())
         let startH = vm.mirroredHorizontal
@@ -175,29 +198,6 @@ final class MirrorAxesTests: XCTestCase {
                        "toggleMirrorVertical() must invert the vertical axis.")
         XCTAssertEqual(vm.mirroredHorizontal, startH,
                        "toggleMirrorVertical() must not touch the horizontal axis.")
-    }
-
-    func testBothAxesIndependent() {
-        let vm = PrompterViewModel(file: makeFile())
-        // Force both off.
-        if vm.mirroredHorizontal { vm.toggleMirror() }
-        if vm.mirroredVertical { vm.toggleMirrorVertical() }
-
-        // Both on.
-        vm.toggleMirror()
-        vm.toggleMirrorVertical()
-        XCTAssertTrue(vm.mirroredHorizontal)
-        XCTAssertTrue(vm.mirroredVertical)
-
-        // Horizontal off, vertical still on.
-        vm.toggleMirror()
-        XCTAssertFalse(vm.mirroredHorizontal)
-        XCTAssertTrue(vm.mirroredVertical)
-
-        // Both off.
-        vm.toggleMirrorVertical()
-        XCTAssertFalse(vm.mirroredHorizontal)
-        XCTAssertFalse(vm.mirroredVertical)
     }
 
     // MARK: - Seeding from prefs

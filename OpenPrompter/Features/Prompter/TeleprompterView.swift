@@ -37,6 +37,14 @@ struct TeleprompterView: View {
     /// fire. Defaults to true on appear and resets to false on disappear.
     @FocusState private var prompterFocused: Bool
 
+    /// Captured `vm.scroller.offset` at the moment a manual drag begins.
+    /// The DragGesture's `value.translation` is relative to gesture start,
+    /// so we apply the cumulative translation against this baseline and
+    /// commit via `vm.scroller.seek(...)`. Reset to nil on drag end. Lives
+    /// here (not on the view model) because it's a gesture-recognizer
+    /// transient — no need to outlive the gesture.
+    @State private var manualScrollBaseline: CGFloat? = nil
+
     // Live-read prefs that gate which sources are active. UserDefaults-backed
     // so a Settings change applies on the next prompter open without a
     // manual rebuild of the view model.
@@ -289,6 +297,44 @@ struct TeleprompterView: View {
         .ignoresSafeArea(.keyboard)
         .contentShape(Rectangle())
         .onTapGesture { vm.togglePlay() }
+        // Manual scrub-back / scrub-forward via finger drag while paused.
+        // The ScrollView underneath has `scrollDisabled(true)` always, so
+        // this DragGesture is the only path that actually moves the
+        // `vm.scroller.offset` when the user wants to revisit earlier
+        // sections after a long take.
+        //
+        // Why not let the ScrollView scroll natively? The prompter content
+        // is positioned by `.offset(y: -vm.scroller.offset)` — a view
+        // shift, not a real scroll position. The ScrollView's own scroll
+        // position is independent of (and ignorant of) the offset shift.
+        // After a long auto-scroll, the offset is large, content is shifted
+        // way up visually, but the ScrollView still thinks the top of the
+        // natural content is at top — there's nothing for it to scroll
+        // back through. This DragGesture bridges the gap by treating the
+        // whole prompter as a virtual scroll surface that maps drag
+        // translation directly to the offset.
+        //
+        // `minimumDistance: 10` keeps a quick tap (toggle play) from
+        // accidentally triggering a 1-pixel scroll. Drag input is ignored
+        // while playing — auto-scroll owns the offset there.
+        .gesture(
+            DragGesture(minimumDistance: 10)
+                .onChanged { value in
+                    guard !vm.isPlaying else { return }
+                    if manualScrollBaseline == nil {
+                        manualScrollBaseline = vm.scroller.offset
+                    }
+                    let baseline = manualScrollBaseline ?? 0
+                    // Translation.height: + when finger moves down, − when up.
+                    // Drag-up should pull "later" text into the reading line
+                    // (offset increases), so invert the translation sign.
+                    let target = baseline - value.translation.height
+                    vm.scroller.seek(to: target, maxOffset: vm.maxScrollOffset)
+                }
+                .onEnded { _ in
+                    manualScrollBaseline = nil
+                }
+        )
         // Keyboard focus + .onKeyPress wiring (Feature 7). Without
         // .focusable() + .focused(), SwiftUI never delivers key events.
         // We mount these unconditionally so a user who opts back in mid-
@@ -520,7 +566,14 @@ struct TeleprompterView: View {
                 )
                 .offset(y: -vm.scroller.offset)
             }
-            .scrollDisabled(vm.isPlaying)
+            // ScrollView's own scroll is permanently disabled. The visible
+            // scroll position is driven entirely by `.offset(y: -vm.scroller.offset)`
+            // above, and the user's finger gestures are captured by the
+            // DragGesture on the prompter root (which calls
+            // `vm.scroller.seek(...)`). Letting the ScrollView scroll
+            // natively would race the offset shift and leave the user
+            // unable to scrub back to earlier sections after long auto-scroll.
+            .scrollDisabled(true)
             .onAppear { vm.viewportHeight = geo.size.height }
             .onChange(of: geo.size.height) { _, new in
                 vm.viewportHeight = new
