@@ -75,6 +75,13 @@ final class AppState {
     /// otherwise lose the take).
     let recordingSession: RecordingSession
 
+    /// App Store review-prompt counters (Feature 8). Tracks completed
+    /// recordings + meaningful play sessions; the trigger lives in
+    /// `RootView`/`OpenPrompterApp` on `scenePhase == .active`. Stored
+    /// on AppState so increments from anywhere in the app flow into a
+    /// single source of truth.
+    let reviewPromptCounter = ReviewPromptCounter()
+
     // MARK: - Banner
 
     enum BannerKind: Equatable {
@@ -96,9 +103,18 @@ final class AppState {
         // both of which are stored properties initialized above. Init this
         // before bookmark resolution so a recovery scan that immediately
         // posts to the state machine has a session ready to handle it.
+        //
+        // The `onRecordingSaved` closure is the wiring for Feature 8 —
+        // every successful Photos write increments the review-prompt
+        // counter. We capture an unowned reference because AppState
+        // outlives the recording session for the lifetime of the app.
+        let counter = self.reviewPromptCounter
         self.recordingSession = RecordingSession(
             state: self.recordingState,
-            cameraStore: self.cameraStore
+            cameraStore: self.cameraStore,
+            onRecordingSaved: { [counter] in
+                counter.recordSuccessfulRecording()
+            }
         )
         resolveBookmarkAndStart()
         scanForInterruptedRecording()

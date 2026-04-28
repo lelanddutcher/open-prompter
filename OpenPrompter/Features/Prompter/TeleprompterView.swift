@@ -37,6 +37,12 @@ struct TeleprompterView: View {
     /// fire. Defaults to true on appear and resets to false on disappear.
     @FocusState private var prompterFocused: Bool
 
+    /// Wall-clock timestamp at which the current play span began. Set
+    /// when `vm.isPlaying` flips true; consumed when it flips false. The
+    /// elapsed delta feeds `ReviewPromptCounter.recordPlaySession(...)`
+    /// for Feature 8's engagement signal. `nil` when paused.
+    @State private var playSessionStartedAt: Date? = nil
+
     /// Captured `vm.scroller.offset` at the moment a manual drag begins.
     /// The DragGesture's `value.translation` is relative to gesture start,
     /// so we apply the cumulative translation against this baseline and
@@ -432,6 +438,21 @@ struct TeleprompterView: View {
                 }
             }
         }
+        .onChange(of: vm.isPlaying) { _, nowPlaying in
+            // Feature 8 engagement tracking. Stamp the start of each play
+            // span; on flip to paused, count it (sessions ≥ 30 s only,
+            // shorter ones are usually the user fiddling with controls
+            // rather than reading). Pause-resume cycles each get their
+            // own session — that's by design, since each is a discrete
+            // "I sat down to read for a while" event.
+            if nowPlaying {
+                playSessionStartedAt = .now
+            } else if let start = playSessionStartedAt {
+                let elapsed = Date.now.timeIntervalSince(start)
+                appState.reviewPromptCounter.recordPlaySession(durationSeconds: elapsed)
+                playSessionStartedAt = nil
+            }
+        }
         .onChange(of: scenePhase) { _, newPhase in
             // Stop the session on background to extinguish the privacy LED;
             // resume on foreground if the mode demands it. iOS will already
@@ -440,6 +461,14 @@ struct TeleprompterView: View {
             switch newPhase {
             case .active:
                 Task { await appState.cameraStore.resume() }
+                // Feature 8: ask for an App Store review on a fresh
+                // foreground if the user has crossed the engagement
+                // threshold. The controller's predicate is the gate; this
+                // call is a no-op when thresholds aren't met or we've
+                // already prompted in this app version.
+                ReviewPromptController.requestReviewIfAppropriate(
+                    counter: appState.reviewPromptCounter
+                )
             case .background, .inactive:
                 Task { await appState.cameraStore.suspend() }
             @unknown default:

@@ -107,6 +107,37 @@ enum PrefKey: String, CaseIterable {
     /// so the chip doesn't fire the system prompt twice in a single take.
     case recordingPhotosPermissionAsked = "pref.recording.photosPermissionAsked"
 
+    // MARK: - App Store review prompt (Feature 8)
+    //
+    // Counters + bookkeeping for `SKStoreReviewController.requestReview(in:)`.
+    // We only ask once per CFBundleShortVersionString and only after the
+    // user has demonstrated meaningful engagement (recorded a take OR
+    // played multiple prompter sessions) AND ≥ 24 hours have elapsed
+    // since first launch. Apple's StoreKit additionally rate-limits to
+    // 3 prompts per 365 days per Apple ID; this layer keeps us from
+    // burning that budget on a freshly-installed user.
+
+    /// Number of recordings the user has completed AND saved successfully.
+    /// Increments only after the Photos write resolves (success path).
+    case reviewRecordingsCompleted = "pref.review.recordingsCompleted"
+    /// Number of prompter playback sessions the user has finished. A
+    /// "session" is play → pause / end-of-script with at least 30 s of
+    /// elapsed playback time, so a tap-then-pause doesn't count.
+    case reviewPlaySessionsCompleted = "pref.review.playSessionsCompleted"
+    /// Cumulative playback seconds across the lifetime of the app on
+    /// this device. Stored alongside session count so we can layer on
+    /// a duration threshold later if needed.
+    case reviewTotalPlaybackSeconds = "pref.review.totalPlaybackSeconds"
+    /// ISO-8601 timestamp of the user's first launch on this device.
+    /// Used for the 24-hour "don't ask freshly-installed users" gate.
+    /// Stored as ISO string (not TimeInterval) so a Files inspection
+    /// shows a readable value.
+    case reviewFirstLaunchAt = "pref.review.firstLaunchAt"
+    /// CFBundleShortVersionString we last prompted under. Empty string
+    /// means we've never prompted. Comparing against the current bundle
+    /// version is what enforces "once per app version."
+    case reviewLastPromptedAppVersion = "pref.review.lastPromptedAppVersion"
+
     var defaultValue: Any {
         switch self {
         case .defaultSpeed: return 48.0        // pixels per second
@@ -163,6 +194,11 @@ enum PrefKey: String, CaseIterable {
             return false
             #endif
         case .recordingPhotosPermissionAsked: return false
+        case .reviewRecordingsCompleted: return 0
+        case .reviewPlaySessionsCompleted: return 0
+        case .reviewTotalPlaybackSeconds: return 0.0
+        case .reviewFirstLaunchAt: return ""
+        case .reviewLastPromptedAppVersion: return ""
         }
     }
 }
@@ -438,5 +474,48 @@ enum Prefs {
     static var recordingPhotosPermissionAsked: Bool {
         get { defaults.bool(forKey: PrefKey.recordingPhotosPermissionAsked.rawValue) }
         set { defaults.set(newValue, forKey: PrefKey.recordingPhotosPermissionAsked.rawValue) }
+    }
+
+    // MARK: - App Store review prompt (Feature 8)
+
+    static var reviewRecordingsCompleted: Int {
+        get { defaults.integer(forKey: PrefKey.reviewRecordingsCompleted.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.reviewRecordingsCompleted.rawValue) }
+    }
+
+    static var reviewPlaySessionsCompleted: Int {
+        get { defaults.integer(forKey: PrefKey.reviewPlaySessionsCompleted.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.reviewPlaySessionsCompleted.rawValue) }
+    }
+
+    static var reviewTotalPlaybackSeconds: Double {
+        get { defaults.double(forKey: PrefKey.reviewTotalPlaybackSeconds.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.reviewTotalPlaybackSeconds.rawValue) }
+    }
+
+    /// First-launch timestamp. Lazily initialised on first read — if the
+    /// stored value is empty (or unparseable) we stamp it with `Date.now`
+    /// and write it back, so subsequent reads return a stable value.
+    /// Decoded as an ISO-8601 string for human-readable Files inspection.
+    static var reviewFirstLaunchAt: Date {
+        get {
+            let raw = defaults.string(forKey: PrefKey.reviewFirstLaunchAt.rawValue) ?? ""
+            if !raw.isEmpty, let date = ISO8601DateFormatter().date(from: raw) {
+                return date
+            }
+            let now = Date.now
+            defaults.set(ISO8601DateFormatter().string(from: now),
+                         forKey: PrefKey.reviewFirstLaunchAt.rawValue)
+            return now
+        }
+        set {
+            defaults.set(ISO8601DateFormatter().string(from: newValue),
+                         forKey: PrefKey.reviewFirstLaunchAt.rawValue)
+        }
+    }
+
+    static var reviewLastPromptedAppVersion: String {
+        get { defaults.string(forKey: PrefKey.reviewLastPromptedAppVersion.rawValue) ?? "" }
+        set { defaults.set(newValue, forKey: PrefKey.reviewLastPromptedAppVersion.rawValue) }
     }
 }

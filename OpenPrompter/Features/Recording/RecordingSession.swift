@@ -198,18 +198,27 @@ final class RecordingSession {
     /// Countdown ticker — invalidated on cancel/stop.
     private var countdownTask: Task<Void, Never>? = nil
 
+    /// Optional callback fired AFTER a successful Photos save. Wired by
+    /// `AppState` to bump the review-prompt counter (Feature 8). Kept as
+    /// a typed closure rather than a direct ReviewPromptCounter reference
+    /// so the recording stack stays decoupled from review-prompt
+    /// machinery — easier to test, easier to swap.
+    private let onRecordingSaved: (@MainActor () -> Void)?
+
     // MARK: - Init
 
     init(
         state: RecordingState,
         cameraStore: CameraStore?,
-        suppressDeviceWork: Bool = false
+        suppressDeviceWork: Bool = false,
+        onRecordingSaved: (@MainActor () -> Void)? = nil
     ) {
         self.state = state
         self.cameraStore = cameraStore
         self.cameraSession = cameraStore?.session
         self.cameraSessionQueue = cameraStore?.sessionQueueRef
         self.suppressDeviceWork = suppressDeviceWork
+        self.onRecordingSaved = onRecordingSaved
 
         // Ensure the recordings directory exists so the writer doesn't fail
         // on first launch. Failure here is non-fatal — the writer setup
@@ -971,6 +980,15 @@ final class RecordingSession {
             }
             #endif
             RecordingFileStore.removeRecording(at: url)
+
+            // Bump the App Store review-prompt counter (Feature 8). Only
+            // counts successful saves — a failure represents friction,
+            // not a "would you tell others" moment. The callback hook is
+            // injected at init time by AppState so RecordingSession stays
+            // ignorant of the counter type. The actual prompt call lives
+            // at scenePhase = .active so it fires on a fresh foreground
+            // rather than mid-flow.
+            onRecordingSaved?()
         }
         writerStateLock.withLock { state in
             state.currentRecordingURL = nil
