@@ -331,8 +331,35 @@ struct TeleprompterView: View {
                     let target = baseline - value.translation.height
                     vm.scroller.seek(to: target, maxOffset: vm.maxScrollOffset)
                 }
-                .onEnded { _ in
+                .onEnded { value in
+                    let baseline = manualScrollBaseline
                     manualScrollBaseline = nil
+                    guard !vm.isPlaying, let baseline else { return }
+
+                    // Scroll inertia. iOS already computes
+                    // `predictedEndTranslation` from the gesture's release
+                    // velocity — slow drag → roughly equal to the actual
+                    // translation (snap-to-where-finger-lifted), fast flick
+                    // → significant overshoot for the post-release glide
+                    // that makes scrolling feel native.
+                    //
+                    // Animate vm.scroller.offset from where it sat at
+                    // release to the predicted-end target via easeOut.
+                    // The clamp inside scroller.seek() handles flicks past
+                    // the head/tail of the script — they decelerate into
+                    // the boundary rather than overshooting it.
+                    //
+                    // Duration scales mildly with the inertial distance so
+                    // a tiny overshoot doesn't get a 0.7 s tail and a big
+                    // flick doesn't snap. 0.18-0.65 s window, capped to
+                    // keep the prompter from feeling laggy.
+                    let inertialTarget = baseline - value.predictedEndTranslation.height
+                    let clampedTarget = min(max(0, inertialTarget), vm.maxScrollOffset)
+                    let inertialDistance = abs(clampedTarget - vm.scroller.offset)
+                    let duration = min(0.65, max(0.18, Double(inertialDistance) / 1800.0))
+                    withAnimation(.easeOut(duration: duration)) {
+                        vm.scroller.seek(to: inertialTarget, maxOffset: vm.maxScrollOffset)
+                    }
                 }
         )
         // Keyboard focus + .onKeyPress wiring (Feature 7). Without
