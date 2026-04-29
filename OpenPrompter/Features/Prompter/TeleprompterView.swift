@@ -43,6 +43,22 @@ struct TeleprompterView: View {
     /// for Feature 8's engagement signal. `nil` when paused.
     @State private var playSessionStartedAt: Date? = nil
 
+    /// Frame of the currently-rendered PiP tile, in viewport coordinates.
+    /// Published by `PipTile` upward via `PipFramePreferenceKey`. The
+    /// shared `CameraPreview` (mounted once at the ZStack root, lifetime
+    /// = prompter session) reads this rect to position itself in `.pip`
+    /// mode. In `.behind` mode the preview ignores the rect and fills
+    /// the screen instead. Replaces the previous architecture where each
+    /// camera mode owned its own `CameraPreview`, which paid AVFoundation
+    /// cold-start cost (~5 s on iPhone 17 + iOS 26) every time the user
+    /// cycled modes.
+    @State private var pipFrame: CGRect = .zero
+    /// Mirror of `PipTile.hidden` published via `PipHiddenPreferenceKey`.
+    /// When the user has tucked the tile off-screen (chevron tab visible),
+    /// the parent's shared CameraPreview short-circuits its render so
+    /// nothing camera-shaped sits on the prompter.
+    @State private var pipHidden: Bool = false
+
     /// Captured `vm.scroller.offset` at the moment a manual drag begins.
     /// The DragGesture's `value.translation` is relative to gesture start,
     /// so we apply the cumulative translation against this baseline and
@@ -103,25 +119,61 @@ struct TeleprompterView: View {
                 Theme.bg.ignoresSafeArea()
             }
 
-            // `.behind` mode: full-frame camera preview. Mirror axes (V2
-            // Feature 6) compose against the preview layer — same source
-            // of truth as the text scale.
-            if cameraStyle == .behind {
-                CameraPreview(
-                    session: appState.cameraStore.session,
-                    gravity: .resizeAspectFill,
-                    horizontalMirror: vm.mirroredHorizontal,
-                    verticalMirror: vm.mirroredVertical
-                )
-                .ignoresSafeArea()
-                // Scrim behind the reading line: WCAG 2.2 AA contrast over
-                // live video. 0.55 is the spec default; raise to 0.7 at AX5
-                // Dynamic Type sizes per V2 Design 01 §"`behind` — full-
-                // frame camera, prompter overlay".
-                Color(red: 10.0/255, green: 10.0/255, blue: 11.0/255)
-                    .opacity(scrimOpacityForBehindMode)
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
+            // ★ Single shared CameraPreview. Mounted whenever the camera
+            // is on (`.pip` or `.behind`), torn down only on `.off`. The
+            // `.id("camera-preview-shared")` pin keeps SwiftUI from re-
+            // creating the underlying `UIViewRepresentable` (and therefore
+            // the `AVCaptureVideoPreviewLayer`) when the user cycles
+            // modes — it just resizes and re-clips. Mode-conditional
+            // mounting was the cause of the previous ~5 s `.pip → .behind`
+            // swap (each branch owned its own CameraPreview, paying
+            // AVFoundation cold-start cost on every transition).
+            //
+            // In `.behind` mode the preview ignores `pipFrame` and fills
+            // the geometry. In `.pip` mode it positions/sizes/clips to
+            // the rect published by `PipTile`. In hidden-tile state
+            // (chevron tab showing) we short-circuit by returning to a
+            // zero-size frame so nothing renders.
+            if cameraStyle != .off {
+                let shouldRender = cameraStyle == .behind || !pipHidden
+                GeometryReader { geo in
+                    if shouldRender {
+                        CameraPreview(
+                            session: appState.cameraStore.session,
+                            gravity: cameraStyle == .behind ? .resizeAspectFill : .resizeAspect,
+                            horizontalMirror: vm.mirroredHorizontal,
+                            verticalMirror: vm.mirroredVertical
+                        )
+                        .id("camera-preview-shared")
+                        .frame(
+                            width: cameraStyle == .behind ? geo.size.width : pipFrame.width,
+                            height: cameraStyle == .behind ? geo.size.height : pipFrame.height
+                        )
+                        .clipShape(
+                            cameraStyle == .behind
+                                ? AnyShape(Rectangle())
+                                : AnyShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        )
+                        .position(
+                            x: cameraStyle == .behind ? geo.size.width / 2 : pipFrame.midX,
+                            y: cameraStyle == .behind ? geo.size.height / 2 : pipFrame.midY
+                        )
+                        .animation(.easeInOut(duration: 0.18), value: cameraStyle)
+                    }
+                }
+                .ignoresSafeArea(cameraStyle == .behind ? .all : [])
+                .allowsHitTesting(false)  // PipTile overlay handles all gestures
+
+                if cameraStyle == .behind {
+                    // Scrim behind the reading line: WCAG 2.2 AA contrast
+                    // over live video. 0.55 is the spec default; raise to
+                    // 0.7 at AX5 Dynamic Type sizes per V2 Design 01
+                    // §"`behind` — full-frame camera, prompter overlay".
+                    Color(red: 10.0/255, green: 10.0/255, blue: 11.0/255)
+                        .opacity(scrimOpacityForBehindMode)
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
+                }
             }
 
             // Scrolling text — full-bleed, measures its own viewport internally.
@@ -175,6 +227,16 @@ struct TeleprompterView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Read PipTile's published frame + hidden state so the shared
+        // CameraPreview can position itself in `.pip` mode. PipTile's
+        // own gestures still update its internal state; the preference
+        // values flow upward as the user drags / cycles size / hides.
+        .onPreferenceChange(PipFramePreferenceKey.self) { newFrame in
+            pipFrame = newFrame
+        }
+        .onPreferenceChange(PipHiddenPreferenceKey.self) { newHidden in
+            pipHidden = newHidden
+        }
         // PiP tile floats above the text and is _independent_ of the
         // chrome-hide state — when the user taps to hide the chrome they
         // still want to see themselves on camera. (The user explicitly

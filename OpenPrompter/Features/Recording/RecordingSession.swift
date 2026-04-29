@@ -422,111 +422,53 @@ final class RecordingSession {
         let lock = writerStateLock
         let recordQ = recordingQueue
 
-        // Add data outputs to the shared session inside a configuration
-        // block. We do this on the camera's session queue to avoid racing
-        // with the camera store's own start/stop transitions.
+        // Pre-attached outputs from the camera store. Both the video and
+        // audio data outputs were attached at session-config time inside
+        // `CameraStore.configureInputsLocked` — the SAME bracket as the
+        // camera input, audio input, format selection, and dynamic-aspect
+        // reshape. Pre-attaching means REC tap NEVER opens a
+        // begin/commit bracket on the camera session, so the iOS 26
+        // dynamic-aspect 1×1 reshape stays stable across the take and
+        // the preview can never visibly squeeze (the dogfood-pass-7
+        // "PiP squeezes when REC tap fires" symptom).
         //
-        // The audio INPUT (the AVCaptureDeviceInput pulling samples from
-        // the mic) is owned by CameraStore now — attached at session-config
-        // time rather than recording-start time. That keeps the iOS 26
-        // dynamic-aspect reshape stable across REC tap (the dogfood-pass-3
-        // "PiP stretches when REC starts" bug). We just attach the audio
-        // DATA OUTPUT here to gate samples into the writer.
-        // Snapshot the dynamic-aspect-ratio request from the camera store so we
-        // can re-apply it AFTER the begin/commit cycle below. Adding outputs
-        // forces a session reconfigure on iOS 26 which silently resets the
-        // dynamic aspect ratio back to the format's native (the dogfood-pass-4
-        // "PiP stretches when REC tap fires" smoking gun — moving the audio
-        // INPUT to session-config time fixed the input side, but adding the
-        // video + audio data OUTPUTs here still triggered the same reset).
-        let cameraStoreRef = cameraStore
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        // This routine is now config-free: we just toggle the sample
+        // buffer delegate from `nil` to our router. AVFoundation routes
+        // sample buffers to the delegate's recordingQueue; the writer
+        // pipeline picks up from there. On stop, we toggle the delegate
+        // back to `nil` and AVFoundation discards future samples at the
+        // framework level (no encoder cost).
+        guard let videoOut = cameraStore?.preAttachedVideoOutput,
+              let audioOut = cameraStore?.preAttachedAudioOutput else {
+            // Pre-attached outputs missing — the camera store hasn't
+            // finished its first non-`.off` configure yet. Fail the
+            // writer setup and let the state machine surface an error.
+            throw RecordingSessionError.writerSetupFailed(
+                "Camera outputs aren't ready yet."
+            )
+        }
+
+        // Apply the user's stabilization preference per take. Connection-
+        // level mutations are exempt from begin/commit brackets — they
+        // don't reshape the connection graph, so they don't reset the
+        // dynamic aspect. Safe to do here.
+        if let connection = videoOut.connection(with: .video) {
+            if connection.isVideoStabilizationSupported {
+                connection.preferredVideoStabilizationMode = stabilization.avMode
+            }
+        }
+
+        // Toggle delegates on the camera session queue so we don't race
+        // the store's own start/stop transitions. Track the outputs in
+        // writer state so finalize can clear the delegate symmetrically.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             cameraSessionQueue.async {
-                cameraSession.beginConfiguration()
-
-                let videoOut = AVCaptureVideoDataOutput()
-                videoOut.alwaysDiscardsLateVideoFrames = false
-                videoOut.videoSettings = [
-                    kCVPixelBufferPixelFormatTypeKey as String:
-                        Int(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
-                ]
                 videoOut.setSampleBufferDelegate(router, queue: recordQ)
-                if cameraSession.canAddOutput(videoOut) {
-                    cameraSession.addOutput(videoOut)
-                    lock.withLock { $0.videoOutput = videoOut }
-                    if let connection = videoOut.connection(with: .video) {
-                        if connection.isVideoStabilizationSupported {
-                            connection.preferredVideoStabilizationMode = stabilization.avMode
-                        }
-                        // Front camera has the connection.videoMirrored
-                        // convention — write a NON-mirrored .mov so the
-                        // recording matches "what an external camera saw".
-                        // The on-screen preview keeps its own mirroring
-                        // rules independent of this.
-                        if connection.isVideoMirroringSupported {
-                            connection.automaticallyAdjustsVideoMirroring = false
-                            connection.isVideoMirrored = false
-                        }
-                        // Pre-rotate buffers at capture time (iOS 17+ API).
-                        // This avoids the AVAssetWriter post-write rotation
-                        // transform (`videoInput.transform`) that produced a
-                        // black first frame on iOS 26 — the writer-level
-                        // transform sometimes generates a black placeholder
-                        // for frame 0 before the encoder's rotated output
-                        // catches up. Pre-rotating at the connection means
-                        // sample buffers arrive already in portrait
-                        // orientation; the writer just stores them without
-                        // any transform.
-                        if connection.isVideoRotationAngleSupported(90) {
-                            connection.videoRotationAngle = 90
-                        }
-                    }
-                }
-                let audioOut = AVCaptureAudioDataOutput()
                 audioOut.setSampleBufferDelegate(router, queue: recordQ)
-                if cameraSession.canAddOutput(audioOut) {
-                    cameraSession.addOutput(audioOut)
-                    lock.withLock { $0.audioOutput = audioOut }
+                lock.withLock { state in
+                    state.videoOutput = videoOut
+                    state.audioOutput = audioOut
                 }
-
-                // Framerate pinning is handled by `CameraStore.configureInputsLocked`
-                // when the active format is chosen — it locks both
-                // `activeVideoMinFrameDuration` and `activeVideoMaxFrameDuration`
-                // inside the same `lockForConfiguration` block as the format
-                // assignment. We rely on that pin here; re-locking from the
-                // recording side races the camera store's own lock holders.
-
-                cameraSession.commitConfiguration()
-
-                // RE-APPLY the dynamic aspect ratio after commit. Adding the
-                // video + audio outputs above forced a reconfigure that
-                // silently reset iOS 26's dynamic aspect to the format's
-                // native (4:3). Without this re-application the live preview
-                // and the captured buffers reshape from 1:1 back to 4:3 the
-                // moment recording starts — the user-visible "PiP stretches"
-                // symptom. The lock-then-set-then-unlock sequence is async
-                // because `setDynamicAspectRatio` is async; we don't wait on
-                // its completion here because the next sample buffer carrying
-                // the reshaped dimensions is what the lazy-writer reads
-                // anyway, and the preview layer picks up the reshape on its
-                // own KVO cycle.
-                if #available(iOS 26.0, *),
-                   let aspectRaw = cameraStoreRef?.requestedDynamicAspectRaw,
-                   let device = (cameraSession.inputs
-                       .compactMap { $0 as? AVCaptureDeviceInput }
-                       .first { $0.device.hasMediaType(.video) })?.device {
-                    let aspect = AVCaptureDevice.AspectRatio(rawValue: aspectRaw)
-                    do {
-                        try device.lockForConfiguration()
-                        device.setDynamicAspectRatio(aspect, completionHandler: nil)
-                        device.unlockForConfiguration()
-                    } catch {
-                        // Lock failed — non-fatal. The recording still proceeds
-                        // at the format's native aspect; the preview will look
-                        // wrong but the file is intact.
-                    }
-                }
-
                 continuation.resume()
             }
         }
@@ -703,39 +645,43 @@ final class RecordingSession {
 
         let lock = writerStateLock
 
-        // Pull the data outputs off the shared session first so no further
-        // sample buffers reach the writer while we're finalizing. Note we
-        // do NOT remove the audio device input — that's owned by CameraStore
-        // now (attached at session-config time, not at recording-start).
-        // Removing the data outputs is sufficient to stop sample delivery
-        // to the writer; the audio input stays attached until the camera
-        // session itself stops.
+        // Stop sample delivery WITHOUT removing the outputs. The pre-
+        // attached video + audio data outputs (owned by CameraStore,
+        // attached at session-config time) stay on the session for its
+        // whole lifetime. Setting their sample buffer delegate to `nil`
+        // tells AVFoundation to discard future samples at the framework
+        // level — no encoder cost, no buffer copies, no work.
+        //
+        // Symmetric with REC-tap setup: we just toggle the delegate.
+        // Crucially, this does NOT open a `beginConfiguration / commit`
+        // bracket on the camera session, so the iOS 26 dynamic-aspect
+        // 1×1 reshape is preserved across stop. The PiP preview stays
+        // 1×1 throughout the take and after stop, no visible reshape
+        // (the dogfood-pass-7 "PiP squeezes when REC tap fires" symptom
+        // had a stop-side counterpart that's gone with this change).
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             cameraSessionQueue.async {
-                cameraSession.beginConfiguration()
-                // Snapshot the outputs/inputs to remove, then clear them
-                // out under the lock in a single pass. `audioInputDevice`
-                // is the legacy slot; in the dogfood-pass-3 flow it stays
-                // nil but we still defensively clear it so a stray legacy
-                // attachment can't leak.
-                let (v, a, i) = lock.withLock { state -> (
+                let (v, a) = lock.withLock { state -> (
                     AVCaptureVideoDataOutput?,
-                    AVCaptureAudioDataOutput?,
-                    AVCaptureDeviceInput?
+                    AVCaptureAudioDataOutput?
                 ) in
-                    let result = (state.videoOutput, state.audioOutput, state.audioInputDevice)
+                    let result = (state.videoOutput, state.audioOutput)
+                    // Clear the references in writer state — the outputs
+                    // themselves are owned by CameraStore and stay on
+                    // the session; we just stop tracking them locally.
                     state.videoOutput = nil
                     state.audioOutput = nil
                     state.audioInputDevice = nil
                     return result
                 }
-                if let v { cameraSession.removeOutput(v) }
-                if let a { cameraSession.removeOutput(a) }
-                if let i { cameraSession.removeInput(i) }
-                cameraSession.commitConfiguration()
+                v?.setSampleBufferDelegate(nil, queue: nil)
+                a?.setSampleBufferDelegate(nil, queue: nil)
                 continuation.resume()
             }
         }
+        // `cameraSession` referenced explicitly to silence unused-variable
+        // warnings now that finalize is config-free.
+        _ = cameraSession
 
         // Mark inputs finished + finalize the file. Snapshot writer / inputs
         // out of the lock so we don't hold it across the (long) finishWriting.

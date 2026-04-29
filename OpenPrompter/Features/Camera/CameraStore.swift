@@ -119,6 +119,38 @@ final class CameraStore {
         currentAudioInput
     }
 
+    /// Pre-attached video data output. Lives on the camera session for the
+    /// session's full lifetime; sample delivery is gated by toggling
+    /// `setSampleBufferDelegate(router, queue:)` between the recording
+    /// session's router and `nil`. This is the dogfood-pass-8 fix for the
+    /// "PiP squeeze on REC tap" symptom — the previous design added the
+    /// data outputs inside a `beginConfiguration / commitConfiguration`
+    /// block at REC tap, and that bracket re-evaluated the connection
+    /// graph and visibly reverted the iOS 26 dynamic-aspect reshape for
+    /// one or two frames before the OS re-applied it. Pre-attaching at
+    /// session-config time means REC tap touches no session config, so
+    /// the preview can never reshape mid-take.
+    ///
+    /// Battery cost is negligible: `AVCaptureVideoDataOutput` is a raw
+    /// pixel-buffer pump, NOT an encoder. With the delegate set to nil,
+    /// AVFoundation discards samples at the framework level — no buffers
+    /// reach our recording queue, no work runs. Apple's own AVCam
+    /// reference app uses exactly this pattern.
+    nonisolated(unsafe) private var _videoDataOutput: AVCaptureVideoDataOutput?
+    nonisolated(unsafe) private var _audioDataOutput: AVCaptureAudioDataOutput?
+
+    /// RecordingSession reads these to attach its sample buffer delegate
+    /// at REC tap (and clear it at stop). `nil` while the session is in
+    /// `.off` mode (data outputs are attached lazily on first non-`.off`
+    /// configure, alongside the camera input + dynamic-aspect reshape +
+    /// audio input — all in one shared begin/commit bracket).
+    nonisolated var preAttachedVideoOutput: AVCaptureVideoDataOutput? {
+        _videoDataOutput
+    }
+    nonisolated var preAttachedAudioOutput: AVCaptureAudioDataOutput? {
+        _audioDataOutput
+    }
+
     /// Raw aspect-ratio string we requested via `setDynamicAspectRatio` on
     /// iOS 26+, kept so RecordingSession can compute the post-reshape buffer
     /// dimensions even when `device.dynamicDimensions` reads {0,0} (the API
@@ -485,8 +517,73 @@ final class CameraStore {
         // 1×1 reshape to revert to nominal 4:3 for one frame — the user's
         // "PiP stretches when REC starts" report. The audio device is
         // harmless when recording isn't active: only the audio data output
-        // (added at REC tap) gates whether samples reach the writer.
+        // (pre-attached just below) gates whether samples reach the writer.
         attachAudioInputLocked()
+
+        // Pre-attach the video + audio data outputs. These also live in
+        // the same begin/commit bracket as the camera input, audio input,
+        // and dynamic-aspect reshape. Sample delivery to the writer is
+        // gated entirely by toggling `setSampleBufferDelegate(_, queue:)`
+        // between the recording session's router and nil; with the
+        // delegate nil, AVFoundation discards samples at the framework
+        // level so there's no encoder cost / no battery drain.
+        //
+        // This is the dogfood-pass-8 fix for "PiP squeezes when REC is
+        // tapped." The old design did `cameraSession.addOutput(...)`
+        // inside `RecordingSession.configureWriter`, which forced its
+        // own `beginConfiguration / commitConfiguration` cycle that
+        // re-evaluated the connection graph and on iPhone 17 + iOS 26
+        // visibly reverted the 1×1 reshape for one or two frames before
+        // the OS re-applied. Pre-attaching means REC tap never opens a
+        // session-config bracket — the preview can't reshape mid-take.
+        attachDataOutputsLocked()
+    }
+
+    /// Pre-attach the video + audio data outputs that the recording
+    /// pipeline writes through. Must be called inside the existing
+    /// `beginConfiguration` bracket opened by `start()`. Idempotent:
+    /// re-runs (e.g. after a stop / restart cycle) skip outputs that
+    /// are already attached so we don't accumulate duplicate connections.
+    nonisolated private func attachDataOutputsLocked() {
+        if _videoDataOutput == nil {
+            let videoOut = AVCaptureVideoDataOutput()
+            videoOut.alwaysDiscardsLateVideoFrames = false
+            videoOut.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String:
+                    Int(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
+            ]
+            if session.canAddOutput(videoOut) {
+                session.addOutput(videoOut)
+                _videoDataOutput = videoOut
+
+                if let connection = videoOut.connection(with: .video) {
+                    // Front camera mirroring rules: write the recording
+                    // file as the camera saw it (NOT mirrored), preview
+                    // is mirrored elsewhere via the SwiftUI scale modifier.
+                    if connection.isVideoMirroringSupported {
+                        connection.automaticallyAdjustsVideoMirroring = false
+                        connection.isVideoMirrored = false
+                    }
+                    // Pre-rotate at capture time (iOS 17+). 90° lands the
+                    // sensor's landscape-natural buffer in portrait so the
+                    // writer's transform stays simple. Per CLAUDE.md
+                    // lesson 3, iPhone 17's front Ultra Wide doesn't
+                    // honor this property — but on devices that do, we
+                    // get a buffer that matches the preview-layer's
+                    // displayed orientation.
+                    if connection.isVideoRotationAngleSupported(90) {
+                        connection.videoRotationAngle = 90
+                    }
+                }
+            }
+        }
+        if _audioDataOutput == nil {
+            let audioOut = AVCaptureAudioDataOutput()
+            if session.canAddOutput(audioOut) {
+                session.addOutput(audioOut)
+                _audioDataOutput = audioOut
+            }
+        }
     }
 
     /// Attach the user's preferred mic (or system default) to the session.
