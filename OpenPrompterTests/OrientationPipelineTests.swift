@@ -207,4 +207,109 @@ final class OrientationPipelineTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(playH, playW, "case \(label): plays portrait or square")
         }
     }
+
+    // MARK: - Self-test helpers (dogfood-pass-12 robustness additions)
+
+    func testTransformsAreCloseIdentityVsIdentity() {
+        let id: [Double] = [1, 0, 0, 1]
+        XCTAssertTrue(RecordingSelfTest.transformsAreClose(id, id))
+    }
+
+    func testTransformsAreCloseWithFloatingPointNoise() {
+        // CGAffineTransform(rotationAngle:) emits ~6e-17 in components that
+        // should be exactly 0. The tolerance must absorb that noise.
+        let exact: [Double] = [0, -1, 1, 0]
+        let noisy: [Double] = [6.123e-17, -1, 1, 6.123e-17]
+        XCTAssertTrue(RecordingSelfTest.transformsAreClose(exact, noisy))
+    }
+
+    func testTransformsAreCloseRejectsDifferentTransforms() {
+        let identity: [Double] = [1, 0, 0, 1]
+        let rotation: [Double] = [0, -1, 1, 0]
+        XCTAssertFalse(RecordingSelfTest.transformsAreClose(identity, rotation))
+    }
+
+    func testTransformsAreCloseRejectsWrongCount() {
+        XCTAssertFalse(RecordingSelfTest.transformsAreClose([1, 0, 0], [1, 0, 0, 1]))
+    }
+
+    func testExpectedPlaybackAspectRatio9x16() {
+        // 9:16 portrait → 0.5625
+        XCTAssertEqual(
+            RecordingSelfTest.expectedPlaybackAspectRatio(for: .ratio9x16),
+            9.0 / 16.0,
+            accuracy: 1e-9
+        )
+    }
+
+    func testExpectedPlaybackAspectRatio4x3IsPortrait() {
+        // 4:3 landscape buffer rotated to portrait playback → 3:4 = 0.75
+        XCTAssertEqual(
+            RecordingSelfTest.expectedPlaybackAspectRatio(for: .ratio4x3),
+            3.0 / 4.0,
+            accuracy: 1e-9
+        )
+    }
+
+    func testExpectedPlaybackAspectRatio16x9IsPortrait() {
+        // 16:9 landscape buffer rotated to portrait playback → 9:16 = 0.5625
+        XCTAssertEqual(
+            RecordingSelfTest.expectedPlaybackAspectRatio(for: .ratio16x9),
+            9.0 / 16.0,
+            accuracy: 1e-9
+        )
+    }
+
+    func testExpectedPlaybackAspectRatio1x1IsSquare() {
+        XCTAssertEqual(
+            RecordingSelfTest.expectedPlaybackAspectRatio(for: .ratio1x1),
+            1.0,
+            accuracy: 1e-9
+        )
+    }
+
+    func testExpectedPlaybackAspectRatioOpenGateIsZeroSentinel() {
+        // .openGate is device-dependent; the helper returns 0 to signal
+        // "skip the aspect-ratio check." The self-test consumer must
+        // recognize 0 as "don't assert."
+        XCTAssertEqual(
+            RecordingSelfTest.expectedPlaybackAspectRatio(for: .openGate),
+            0.0
+        )
+    }
+
+    func testBrightnessGridVerticalGradientTopBright() {
+        let g = BrightnessGrid(topLeft: 0.8, topRight: 0.7, bottomLeft: 0.2, bottomRight: 0.3, center: 0.5)
+        // Top average 0.75, bottom average 0.25, gradient = +0.5
+        XCTAssertEqual(g.verticalGradient, 0.5, accuracy: 1e-9)
+    }
+
+    func testBrightnessGridVerticalGradientBottomBright() {
+        let g = BrightnessGrid(topLeft: 0.2, topRight: 0.3, bottomLeft: 0.8, bottomRight: 0.7, center: 0.5)
+        // Top average 0.25, bottom average 0.75, gradient = -0.5
+        XCTAssertEqual(g.verticalGradient, -0.5, accuracy: 1e-9)
+    }
+
+    func testBrightnessGridHorizontalGradientLeftBright() {
+        let g = BrightnessGrid(topLeft: 0.8, topRight: 0.2, bottomLeft: 0.7, bottomRight: 0.3, center: 0.5)
+        // Left average 0.75, right average 0.25, gradient = +0.5
+        XCTAssertEqual(g.horizontalGradient, 0.5, accuracy: 1e-9)
+    }
+
+    func testBrightnessGridUniformReportsZeroGradient() {
+        let g = BrightnessGrid(topLeft: 0.5, topRight: 0.5, bottomLeft: 0.5, bottomRight: 0.5, center: 0.5)
+        XCTAssertEqual(g.verticalGradient, 0.0, accuracy: 1e-9)
+        XCTAssertEqual(g.horizontalGradient, 0.0, accuracy: 1e-9)
+    }
+
+    func testBrightnessGridSummaryDescribesUniformAndDirectional() {
+        let uniform = BrightnessGrid(topLeft: 0.5, topRight: 0.5, bottomLeft: 0.5, bottomRight: 0.5, center: 0.5)
+        XCTAssertTrue(uniform.gradientSummary.contains("uniform"))
+
+        let topBright = BrightnessGrid(topLeft: 0.9, topRight: 0.9, bottomLeft: 0.1, bottomRight: 0.1, center: 0.5)
+        XCTAssertTrue(topBright.gradientSummary.contains("top-bright"))
+
+        let leftBright = BrightnessGrid(topLeft: 0.9, topRight: 0.1, bottomLeft: 0.9, bottomRight: 0.1, center: 0.5)
+        XCTAssertTrue(leftBright.gradientSummary.contains("left-bright"))
+    }
 }
