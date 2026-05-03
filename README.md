@@ -14,7 +14,7 @@ a teleprompter for people who already write in markdown. point it at a folder in
 
 every teleprompter app on the store wants a subscription to unlock mirror mode. most want your script uploaded to their cloud. a few want both.
 
-open prompter reads the markdown file you already have, from iCloud Drive or your obsidian vault, and that's the whole app. free, open source, MIT licensed.
+open prompter reads the markdown file you already have, from iCloud Drive or your obsidian vault, and that's the whole app (for now). free, open source, MIT licensed.
 
 ## what it does (v1)
 
@@ -52,23 +52,6 @@ open OpenPrompter.xcodeproj
 ```
 
 set your development team in signing, then run on a simulator or device.
-
-## architecture
-
-- SwiftUI, iOS 17+, dark mode only
-- [swift-markdown](https://github.com/apple/swift-markdown) (apple) for parsing, with a custom visitor that emits typed script blocks and strips scaffolding
-- `NSMetadataQuery` on `NSMetadataQueryUbiquitousDocumentsScope` for live file detection
-- `UIDocumentPickerViewController` + security-scoped bookmarks for "pick once" folder access
-- `TimelineView(.animation)` for frame-rate-independent auto-scroll and the logo animation
-- `SwiftData` (with CloudKit off) for recent-script cache, `@AppStorage` + `NSUbiquitousKeyValueStore` for preferences
-
-## design language
-
-the visual system lives in [`design-language.md`](./design-language.md). it covers the color tokens (prompter black, open green, mirror red), the type scale (JetBrains Mono for chrome, Inter for body), the shape language, and the rules for how the terminal / markdown motifs get used.
-
-the animated brand mark is specified in [`logo-animation.md`](./logo-animation.md) — two brackets with eyes inside that sweep and blink like a reader. the reference implementation is in [`OpenPrompter/UI/OpenPrompterLogo.swift`](./OpenPrompter/UI/OpenPrompterLogo.swift).
-
-## contributing
 
 prs welcome. issues tagged `good-first-issue` are a safe entry point. see [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
