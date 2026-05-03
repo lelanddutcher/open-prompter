@@ -1,13 +1,11 @@
 # open prompter
 
-**the free, open-source teleprompter for markdown creators.**
+**the free, open-source IOS teleprompter app for markdown writers.**
 
 a teleprompter for people who already write in markdown. point it at a folder in iCloud Drive or an Obsidian vault, pick a file, hit play. the file on your mac is the source of truth. no in-app editor battles, no cloud account, no copy-paste.
 
 [![MIT License](https://img.shields.io/badge/license-MIT-3fee7a?style=flat-square)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-iOS%2017%2B-0a0a0b?style=flat-square)](https://developer.apple.com/ios/)
-[![TestFlight](https://img.shields.io/badge/testflight-soon-6a6a65?style=flat-square)]()
-[![App Store](https://img.shields.io/badge/app%20store-soon-6a6a65?style=flat-square)]()
 [![Website](https://img.shields.io/badge/site-openprompter.app-3fee7a?style=flat-square)](https://openprompter.app)
 
 ---
@@ -40,8 +38,7 @@ open prompter reads the markdown file you already have, from iCloud Drive or you
 
 ## install
 
-- testflight: coming in v0.9
-- app store: coming in v1.0
+- app store, OUT NOW! 
 - or build from source — instructions below
 
 ## build from source
