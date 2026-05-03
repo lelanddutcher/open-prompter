@@ -198,10 +198,22 @@ enum RecordingSelfTest {
             passed: !audioTracks.isEmpty,
             detail: "tracks = \(audioTracks.count) (0 means mic was unavailable)"
         ))
+        // Coherent playback-orientation check. Earlier this assertion was
+        // a permissive "h > w OR rotation transform" — it passed for the
+        // dogfood-pass-10 .ratio9x16 bug (encoded 2160×3840 portrait + a
+        // -π/2 transform on top, which rotates the already-portrait pixels
+        // sideways to landscape on playback). The correct check is whether
+        // the POST-transform display dimensions are portrait. A 90°/270°
+        // rotation swaps width and height; identity / 180° leaves them.
+        let (playbackW, playbackH) = Self.playbackDimensions(
+            encodedWidth: videoWidth,
+            encodedHeight: videoHeight,
+            transform: preferredTransform
+        )
         assertions.append(.init(
-            name: "encoded portrait (height > width OR rotation transform)",
-            passed: videoHeight > videoWidth || isPortraitTransform(preferredTransform),
-            detail: "dims = \(videoWidth)×\(videoHeight), transform = \(preferredTransform)"
+            name: "playback orientation is portrait",
+            passed: playbackH > playbackW,
+            detail: "encoded \(videoWidth)×\(videoHeight) + transform \(preferredTransform) → playback \(playbackW)×\(playbackH)"
         ))
         assertions.append(.init(
             name: "first frame is not black (brightness > 0.05)",
@@ -362,13 +374,37 @@ enum RecordingSelfTest {
         return str.replacingOccurrences(of: "\0", with: "")
     }
 
-    private static func isPortraitTransform(_ t: [Double]) -> Bool {
+    nonisolated private static func isPortraitTransform(_ t: [Double]) -> Bool {
         // Portrait-rotated 90° transform: a=0, b=1, c=-1, d=0
         // (or 270°: a=0, b=-1, c=1, d=0). Identity is a=1, d=1.
         guard t.count == 4 else { return false }
         return abs(t[0]) < 0.01 && abs(t[3]) < 0.01 &&
                (abs(t[1] - 1) < 0.01 || abs(t[1] + 1) < 0.01) &&
                (abs(t[2] - 1) < 0.01 || abs(t[2] + 1) < 0.01)
+    }
+
+    /// Compute the playback-display dimensions of a video by composing the
+    /// encoded buffer dims with the file's `preferredTransform`. A 90° or
+    /// 270° rotation (transform with a=0, d=0 — see `isPortraitTransform`)
+    /// swaps the W/H axes at playback. Identity and 180° leave them.
+    ///
+    /// Used by the playback-orientation assertion to catch the dogfood-
+    /// pass-10 case where encoded dims AND transform individually look
+    /// "portrait-y" but compose into landscape playback.
+    ///
+    /// Pure value-in/value-out for unit testability. `nonisolated` so tests
+    /// can call it from any actor context (the enclosing enum is
+    /// `@MainActor` because the file-loading paths touch UIKit, but this
+    /// helper is pure arithmetic).
+    nonisolated static func playbackDimensions(
+        encodedWidth: Int,
+        encodedHeight: Int,
+        transform: [Double]
+    ) -> (width: Int, height: Int) {
+        if isPortraitTransform(transform) {
+            return (width: encodedHeight, height: encodedWidth)
+        }
+        return (width: encodedWidth, height: encodedHeight)
     }
 }
 
