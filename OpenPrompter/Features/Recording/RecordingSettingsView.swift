@@ -23,6 +23,7 @@ struct RecordingSettingsView: View {
     // view without re-mounting the prompter.
     @AppStorage(PrefKey.recordingQuality.rawValue) private var qualityRaw: String = "high"
     @AppStorage(PrefKey.recordingFramerate.rawValue) private var framerateRaw: String = "fps30"
+    @AppStorage(PrefKey.recordingAspect.rawValue) private var aspectRaw: String = "ratio9x16"
     @AppStorage(PrefKey.recordingStabilization.rawValue) private var stabilizationRaw: String = "off"
     @AppStorage(PrefKey.recordingCountdown.rawValue) private var countdownRaw: String = "three"
     @AppStorage(PrefKey.recordingIndicator.rawValue) private var indicatorRaw: String = "both"
@@ -58,6 +59,22 @@ struct RecordingSettingsView: View {
                 }
                 .pickerStyle(.menu)
                 Text("30 is the social-platform standard. 60 is for slow-mo in post.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.dim)
+
+                // Aspect ratio. `availableAspects` filters by OS — 9:16 and
+                // 1:1 require the iOS 26 dynamic-aspect API to land at non-
+                // native crops on the iPhone front sensor, so we hide them
+                // on older iOS rather than silently demoting the user's
+                // choice. The other three (4:3, 16:9, open gate) work
+                // everywhere via the existing largest-area fallback.
+                Picker("aspect ratio", selection: $aspectRaw) {
+                    ForEach(availableAspects, id: \.rawValue) { aspect in
+                        Text(aspect.displayName).tag(aspect.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                Text("9:16 records vertically end-to-end. open gate keeps the full sensor for reframing in post. 1:1 is iphone 17 only.")
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.dim)
 
@@ -143,6 +160,22 @@ struct RecordingSettingsView: View {
 
     private var framerate: RecordingFramerate {
         RecordingFramerate(rawValue: framerateRaw) ?? .fps30
+    }
+
+    /// Aspect-ratio cases the picker should show. Hidden:
+    ///   - `.ratio9x16` and `.ratio1x1` on pre-iOS-26 (the dynamic-aspect API
+    ///     they need to land at a non-native crop is iOS 26+). The picker
+    ///     surfaces them again automatically once the user upgrades iOS.
+    /// Order: 9:16 first (the new social-share default) → 1:1 → 4:3 → 16:9
+    /// → open gate. Matches the canonical UX order in the spec.
+    private var availableAspects: [RecordingAspect] {
+        let canonical: [RecordingAspect] = [
+            .ratio9x16, .ratio1x1, .ratio4x3, .ratio16x9, .openGate
+        ]
+        if #available(iOS 26.0, *) {
+            return canonical
+        }
+        return canonical.filter { !$0.requiresIOS26 }
     }
 
     private func pinIfNotConnected() -> String? {

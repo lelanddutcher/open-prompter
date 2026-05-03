@@ -41,12 +41,15 @@ enum UbiquitousPrefsMirror {
         // `recordingMicSource` is intentionally excluded — paths to specific
         // accessories don't survive across devices and pinning AirPods on
         // an iPhone shouldn't pin them on an iPad that doesn't see them.
+        // The aspect-ratio coach mark stays device-local (per the existing
+        // coach-mark pattern); only the user's chosen aspect mirrors.
         .recordingQuality,
         .recordingFramerate,
         .recordingStabilization,
         .recordingCountdown,
         .recordingIndicator,
-        .recordingSaveToScriptFolder
+        .recordingSaveToScriptFolder,
+        .recordingAspect
     ]
 
     private static var observerToken: NSObjectProtocol?

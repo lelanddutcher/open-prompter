@@ -106,6 +106,15 @@ enum PrefKey: String, CaseIterable {
     /// We use this to tell whether we've already prompted on this device,
     /// so the chip doesn't fire the system prompt twice in a single take.
     case recordingPhotosPermissionAsked = "pref.recording.photosPermissionAsked"
+    /// Recording aspect ratio. Raw value of `RecordingAspect`. New users
+    /// default to `"ratio9x16"` (vertical, social-share friendly); existing
+    /// users who already touched the recording feature are migrated to
+    /// `"openGate"` by `migrateRecordingAspectToOpenGate(in:domain:)` so
+    /// their behaviour doesn't change unexpectedly. Mirrored to iCloud KVS.
+    case recordingAspect = "pref.recording.aspect"
+    /// One-shot coach mark for the new aspect-ratio picker. Device-local
+    /// (NOT mirrored) per the existing coach-mark pattern.
+    case coachMarkRecordingAspectShown = "pref.coachMarkRecordingAspectShown"
 
     // MARK: - App Store review prompt (Feature 8)
     //
@@ -194,6 +203,13 @@ enum PrefKey: String, CaseIterable {
             return false
             #endif
         case .recordingPhotosPermissionAsked: return false
+        // The registration-domain default is "ratio9x16" — fresh installs
+        // start vertical / social-share. Existing users with a recording
+        // history get migrated to "openGate" by
+        // `migrateRecordingAspectToOpenGate(in:domain:)` BEFORE registration
+        // happens, so this default only applies to truly new users.
+        case .recordingAspect: return "ratio9x16"
+        case .coachMarkRecordingAspectShown: return false
         case .reviewRecordingsCompleted: return 0
         case .reviewPlaySessionsCompleted: return 0
         case .reviewTotalPlaybackSeconds: return 0.0
@@ -224,6 +240,11 @@ enum Prefs {
         // own .plist and not anything in the global registration domain.
         let domain = Bundle.main.bundleIdentifier ?? ""
         migrateLegacyMirrorKey(in: defaults, domain: domain)
+        // Aspect-ratio migration runs BEFORE register() seeds the new
+        // "ratio9x16" default — for users who've already touched the
+        // recording feature we want "openGate" to win, not the registration
+        // default.
+        migrateRecordingAspectToOpenGate(in: defaults, domain: domain)
 
         var initial: [String: Any] = [:]
         for key in PrefKey.allCases {
@@ -251,6 +272,38 @@ enum Prefs {
               persistent[newKey] == nil else { return }
         let legacyValue = (persistent[legacyKey] as? Bool) ?? false
         store.set(legacyValue, forKey: newKey)
+    }
+
+    /// One-shot migration: existing users who already touched the recording
+    /// feature get pinned to `"openGate"` so the picker introduction doesn't
+    /// silently change the shape of their next recording. Brand-new installs
+    /// fall through and pick up the registration-domain default
+    /// (`"ratio9x16"`) — the new social-share-friendly first impression.
+    ///
+    /// "Existing user" is inferred from any of `recordingQuality`,
+    /// `recordingFramerate`, or `cameraStyle` having been written explicitly
+    /// (i.e. present in the persistent domain — registration-domain values
+    /// don't count). The check is conservative on purpose: if any of those
+    /// three keys exists, the user has been past the recording surface and
+    /// has a mental model of what "open gate" means in this app.
+    ///
+    /// Idempotent: once `recordingAspect` has any value (registration-domain
+    /// or user-set), the migration short-circuits and never overrides a
+    /// user-set value.
+    static func migrateRecordingAspectToOpenGate(in store: UserDefaults, domain: String) {
+        let aspectKey = PrefKey.recordingAspect.rawValue
+        let qualityKey = PrefKey.recordingQuality.rawValue
+        let framerateKey = PrefKey.recordingFramerate.rawValue
+        let cameraStyleKey = PrefKey.cameraStyle.rawValue
+        let persistent = store.persistentDomain(forName: domain) ?? [:]
+        // Already wrote an aspect — nothing to do.
+        guard persistent[aspectKey] == nil else { return }
+        // First-run user — let the registration default ("ratio9x16") apply.
+        let isExistingUser = persistent[qualityKey] != nil
+            || persistent[framerateKey] != nil
+            || persistent[cameraStyleKey] != nil
+        guard isExistingUser else { return }
+        store.set("openGate", forKey: aspectKey)
     }
 
     // MARK: - Scalar accessors
@@ -474,6 +527,24 @@ enum Prefs {
     static var recordingPhotosPermissionAsked: Bool {
         get { defaults.bool(forKey: PrefKey.recordingPhotosPermissionAsked.rawValue) }
         set { defaults.set(newValue, forKey: PrefKey.recordingPhotosPermissionAsked.rawValue) }
+    }
+
+    /// Recording aspect ratio raw value. Reads always fall back to
+    /// `"ratio9x16"` (the new-user default) if the stored value is missing
+    /// or unknown — the migration runs at app launch, so production reads
+    /// after `Prefs.register()` have already resolved the existing-user
+    /// case to `"openGate"`. Settings reads through this as a
+    /// `RecordingAspect` enum.
+    static var recordingAspect: String {
+        get { defaults.string(forKey: PrefKey.recordingAspect.rawValue) ?? "ratio9x16" }
+        set { defaults.set(newValue, forKey: PrefKey.recordingAspect.rawValue) }
+    }
+
+    /// Coach mark for the new aspect-ratio picker. Device-local; not
+    /// mirrored to iCloud KVS (matches the existing coach-mark pattern).
+    static var coachMarkRecordingAspectShown: Bool {
+        get { defaults.bool(forKey: PrefKey.coachMarkRecordingAspectShown.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.coachMarkRecordingAspectShown.rawValue) }
     }
 
     // MARK: - App Store review prompt (Feature 8)
