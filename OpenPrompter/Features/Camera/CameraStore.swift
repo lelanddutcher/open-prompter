@@ -564,16 +564,16 @@ final class CameraStore {
                         connection.automaticallyAdjustsVideoMirroring = false
                         connection.isVideoMirrored = false
                     }
-                    // Pre-rotate at capture time (iOS 17+). 90° lands the
-                    // sensor's landscape-natural buffer in portrait so the
-                    // writer's transform stays simple. Per CLAUDE.md
-                    // lesson 3, iPhone 17's front Ultra Wide doesn't
-                    // honor this property — but on devices that do, we
-                    // get a buffer that matches the preview-layer's
-                    // displayed orientation.
-                    if connection.isVideoRotationAngleSupported(90) {
-                        connection.videoRotationAngle = 90
-                    }
+                    // NOTE: we deliberately do NOT call
+                    // `connection.videoRotationAngle = 90` here. The
+                    // dogfood-pass-8 attempt at capture-time rotation
+                    // worked on iPhone 17 + iOS 26.x but stacked with
+                    // the writer's `-π/2` transform → 180° net rotation
+                    // → recordings shipped upside down. Rotation lives
+                    // exclusively at the writer level
+                    // (`videoInput.transform = -π/2` in
+                    // `lazilyStartWriterOnFirstSample`) so the source
+                    // of truth for buffer orientation is one place.
                 }
             }
         }

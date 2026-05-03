@@ -107,6 +107,7 @@ struct CameraPreview: UIViewRepresentable {
         view.previewLayer.session = session
         view.previewLayer.videoGravity = gravity
         view.backgroundColor = .black
+        applyPreviewRotation(to: view)
         applyMirrorTransform(to: view)
         view.refreshDynamicDimensionsObservation()
         #if DEBUG
@@ -120,6 +121,7 @@ struct CameraPreview: UIViewRepresentable {
         // behind-with-different-fill swap; the SwiftUI struct is rebuilt
         // but the same UIView is reused if SwiftUI deems identity stable).
         uiView.previewLayer.videoGravity = gravity
+        applyPreviewRotation(to: uiView)
         applyMirrorTransform(to: uiView)
         // Re-bind the iOS 26 dynamic-dimensions observer in case the input
         // device changed underneath us (camera-store reconfigure).
@@ -145,5 +147,23 @@ struct CameraPreview: UIViewRepresentable {
         let sx: CGFloat = horizontalMirror ? -1 : 1
         let sy: CGFloat = verticalMirror ? -1 : 1
         view.previewLayer.setAffineTransform(CGAffineTransform(scaleX: sx, y: sy))
+    }
+
+    /// Rotate the preview layer's connection 90° so the front camera's
+    /// landscape-native buffer displays correctly in our portrait UI.
+    /// Without this, the preview shows sideways content — `.resizeAspectFill`
+    /// in the full-frame "behind" mode looks stretched (a center-crop of
+    /// landscape into portrait), and `.resizeAspect` in the 3:4 portrait
+    /// PiP tile letterboxes to a tiny strip (the dogfood-pass-9 "PiP is
+    /// empty" / "behind is stretched width-wise" symptoms). The preview-
+    /// layer connection is independent from the data output's connection
+    /// (which we deliberately leave un-rotated so the writer transform is
+    /// the single source of rotation truth for the recorded file).
+    private func applyPreviewRotation(to view: PreviewView) {
+        guard let connection = view.previewLayer.connection,
+              connection.isVideoRotationAngleSupported(90) else { return }
+        if connection.videoRotationAngle != 90 {
+            connection.videoRotationAngle = 90
+        }
     }
 }
