@@ -53,7 +53,6 @@ import AVFoundation
 import CoreGraphics
 import Foundation
 import ImageIO
-import MobileCoreServices
 import UIKit
 
 #if DEBUG
@@ -149,7 +148,14 @@ struct OrientationExpectation: Codable {
     /// Actual playback aspect ratio (computed from encoded dims composed
     /// with the actual transform).
     let actualPlaybackAspectRatio: Double
-    /// True if the actual playback aspect ratio is within ±5% of expected.
+    /// True if the actual playback aspect ratio is within ±5% of expected,
+    /// OR if `expectedPlaybackAspectRatio == 0` (the "skip-the-check"
+    /// sentinel for `.openGate`, where playback aspect is device-dependent
+    /// and we can't predict it without per-device data). Vacuous-true on
+    /// N/A so the structured field doesn't emit a false-positive red flag
+    /// for users migrated to `.openGate`. The assertion array additionally
+    /// SKIPS the aspect-ratio check entirely for the N/A case so the
+    /// pass/fail summary stays clean.
     let aspectRatioMatches: Bool
 }
 
@@ -346,7 +352,12 @@ enum RecordingSelfTest {
         let transformMatches = transformsAreClose(preferredTransform, expectedTransformArray, tolerance: 0.01)
         let expectedAspectRatio = expectedPlaybackAspectRatio(for: pickerAspect)
         let actualPlaybackAspect = playbackH > 0 ? Double(playbackW) / Double(playbackH) : 0.0
-        let aspectRatioMatches = expectedAspectRatio > 0 &&
+        // Vacuous-true when expectedAspectRatio == 0 (the N/A sentinel for
+        // .openGate, where playback aspect is device-dependent). This keeps
+        // the structured field honest — "matches" reads as "passes the
+        // check or check is skipped." The assertion array below skips
+        // entirely on N/A so the user-visible summary stays clean.
+        let aspectRatioMatches = expectedAspectRatio == 0 ||
             abs(actualPlaybackAspect - expectedAspectRatio) < (expectedAspectRatio * 0.05)
         let orientationExpectation = OrientationExpectation(
             expectedTransform: expectedTransformArray,
@@ -390,11 +401,18 @@ enum RecordingSelfTest {
             passed: transformMatches,
             detail: "expected \(expectedTransformArray), got \(preferredTransform)"
         ))
-        assertions.append(.init(
-            name: "playback aspect ratio matches picker '\(context.pickerAspectRaw)'",
-            passed: aspectRatioMatches,
-            detail: String(format: "expected %.4f, got %.4f (±5%%)", expectedAspectRatio, actualPlaybackAspect)
-        ))
+        // SKIP this assertion entirely for .openGate (expectedAspectRatio == 0
+        // = "playback aspect is device-dependent, can't predict"). Including
+        // it would emit a misleading red flag for the existing-user majority
+        // who were migrated to .openGate. The OrientationExpectation struct
+        // still records the vacuous-true result for orchestrator use.
+        if expectedAspectRatio > 0 {
+            assertions.append(.init(
+                name: "playback aspect ratio matches picker '\(context.pickerAspectRaw)'",
+                passed: aspectRatioMatches,
+                detail: String(format: "expected %.4f, got %.4f (±5%%)", expectedAspectRatio, actualPlaybackAspect)
+            ))
+        }
         assertions.append(.init(
             name: "first frame is not black (brightness > 0.05)",
             passed: firstFrame > 0.05,
