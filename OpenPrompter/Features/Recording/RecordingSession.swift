@@ -582,34 +582,36 @@ final class RecordingSession {
 
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = true
-        // Apply rotation transform CONDITIONALLY on the buffer's actual
-        // orientation, per Apple QA1744 ("Setting the orientation of video
-        // with AV Foundation") — for AVAssetWriter pipelines, leave the
-        // capture connection at its native rotation and let the writer's
-        // preferredTransform metadata drive playback orientation.
+        // QA REVIEWER FOCUS: writer transform is now derived from the
+        // user's picker aspect via `OrientationPolicy.writerTransform(for:)`
+        // — the SAME table the preview-layer rotation reads. Previously
+        // both inferred orientation from buffer dims read at first-sample
+        // time, but on a cold launch that read returned the wrong shape
+        // (the iOS 26 `setDynamicAspectRatio` async-no-completion-handler
+        // race captured in CLAUDE.md hard-won lesson #6) and we picked
+        // the wrong rotation. Per-aspect lookup is deterministic.
         //
-        // - Landscape buffer (W > H) — e.g. native 4:3 sensor 4032×3024 or
-        //   iOS 26 .ratio4x3 / .ratio16x9 dynamic-aspect: apply -π/2 (90°
-        //   counterclockwise in iOS display coordinates) so the file plays
-        //   portrait.
-        // - Portrait buffer (H > W) — e.g. iOS 26 .ratio9x16 dynamic-aspect
-        //   2160×3840: apply identity. The buffer is already correctly
-        //   oriented; rotating it again produces sideways playback.
-        // - Square buffer (W == H) — e.g. iPhone 17 1×1 sensor open-gate or
-        //   .ratio1x1: apply identity. Rotation is a no-op for square
-        //   content but identity is the conservative choice.
-        //
-        // dogfood-pass-10 self-test caught the previous unconditional
-        // -π/2 path: a .ratio9x16 recording wrote
-        // dims = 2160×3840 + transform = [0,-1,1,0], which players treat
-        // as "portrait pixels rotated 90° CCW for display" → sideways
-        // landscape with the subject's head pointing left.
+        // Per Apple QA1744 ("Setting the orientation of video with AV
+        // Foundation"), AVAssetWriter pipelines should leave the capture
+        // connection at native rotation and let the writer's
+        // preferredTransform metadata drive playback orientation — which
+        // is exactly what this transform encodes.
         //
         // The data-output connection is left un-rotated at CameraStore.swift
         // (`isVideoMirrored = false`, no `videoRotationAngle = 90`) so the
-        // buffer dim is the single source of truth for the file's
+        // user's picker aspect is the single source of truth for the file's
         // orientation metadata.
-        videoInput.transform = Self.writerTransform(forBufferWidth: writerWidth, height: writerHeight)
+        //
+        // `writerWidth` / `writerHeight` (passed in from
+        // `lazilyStartWriterOnFirstSample`) still seed `AVVideoWidthKey` /
+        // `AVVideoHeightKey` from the actual sample buffer's format
+        // description — that read is correct because by the time the first
+        // sample arrives, the buffer dims are observable. Only the
+        // ROTATION decision moves to the policy table; encoded dims still
+        // come from the sample buffer.
+        videoInput.transform = OrientationPolicy.writerTransform(
+            for: OrientationPolicy.current
+        )
 
         // Audio input — AAC, voiceover bitrate.
         let audioSettings: [String: Any] = [
@@ -1123,31 +1125,14 @@ final class RecordingSession {
         return (targetW, targetH)
     }
 
-    /// Pure helper — picks the writer's `videoInput.transform` based on the
-    /// buffer's natural orientation, per Apple QA1744's guidance for
-    /// AVAssetWriter pipelines.
-    ///
-    /// - Landscape buffer (W > H): `-π/2` rotates 90° CCW for portrait
-    ///   playback. iOS 17 native 4:3 sensors and iOS 26 `.ratio4x3` /
-    ///   `.ratio16x9` both fall here.
-    /// - Portrait buffer (H > W): `.identity`. iOS 26 `.ratio9x16` reshapes
-    ///   the buffer to 2160×3840 portrait pixels — rotating again sideways-
-    ///   landscapes the playback (the dogfood-pass-10 symptom).
-    /// - Square buffer (W == H): `.identity`. iPhone 17 1×1 sensor and
-    ///   `.ratio1x1` paths land here; rotation is a no-op for square content.
-    ///
-    /// Pure value-in/value-out so unit tests don't need AVFoundation.
-    nonisolated internal static func writerTransform(
-        forBufferWidth bufferWidth: Int,
-        height bufferHeight: Int
-    ) -> CGAffineTransform {
-        // Note `>=` (not `>`): square buffers (1×1 sensor on iPhone 17 or
-        // .ratio1x1 reshape) get identity, since rotating a square is a
-        // visual no-op and identity is the cleaner metadata for players.
-        return bufferHeight >= bufferWidth
-            ? .identity
-            : CGAffineTransform(rotationAngle: -.pi / 2)
-    }
+    // (dogfood-pass-11) The static `writerTransform(forBufferWidth:height:)`
+    // helper that lived here has been removed. Rotation is now keyed by
+    // the user's picker aspect via `OrientationPolicy.writerTransform(for:)`,
+    // which is shared with the preview layer. The buffer-dim probe was
+    // removed because `device.dynamicDimensions` returns (0,0) for ~33-100
+    // ms after `setDynamicAspectRatio` lands on a cold launch, and the
+    // first-sample read at that window picked the wrong rotation. See
+    // `OrientationPolicy.swift`.
 
     // MARK: - Live Activity
 

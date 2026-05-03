@@ -23,29 +23,31 @@
 //  Reduce-Motion: every spring becomes an instant cut. The tile still moves;
 //  it just doesn't bounce.
 //
+//  Architecture (dogfood-pass-11 rewrite):
+//  - The tile owns its own `CameraPreview` mounted INSIDE `tileBody`. This
+//    is a deliberate reversion of the dogfood-pass-8 hoist that lived a
+//    shared CameraPreview at TeleprompterView's ZStack root and positioned
+//    it via a frame preference. That hoist caused two distinct bugs:
+//      (a) Two GeometryReaders with different safe-area treatment yielded
+//          a coordinate-space mismatch between the published `pipFrame` and
+//          the parent's `.position(x:y:)` — the preview rendered offset
+//          from the tile chrome.
+//      (b) `pipFrame == .zero` on first render meant the AVCaptureVideo­
+//          PreviewLayer hit zero bounds and showed empty.
+//  - The cold-start cost the dogfood-pass-8 hoist was solving (`.pip ↔
+//    .behind` ~5 s swap) is now mitigated differently: TeleprompterView
+//    keeps a separate behind-mode CameraPreview live, so each style has its
+//    own layer with stable identity. The session is shared (single
+//    `CameraStore.session`), so neither layer pays AVFoundation cold-start
+//    cost on style switches — only on first activation.
+//
 
 import SwiftUI
 
-/// Frame of the currently-rendered PiP tile, in viewport coordinates.
-/// Published by `PipTile` upward via SwiftUI preference so the parent
-/// (`TeleprompterView`) can position its single shared `CameraPreview`
-/// at the same rect. This is the dogfood-pass-8 architectural fix for
-/// the ~5 s `.pip → .behind` swap: we keep ONE `AVCaptureVideoPreviewLayer`
-/// alive for the whole prompter session and just resize/reposition it
-/// when the user cycles modes — instead of building a fresh layer in
-/// each `if cameraStyle == ...` branch, paying the AVFoundation cold-
-/// start cost (which on iPhone 17 + iOS 26 was the 5 s symptom).
-struct PipFramePreferenceKey: PreferenceKey {
-    static var defaultValue: CGRect = .zero
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-        value = nextValue()
-    }
-}
-
 /// Whether the PiP tile is currently in its hidden-off-screen state.
-/// Parent reads this to decide whether to render the shared
-/// `CameraPreview` at all (when hidden, no preview shows; only the
-/// chevron tab does).
+/// Parent reads this to dim/hide its chrome where appropriate (the tile
+/// itself renders the chevron tab — the parent doesn't need to short-
+/// circuit any camera mount, since the camera now lives inside the tile).
 struct PipHiddenPreferenceKey: PreferenceKey {
     static var defaultValue: Bool = false
     static func reduce(value: inout Bool, nextValue: () -> Bool) {
@@ -129,11 +131,10 @@ struct PipTile: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .allowsHitTesting(true)
-            // Publish the hidden state so the parent's shared
-            // CameraPreview can short-circuit rendering when the tile is
-            // tucked away. The frame preference (published from inside
-            // tileBody) is irrelevant in the hidden branch — the parent
-            // checks hidden first.
+            // Publish the hidden state so the parent can dim peer chrome
+            // when the user has tucked the tile away (purely cosmetic; no
+            // longer load-bearing for camera mount, since the camera lives
+            // inside this view).
             .preference(key: PipHiddenPreferenceKey.self, value: hidden)
         }
         .accessibilityElement(children: .ignore)
@@ -161,65 +162,65 @@ struct PipTile: View {
             x: resolved.x + dragOffset.width,
             y: resolved.y + dragOffset.height
         )
-        let tileFrame = CGRect(
-            x: tileCenter.x - dims.width / 2,
-            y: tileCenter.y - dims.height / 2,
-            width: dims.width,
-            height: dims.height
-        )
 
-        // The PiP tile no longer contains its own `CameraPreview`. The
-        // parent (`TeleprompterView`) hoists a single shared CameraPreview
-        // to the ZStack root and positions it at this tile's frame, so
-        // the same `AVCaptureVideoPreviewLayer` keeps running across
-        // `.pip ↔ .behind` cycles instead of being torn down + rebuilt
-        // (the dogfood-pass-8 architectural fix; see the audit reports
-        // for the cold-start latency analysis).
-        //
-        // We publish the tile frame upward via `PipFramePreferenceKey`
-        // so the parent knows where to draw the camera. The chrome
-        // (rounded border, shadow) and gestures stay here; they sit on
-        // a transparent hit-test rectangle that overlays the camera
-        // preview. From the user's perspective the visual is identical;
-        // architecturally, the camera lives one level up.
-        Color.clear
-            .frame(width: dims.width, height: dims.height)
-            .contentShape(Rectangle())
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Theme.border, lineWidth: 1)
+        // QA REVIEWER FOCUS: the CameraPreview is mounted INSIDE the tile
+        // body (dogfood-pass-11 reversion of the pass-8 frame-preference
+        // hoist). The preview layer's session is the shared one from
+        // CameraStore — so swapping between `.pip` and `.behind` does NOT
+        // pay an AVFoundation cold-start cost; only the layer attachment
+        // is rebuilt, and that's microseconds. Leaving the preview here
+        // also means the rect is owned by SwiftUI's normal layout pass
+        // (via `.frame` + `.position` on this very ZStack child), so
+        // there's no coordinate-space mismatch between the published
+        // `pipFrame` and the parent's `.position(x:y:)` — the bug that
+        // broke the empty-PiP rendering in pass-8 to pass-10.
+        ZStack {
+            CameraPreview(
+                session: store.session,
+                gravity: .resizeAspect,
+                horizontalMirror: horizontalMirror,
+                verticalMirror: verticalMirror
             )
-            .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 4)
-            .position(tileCenter)
-            .preference(key: PipFramePreferenceKey.self, value: tileFrame)
-            // Gesture ordering matters: SwiftUI evaluates `onTapGesture`
-            // modifiers from outside-in, and a `count: 1` recognized first
-            // commits before SwiftUI ever waits for the second tap. Apply
-            // the higher-count gesture first (closer to the view) so single
-            // taps get the chance to be recognized as the start of a
-            // double tap.
-            // Double-tap → cycle preset sizes. Reduce-motion drops the
-            // spring; the size still changes, just instantly.
-            .onTapGesture(count: 2) { cycleSize() }
-            // Single tap → promote (handled by parent). Currently
-            // `onPromote` is unwired — Feature 2 adds the layout reorg
-            // that listens here.
-            .onTapGesture(count: 1) { onPromote?() }
-            // Drag → live track + drop-and-stay on release. We do NOT
-            // spring back to a corner; the tile stays where the user
-            // lifted off.
-            .gesture(
-                DragGesture()
-                    .onChanged { value in dragOffset = value.translation }
-                    .onEnded { value in
-                        onDragEnded(
-                            value: value,
-                            in: viewport,
-                            dims: dims,
-                            safeArea: safeArea
-                        )
-                    }
-            )
+            .id("camera-preview-pip")
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            // Border + shadow drawn ON TOP of the preview so the rounded
+            // stroke remains crisp against any preview content.
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Theme.border, lineWidth: 1)
+        }
+        .frame(width: dims.width, height: dims.height)
+        .contentShape(Rectangle())
+        .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 4)
+        .position(tileCenter)
+        // Gesture ordering matters: SwiftUI evaluates `onTapGesture`
+        // modifiers from outside-in, and a `count: 1` recognized first
+        // commits before SwiftUI ever waits for the second tap. Apply
+        // the higher-count gesture first (closer to the view) so single
+        // taps get the chance to be recognized as the start of a
+        // double tap.
+        // Double-tap → cycle preset sizes. Reduce-motion drops the
+        // spring; the size still changes, just instantly.
+        .onTapGesture(count: 2) { cycleSize() }
+        // Single tap → promote (handled by parent). Currently
+        // `onPromote` is unwired — Feature 2 adds the layout reorg
+        // that listens here.
+        .onTapGesture(count: 1) { onPromote?() }
+        // Drag → live track + drop-and-stay on release. We do NOT
+        // spring back to a corner; the tile stays where the user
+        // lifted off.
+        .gesture(
+            DragGesture()
+                .onChanged { value in dragOffset = value.translation }
+                .onEnded { value in
+                    onDragEnded(
+                        value: value,
+                        in: viewport,
+                        dims: dims,
+                        safeArea: safeArea
+                    )
+                }
+        )
     }
 
     private func chevronTab(in viewport: CGSize) -> some View {
