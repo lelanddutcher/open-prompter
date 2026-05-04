@@ -389,13 +389,12 @@ final class CameraTests: XCTestCase {
                      "No descriptor declares dynamic-aspect support → no aspect to apply.")
     }
 
-    /// iPhone 17 family pathway: a format that declares `supportedDynamicAspectRatios`
-    /// Dynamic-aspect-capable format wins; .ratio4x3 is picked first
-    /// because iOS 26.0 reshapes the W/H labels without rotating the
-    /// underlying pixel content for portrait aspects. 4:3 matches the
-    /// sensor's native landscape orientation; the writer applies a 90°
-    /// rotation transform downstream for portrait playback.
-    func testOpenGatePrefers4x3WhenDynamicAspectAvailable() {
+    /// iPhone 17 pathway: format declares both 1×1 and 4×3. openGate must
+    /// pick 1×1 first — it is the true full-sensor readout on the 1×1
+    /// sensor (3024×3024 square, identity writer transform → square
+    /// playback). Confirmed by self-test: prior ratio4x3-first order
+    /// produced 4032×3024 landscape + identity → landscape playback.
+    func testOpenGatePrefers1x1WhenDeclared() {
         if #available(iOS 26.0, *) {
             let descriptors: [CameraStore.FormatDescriptor] = [
                 CameraStore.FormatDescriptor(width: 3024, height: 4032,
@@ -418,17 +417,19 @@ final class CameraTests: XCTestCase {
                 descriptors: descriptors, preferredFPS: 30
             )
             XCTAssertEqual(pick?.index, 1,
-                           "Dynamic-aspect format must win over a larger plain format.")
+                           "Dynamic-aspect format must win over a plain format.")
             XCTAssertEqual(pick?.dynamicAspectRaw,
-                           AVCaptureDevice.AspectRatio.ratio4x3.rawValue,
-                           "4×3 (sensor-natural landscape) must be selected first.")
+                           AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
+                           "1×1 (true full-sensor readout) must be selected first.")
         }
     }
 
-    /// Aspect-preference fallback: 1×1 wins when 4×3 isn't declared.
-    /// Future-compat — light up iPhone 17 full-square readout if a future
-    /// iOS adds 1:1 to the front camera's supported aspect set.
-    func testOpenGateFallsBackTo1x1When4x3Unavailable() {
+    /// Aspect-preference fallback: 4×3 wins when 1×1 isn't declared.
+    /// Covers legacy 4:3 front sensors where ratio4x3 is the widest
+    /// declared aspect (sensor-native landscape). The writer's identity
+    /// transform lands landscape playback for those devices (known issue,
+    /// tracked in OrientationPolicy TODO).
+    func testOpenGateFallsBackTo4x3When1x1Unavailable() {
         if #available(iOS 26.0, *) {
             let descriptors: [CameraStore.FormatDescriptor] = [
                 CameraStore.FormatDescriptor(
@@ -436,8 +437,7 @@ final class CameraTests: XCTestCase {
                     frameRateRanges: [(1, 30)],
                     supportsDynamicAspectRatios: true,
                     dynamicAspectRatios: [
-                        AVCaptureDevice.AspectRatio.ratio3x4.rawValue,
-                        AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio4x3.rawValue,
                         AVCaptureDevice.AspectRatio.ratio16x9.rawValue
                     ]
                 )
@@ -446,16 +446,14 @@ final class CameraTests: XCTestCase {
                 descriptors: descriptors, preferredFPS: 30
             )
             XCTAssertEqual(pick?.dynamicAspectRaw,
-                           AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
-                           "Algorithm must pick 1×1 when 4×3 isn't declared.")
+                           AVCaptureDevice.AspectRatio.ratio4x3.rawValue,
+                           "Algorithm must pick 4×3 when 1×1 isn't declared.")
         }
     }
 
-    /// Aspect-preference fallback: 3×4 wins when neither 4×3 nor 1×1 are
+    /// Aspect-preference fallback: 3×4 wins when neither 1×1 nor 4×3 are
     /// declared. Last resort before the algorithm's "first declared"
-    /// tiebreaker. The user-facing rotation issues we hit on iOS 26.0
-    /// would still apply, but at that point we've exhausted the better
-    /// options.
+    /// tiebreaker.
     func testOpenGateFallsBackTo3x4WhenSquareAndLandscapeUnavailable() {
         if #available(iOS 26.0, *) {
             let descriptors: [CameraStore.FormatDescriptor] = [
@@ -552,6 +550,37 @@ final class CameraTests: XCTestCase {
         )
         XCTAssertNil(pick,
                      "No format covers 120fps — selection must return nil.")
+    }
+
+    // MARK: - supportedRecordingAspects (hardware-capability filter)
+
+    /// Pre-iOS-26 baseline: only openGate, 4:3, and 16:9 are returned
+    /// (no dynamic-aspect API available, 9:16 and 1:1 can't be honored).
+    /// Guards against the Settings picker offering aspects that silently
+    /// demote to openGate on older OS.
+    func testSupportedAspectsPreiOS26BaselineIncludes4x3And16x9AndOpenGate() {
+        // `supportedRecordingAspects` is documented to always include
+        // openGate, 4:3, and 16:9. We can't gate the device call in a
+        // unit test, but we can verify the method returns a non-empty set
+        // that includes the guaranteed members.
+        let supported = CameraStore.supportedRecordingAspects()
+        XCTAssertTrue(supported.contains(.openGate),
+                      "openGate must always be in the supported set.")
+        XCTAssertTrue(supported.contains(.ratio4x3),
+                      "4:3 must always be in the supported set.")
+        XCTAssertTrue(supported.contains(.ratio16x9),
+                      "16:9 must always be in the supported set.")
+    }
+
+    /// Every aspect returned by `supportedRecordingAspects` must be a valid
+    /// `RecordingAspect` case. Verifies we never accidentally insert a raw
+    /// string that doesn't map back.
+    func testSupportedAspectsAllMembersAreValidCases() {
+        let supported = CameraStore.supportedRecordingAspects()
+        for aspect in supported {
+            XCTAssertNotNil(RecordingAspect(rawValue: aspect.rawValue),
+                            "\(aspect.rawValue) must round-trip via RecordingAspect.rawValue")
+        }
     }
 
     // MARK: - Behind-mode reliability (Bug 2)

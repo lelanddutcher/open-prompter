@@ -162,20 +162,20 @@ struct RecordingSettingsView: View {
         RecordingFramerate(rawValue: framerateRaw) ?? .fps30
     }
 
-    /// Aspect-ratio cases the picker should show. Hidden:
-    ///   - `.ratio9x16` and `.ratio1x1` on pre-iOS-26 (the dynamic-aspect API
-    ///     they need to land at a non-native crop is iOS 26+). The picker
-    ///     surfaces them again automatically once the user upgrades iOS.
+    /// Aspect-ratio cases the picker should show. Filtered to aspects the
+    /// device's front camera actually supports (via `supportedDynamicAspectRatios`
+    /// on iOS 26+, or the pre-iOS-26 native-aspect fallback set). This means
+    /// the user can only select an aspect their hardware can deliver — no
+    /// silent demotions to openGate for unsupported picks.
+    ///
     /// Order: 9:16 first (the new social-share default) → 1:1 → 4:3 → 16:9
     /// → open gate. Matches the canonical UX order in the spec.
     private var availableAspects: [RecordingAspect] {
         let canonical: [RecordingAspect] = [
             .ratio9x16, .ratio1x1, .ratio4x3, .ratio16x9, .openGate
         ]
-        if #available(iOS 26.0, *) {
-            return canonical
-        }
-        return canonical.filter { !$0.requiresIOS26 }
+        let supported = CameraStore.supportedRecordingAspects()
+        return canonical.filter { supported.contains($0) }
     }
 
     private func pinIfNotConnected() -> String? {

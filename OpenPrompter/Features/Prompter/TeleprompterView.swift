@@ -102,27 +102,24 @@ struct TeleprompterView: View {
 
     var body: some View {
         ZStack {
-            // Backdrop. In `.behind` mode the camera fills the screen and
-            // we DON'T paint Theme.bg over it. In `.pip` and `.off` we paint
-            // Prompter Black behind the text (the PiP tile sits as an
-            // overlay; the prompter still reads against pure black).
-            if cameraStyle != .behind {
-                Theme.bg.ignoresSafeArea()
-            }
+            // Backdrop. Opacity-driven instead of conditional-mount so the
+            // behind-mode CameraPreview below stays in the view tree (pre-
+            // warmed) when in pip mode — see pre-warm note below.
+            Theme.bg.ignoresSafeArea()
+                .opacity(cameraStyle != .behind ? 1 : 0)
 
-            // Behind-mode CameraPreview. Lives at the ZStack root so it
-            // sits beneath the scrolling text and reads against the full
-            // screen.  PiP mode's CameraPreview is owned by `PipTile`
-            // (mounted as an overlay further down) — this is the dogfood-
-            // pass-11 split that fixes the empty-PiP coordinate-space
-            // mismatch and the `pipFrame == .zero` first-render bug.
+            // Behind-mode CameraPreview — pre-warmed even when in .pip so
+            // the .pip → .behind switch is instant (no fresh AVFoundation
+            // layer construction). Both layers share the same
+            // `AVCaptureSession`, so neither pays cold-start cost; only the
+            // opacity flips. The layer is invisible (opacity 0) in pip mode
+            // and hit-testing is disabled when not the active mode.
             //
-            // Both layers attach to the SAME `AVCaptureSession`, so
-            // swapping styles doesn't pay AVFoundation cold-start cost —
-            // only the preview-layer attachment is rebuilt on style flip,
-            // which is microseconds. The session is owned by CameraStore
-            // and survives `.off → .pip → .behind` cycles.
-            if cameraStyle == .behind {
+            // PiP mode's CameraPreview is owned by PipTile (mounted in the
+            // overlay below) — the dogfood-pass-11 fix for the empty-PiP
+            // coordinate-space mismatch. PipTile's layer is similarly kept
+            // alive for instant behind → pip switching.
+            if cameraStyle != .off {
                 CameraPreview(
                     session: appState.cameraStore.session,
                     gravity: .resizeAspectFill,
@@ -132,13 +129,15 @@ struct TeleprompterView: View {
                 .id("camera-preview-behind")
                 .ignoresSafeArea(.all)
                 .allowsHitTesting(false)
+                .opacity(cameraStyle == .behind ? 1 : 0)
 
                 // Scrim behind the reading line: WCAG 2.2 AA contrast over
                 // live video. 0.55 is the spec default; raise to 0.7 at
                 // AX5 Dynamic Type sizes per V2 Design 01 §"`behind` —
-                // full-frame camera, prompter overlay".
+                // full-frame camera, prompter overlay". Opacity-driven so
+                // the layer stays composed but invisible outside behind mode.
                 Color(red: 10.0/255, green: 10.0/255, blue: 11.0/255)
-                    .opacity(scrimOpacityForBehindMode)
+                    .opacity(cameraStyle == .behind ? scrimOpacityForBehindMode : 0)
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
             }
@@ -202,21 +201,21 @@ struct TeleprompterView: View {
         .onPreferenceChange(PipHiddenPreferenceKey.self) { newHidden in
             pipHidden = newHidden
         }
-        // PiP tile floats above the text and is _independent_ of the
-        // chrome-hide state — when the user taps to hide the chrome they
-        // still want to see themselves on camera. (The user explicitly
-        // asked to defer the lower-opacity-when-recording variant until
-        // Feature 2 lands recording.) Disabled for `.behind` (preview is
-        // the backdrop) and `.off` (no session).
+        // PiP tile — pre-warmed whenever the camera is on (.pip or .behind)
+        // so the .behind → .pip switch is instant (the preview layer inside
+        // PipTile is already connected to the session and receiving frames).
+        // Opacity 0 + allowsHitTesting(false) keeps it invisible and inert
+        // in behind mode. Goes away entirely in .off (session stopped).
         .overlay {
-            if cameraStyle == .pip {
+            if cameraStyle != .off {
                 PipTile(
                     store: appState.cameraStore,
                     horizontalMirror: vm.mirroredHorizontal,
                     verticalMirror: vm.mirroredVertical,
                     chromeVisible: !vm.focus
                 )
-                .transition(.opacity)
+                .opacity(cameraStyle == .pip ? 1 : 0)
+                .allowsHitTesting(cameraStyle == .pip)
             }
         }
         .overlay(alignment: .top) {
