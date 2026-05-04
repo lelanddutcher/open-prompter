@@ -2,32 +2,30 @@
 //  OrientationPipelineTests.swift
 //  OpenPrompterTests
 //
-//  Pinned coverage of the rotation/orientation pipeline. The dogfood-pass-10
-//  bug was a portrait buffer (iOS 26 .ratio9x16 → 2160×3840) double-rotated
-//  by an unconditional writer-side `-π/2` transform → sideways landscape
-//  playback. The dogfood-pass-11 follow-up moved rotation source-of-truth
-//  from buffer-dim inference to the user's picker aspect via
-//  `OrientationPolicy`, eliminating the cold-start `dynamicDimensions ==
-//  (0,0)` race that mis-picked rotations on first launch.
+//  Pinned coverage of the rotation/orientation pipeline. The dogfood-pass-13
+//  rewrite: rotation policy now derives from BOTH the user's picker aspect
+//  AND the actual buffer shape (portrait/landscape/square). Self-test on
+//  iPhone 17 Pro Max + iOS 26.3.1 confirmed the front camera does NOT expose
+//  ratio1x1 in supportedDynamicAspectRatios, so openGate falls back to
+//  ratio4x3 producing a 4032×3024 LANDSCAPE buffer. The previous aspect-
+//  only policy returned identity for openGate and shipped landscape playback;
+//  the new buffer-shape-aware policy detects "landscape buffer + portrait-
+//  intent aspect" and rotates +π/2.
 //
 //  These tests pin the corrected behaviour:
 //
-//    1. `OrientationPolicy.writerTransform(for:)` — per-aspect lookup
-//       drives the writer's `videoInput.transform`. `.ratio9x16` /
-//       `.ratio1x1` / `.openGate` get identity; `.ratio4x3` / `.ratio16x9`
-//       get +π/2 (the sign update is the dogfood-pass-11 fix for the
-//       upside-down 4:3 user report).
-//    2. `OrientationPolicy.previewRotationAngle(for:)` — per-aspect
-//       lookup drives the preview connection's `videoRotationAngle`.
-//       `.ratio9x16` and `.ratio1x1` → 0°; landscape aspects → 90°.
+//    1. `OrientationPolicy.writerTransform(for:bufferShape:)` — for
+//       portrait-intent aspects (9:16/4:3/1:1/openGate), landscape buffers
+//       get +π/2; portrait/square buffers get identity. For 16:9 landscape-
+//       intent: identity for landscape buffers, -π/2 for the edge case
+//       portrait buffer.
+//    2. `OrientationPolicy.previewRotationAngle(for:bufferShape:)` — same
+//       logic for the preview connection's `videoRotationAngle`.
 //    3. `RecordingSelfTest.playbackDimensions(...)` — composes encoded dims
-//       with `preferredTransform` to compute display orientation. The
-//       dogfood-pass-10 regression test stays — same buffer dim + transform
-//       still has to fail the portrait-playback assertion.
-//
-//  Plus an integration check that the policy's writer transform produces
-//  portrait-or-square playback for every aspect+buffer combination the
-//  user can land in.
+//       with `preferredTransform` to compute display orientation.
+//    4. End-to-end integration: every (aspect, buffer) combo the user can
+//       land in produces portrait-or-square playback (16:9 landscape-intent
+//       is the deliberate exception).
 //
 
 import XCTest
@@ -36,102 +34,141 @@ import CoreGraphics
 
 final class OrientationPipelineTests: XCTestCase {
 
-    // MARK: - OrientationPolicy.writerTransform (per-aspect)
+    // MARK: - BufferShape classification
 
-    func testWriterTransformRatio9x16IsIdentity() {
-        // .ratio9x16: iOS 26 reshapes to 2160×3840 portrait. Identity is
-        // correct — buffer is already portrait, rotation would sideways-
-        // land it (dogfood-pass-10 symptom).
-        let t = OrientationPolicy.writerTransform(for: .ratio9x16)
+    func testBufferShapeFromDimsLandscape() {
+        XCTAssertEqual(OrientationPolicy.BufferShape.from(width: 4032, height: 3024), .landscape)
+    }
+
+    func testBufferShapeFromDimsPortrait() {
+        XCTAssertEqual(OrientationPolicy.BufferShape.from(width: 2160, height: 3840), .portrait)
+    }
+
+    func testBufferShapeFromDimsSquare() {
+        XCTAssertEqual(OrientationPolicy.BufferShape.from(width: 3024, height: 3024), .square)
+    }
+
+    func testBufferShapeFromDimsZeroReturnsNil() {
+        // The iOS 26 dynamicDimensions cold-start race returns 0×0 — caller
+        // must fall through to a defensive default (we use .landscape).
+        XCTAssertNil(OrientationPolicy.BufferShape.from(width: 0, height: 0))
+        XCTAssertNil(OrientationPolicy.BufferShape.from(width: 4032, height: 0))
+    }
+
+    func testBufferShapeFromAspectRawMappings() {
+        XCTAssertEqual(OrientationPolicy.BufferShape.from(dynamicAspectRaw: "AVCaptureAspectRatio9x16"), .portrait)
+        XCTAssertEqual(OrientationPolicy.BufferShape.from(dynamicAspectRaw: "AVCaptureAspectRatio3x4"), .portrait)
+        XCTAssertEqual(OrientationPolicy.BufferShape.from(dynamicAspectRaw: "AVCaptureAspectRatio1x1"), .square)
+        XCTAssertEqual(OrientationPolicy.BufferShape.from(dynamicAspectRaw: "AVCaptureAspectRatio4x3"), .landscape)
+        XCTAssertEqual(OrientationPolicy.BufferShape.from(dynamicAspectRaw: "AVCaptureAspectRatio16x9"), .landscape)
+        XCTAssertNil(OrientationPolicy.BufferShape.from(dynamicAspectRaw: nil))
+        XCTAssertNil(OrientationPolicy.BufferShape.from(dynamicAspectRaw: "AVCaptureAspectRatioBogus"))
+    }
+
+    // MARK: - wantsPortraitPlayback intent classification
+
+    func testWantsPortraitPlaybackIntent() {
+        XCTAssertTrue(OrientationPolicy.wantsPortraitPlayback(for: .ratio9x16))
+        XCTAssertTrue(OrientationPolicy.wantsPortraitPlayback(for: .ratio4x3))
+        XCTAssertTrue(OrientationPolicy.wantsPortraitPlayback(for: .ratio1x1))
+        XCTAssertTrue(OrientationPolicy.wantsPortraitPlayback(for: .openGate))
+        XCTAssertFalse(OrientationPolicy.wantsPortraitPlayback(for: .ratio16x9))
+    }
+
+    // MARK: - writerTransform (aspect × bufferShape)
+
+    func testWriterTransformPortraitIntentLandscapeBufferRotates() {
+        // openGate falling back to ratio4x3 on iPhone 17 + iOS 26.3.1 → 4032×3024
+        // landscape. Want portrait playback → +π/2 rotation.
+        for aspect in [RecordingAspect.openGate, .ratio4x3, .ratio9x16, .ratio1x1] {
+            let t = OrientationPolicy.writerTransform(for: aspect, bufferShape: .landscape)
+            XCTAssertEqual(t.a, 0, accuracy: 1e-6, "\(aspect): a")
+            XCTAssertEqual(t.b, 1, accuracy: 1e-6, "\(aspect): b")
+            XCTAssertEqual(t.c, -1, accuracy: 1e-6, "\(aspect): c")
+            XCTAssertEqual(t.d, 0, accuracy: 1e-6, "\(aspect): d")
+        }
+    }
+
+    func testWriterTransformPortraitIntentPortraitBufferIdentity() {
+        // ratio9x16 produces a 2160×3840 portrait buffer; identity is correct
+        // (rotating would sideways-land it — the dogfood-pass-10 symptom).
+        for aspect in [RecordingAspect.ratio9x16, .ratio4x3, .openGate] {
+            let t = OrientationPolicy.writerTransform(for: aspect, bufferShape: .portrait)
+            XCTAssertEqual(t, .identity, "\(aspect) on portrait buffer")
+        }
+    }
+
+    func testWriterTransformPortraitIntentSquareBufferIdentity() {
+        // ratio1x1 (or openGate when ratio1x1 is declared) → square buffer.
+        // Identity is correct — rotation is a visual no-op for square.
+        for aspect in [RecordingAspect.ratio1x1, .openGate] {
+            let t = OrientationPolicy.writerTransform(for: aspect, bufferShape: .square)
+            XCTAssertEqual(t, .identity, "\(aspect) on square buffer")
+        }
+    }
+
+    func testWriterTransformLandscapeIntentLandscapeBufferIdentity() {
+        // ratio16x9 wants landscape playback; landscape buffer → identity.
+        let t = OrientationPolicy.writerTransform(for: .ratio16x9, bufferShape: .landscape)
         XCTAssertEqual(t, .identity)
     }
 
-    func testWriterTransformRatio1x1IsIdentity() {
-        // .ratio1x1: square buffer, rotation is a visual no-op. Identity
-        // is the cleaner metadata for players.
-        let t = OrientationPolicy.writerTransform(for: .ratio1x1)
-        XCTAssertEqual(t, .identity)
-    }
-
-    func testWriterTransformOpenGateIsIdentity() {
-        // .openGate: iPhone 17 1×1 sensor → square buffer (identity is
-        // correct). Older 4:3 sensors would need -π/2 — accepted as a
-        // known-issue per OrientationPolicy.swift's TODO; the policy is
-        // tuned for the primary user's iPhone 17.
-        let t = OrientationPolicy.writerTransform(for: .openGate)
-        XCTAssertEqual(t, .identity)
-    }
-
-    func testWriterTransformRatio4x3IsPositivePiOverTwo() {
-        // .ratio4x3: dogfood-pass-11 user report flipped the previous
-        // -π/2 to +π/2 to fix upside-down playback. The sign update
-        // provides the missing 180° on iPhone 17 + iOS 26 1×1-reshape-to-
-        // 4:3 with bottom-up sensor scan.
-        let t = OrientationPolicy.writerTransform(for: .ratio4x3)
+    func testWriterTransformLandscapeIntentPortraitBufferReverseRotates() {
+        // 16:9 + portrait buffer → -π/2 to land landscape playback. Edge
+        // case; iOS shouldn't normally produce a portrait buffer for ratio16x9.
+        let t = OrientationPolicy.writerTransform(for: .ratio16x9, bufferShape: .portrait)
         XCTAssertEqual(t.a, 0, accuracy: 1e-6)
-        XCTAssertEqual(t.b, 1, accuracy: 1e-6)
-        XCTAssertEqual(t.c, -1, accuracy: 1e-6)
+        XCTAssertEqual(t.b, -1, accuracy: 1e-6)
+        XCTAssertEqual(t.c, 1, accuracy: 1e-6)
         XCTAssertEqual(t.d, 0, accuracy: 1e-6)
     }
 
-    func testWriterTransformRatio16x9IsPositivePiOverTwo() {
-        // .ratio16x9: same family as .ratio4x3 — landscape reshape from
-        // the same 1×1 sensor. Match its convention until proven different.
-        let t = OrientationPolicy.writerTransform(for: .ratio16x9)
-        XCTAssertEqual(t.a, 0, accuracy: 1e-6)
-        XCTAssertEqual(t.b, 1, accuracy: 1e-6)
-        XCTAssertEqual(t.c, -1, accuracy: 1e-6)
-        XCTAssertEqual(t.d, 0, accuracy: 1e-6)
+    // MARK: - previewRotationAngle (aspect × bufferShape)
+
+    func testPreviewAnglePortraitIntentLandscapeBufferIs90() {
+        for aspect in [RecordingAspect.openGate, .ratio4x3, .ratio9x16] {
+            XCTAssertEqual(
+                OrientationPolicy.previewRotationAngle(for: aspect, bufferShape: .landscape),
+                90,
+                "\(aspect): landscape buffer → 90°"
+            )
+        }
     }
 
-    // MARK: - OrientationPolicy.previewRotationAngle (per-aspect)
+    func testPreviewAnglePortraitIntentPortraitOrSquareBufferIs0() {
+        for aspect in [RecordingAspect.ratio9x16, .ratio1x1, .openGate] {
+            XCTAssertEqual(
+                OrientationPolicy.previewRotationAngle(for: aspect, bufferShape: .portrait),
+                0,
+                "\(aspect): portrait buffer → 0°"
+            )
+            XCTAssertEqual(
+                OrientationPolicy.previewRotationAngle(for: aspect, bufferShape: .square),
+                0,
+                "\(aspect): square buffer → 0°"
+            )
+        }
+    }
 
-    func testPreviewAngleRatio9x16Is0() {
-        // Portrait buffer → don't rotate; already upright in display space.
+    func testPreviewAngleLandscapeIntentLandscapeBufferIs0() {
         XCTAssertEqual(
-            OrientationPolicy.previewRotationAngle(for: .ratio9x16),
+            OrientationPolicy.previewRotationAngle(for: .ratio16x9, bufferShape: .landscape),
             0
         )
     }
 
-    func testPreviewAngleRatio1x1Is0() {
-        // Square — rotation is a no-op; pick 0 for consistency with the
-        // writer's identity transform.
+    func testPreviewAngleLandscapeIntentPortraitBufferIs270() {
+        // -π/2 on the connection isn't supported (it accepts 0/90/180/270);
+        // 270 is the equivalent of -90.
         XCTAssertEqual(
-            OrientationPolicy.previewRotationAngle(for: .ratio1x1),
-            0
-        )
-    }
-
-    func testPreviewAngleRatio4x3Is90() {
-        // Landscape buffer → 90° to undo landscape sensor scan.
-        XCTAssertEqual(
-            OrientationPolicy.previewRotationAngle(for: .ratio4x3),
-            90
-        )
-    }
-
-    func testPreviewAngleRatio16x9Is90() {
-        // Same family as .ratio4x3.
-        XCTAssertEqual(
-            OrientationPolicy.previewRotationAngle(for: .ratio16x9),
-            90
-        )
-    }
-
-    func testPreviewAngleOpenGateIs90() {
-        // Square (iPhone 17) is no-op visually under either choice; older
-        // 4:3 needs 90°. Default 90° to support legacy devices.
-        XCTAssertEqual(
-            OrientationPolicy.previewRotationAngle(for: .openGate),
-            90
+            OrientationPolicy.previewRotationAngle(for: .ratio16x9, bufferShape: .portrait),
+            270
         )
     }
 
     // MARK: - RecordingSelfTest.playbackDimensions (regression)
 
     func testPlaybackDimsIdentityKeepsEncoded() {
-        // 2160×3840 + identity → plays 2160×3840 (portrait, correct).
         let identity: [Double] = [1, 0, 0, 1]
         let (w, h) = RecordingSelfTest.playbackDimensions(
             encodedWidth: 2160, encodedHeight: 3840, transform: identity
@@ -151,49 +188,51 @@ final class OrientationPipelineTests: XCTestCase {
     }
 
     func testPlaybackDimsBugRegressionTest() {
-        // The dogfood-pass-10 self-test reported: encoded 2160×3840 with
-        // transform [0,-1,1,0]. That played as sideways landscape. Compute
-        // what playback dims this would have shown the user — 3840×2160
-        // (landscape) — and assert that the new self-test assertion would
-        // catch it (playbackHeight > playbackWidth would be FALSE).
-        // Pinned even after the dogfood-pass-11 sign flip because the bug
-        // shape (portrait buffer + non-identity transform) is the same
-        // regardless of sign.
+        // dogfood-pass-10: portrait buffer with non-identity transform
+        // sideways-landed playback. Pinned even after subsequent fixes.
         let bugTransform: [Double] = [0, -1, 1, 0]
         let (w, h) = RecordingSelfTest.playbackDimensions(
             encodedWidth: 2160, encodedHeight: 3840, transform: bugTransform
         )
-        XCTAssertEqual(w, 3840, "bug regression: dogfood-pass-10 played 3840 wide")
-        XCTAssertEqual(h, 2160, "bug regression: dogfood-pass-10 played 2160 tall")
-        XCTAssertFalse(h > w, "the new portrait-playback assertion would fail this case (correctly)")
+        XCTAssertEqual(w, 3840)
+        XCTAssertEqual(h, 2160)
+        XCTAssertFalse(h > w, "portrait-playback assertion correctly fails this case")
     }
 
     // MARK: - Integration: end-to-end orientation predictions
+    //
+    // For every (aspect × buffer) combo the user can land in, predict the
+    // policy's writer transform and the resulting playback dims. Acceptance:
+    // portrait-intent aspects play portrait or square; ratio16x9 plays
+    // landscape.
 
-    /// For each aspect the user can pick, predict (a) what transform
-    /// `OrientationPolicy.writerTransform(for:)` chooses and (b) what the
-    /// resulting file would play as via `playbackDimensions`. Acceptance
-    /// criteria for a known-good build: every aspect's playback orientation
-    /// is portrait (or square for `.ratio1x1`).
     func testEndToEndOrientationPredictions() {
-        // (label, aspect, bufferW, bufferH, expectedPlaybackW, expectedPlaybackH)
-        // bufferW/bufferH represent the encoded sample-buffer dims that
-        // each aspect produces on iPhone 17 + iOS 26 (the primary user's
-        // device). The legacy openGate landscape row is a known-issue per
-        // OrientationPolicy.swift; we don't include it here because the
-        // policy doesn't currently honor it (TODO in OrientationPolicy.swift).
+        // (label, aspect, bufW, bufH, expPlayW, expPlayH)
         let cases: [(String, RecordingAspect, Int, Int, Int, Int)] = [
-            (".ratio9x16 (iOS 26)", .ratio9x16, 2160, 3840, 2160, 3840),
-            (".ratio4x3", .ratio4x3, 4032, 3024, 3024, 4032),
-            (".ratio16x9", .ratio16x9, 4032, 2268, 2268, 4032),
-            (".ratio1x1 (iPhone 17 sensor)", .ratio1x1, 3024, 3024, 3024, 3024),
-            (".openGate iPhone17 1×1", .openGate, 3024, 3024, 3024, 3024)
+            // ratio9x16 produces portrait buffer on iPhone 17 + iOS 26.
+            (".ratio9x16 → portrait buffer", .ratio9x16, 2160, 3840, 2160, 3840),
+            // ratio4x3 produces landscape buffer; rotates to portrait.
+            (".ratio4x3 → landscape buffer", .ratio4x3, 4032, 3024, 3024, 4032),
+            // ratio16x9 (landscape intent) plays landscape.
+            (".ratio16x9 → landscape playback", .ratio16x9, 4032, 2268, 4032, 2268),
+            // ratio1x1 → square buffer, square playback.
+            (".ratio1x1 → square buffer", .ratio1x1, 3024, 3024, 3024, 3024),
+            // openGate on iPhone 17 + iOS 26.3.1: ratio1x1 not declared,
+            // falls back to ratio4x3 → landscape buffer → rotates to portrait.
+            (".openGate landscape fallback (current iPhone 17 + iOS 26.3.1)",
+             .openGate, 4032, 3024, 3024, 4032),
+            // openGate on a future iOS exposing ratio1x1: square buffer,
+            // square playback.
+            (".openGate ratio1x1 (future iOS)",
+             .openGate, 3024, 3024, 3024, 3024)
         ]
         for c in cases {
             let (label, aspect, bufW, bufH, expW, expH) = c
-            let xform = OrientationPolicy.writerTransform(for: aspect)
-            // Convert CGAffineTransform back to [a,b,c,d] for the playback
-            // helper (matches RecordingSelfTest's serialized shape).
+            guard let shape = OrientationPolicy.BufferShape.from(width: bufW, height: bufH) else {
+                XCTFail("invalid dims for case \(label)")
+                continue
+            }
+            let xform = OrientationPolicy.writerTransform(for: aspect, bufferShape: shape)
             let transformArray: [Double] = [
                 Double(xform.a), Double(xform.b), Double(xform.c), Double(xform.d)
             ]
@@ -202,13 +241,22 @@ final class OrientationPipelineTests: XCTestCase {
             )
             XCTAssertEqual(playW, expW, "case \(label): playback width")
             XCTAssertEqual(playH, expH, "case \(label): playback height")
-            // Final acceptance: every aspect plays at least square-or-taller
-            // (no aspect should produce sideways landscape playback).
-            XCTAssertGreaterThanOrEqual(playH, playW, "case \(label): plays portrait or square")
+            // Acceptance per intent:
+            if OrientationPolicy.wantsPortraitPlayback(for: aspect) {
+                XCTAssertGreaterThanOrEqual(
+                    playH, playW,
+                    "case \(label): portrait-intent must play portrait or square"
+                )
+            } else {
+                XCTAssertGreaterThanOrEqual(
+                    playW, playH,
+                    "case \(label): landscape-intent (16:9) must play landscape or square"
+                )
+            }
         }
     }
 
-    // MARK: - Self-test helpers (dogfood-pass-12 robustness additions)
+    // MARK: - Self-test helpers
 
     func testTransformsAreCloseIdentityVsIdentity() {
         let id: [Double] = [1, 0, 0, 1]
@@ -216,8 +264,6 @@ final class OrientationPipelineTests: XCTestCase {
     }
 
     func testTransformsAreCloseWithFloatingPointNoise() {
-        // CGAffineTransform(rotationAngle:) emits ~6e-17 in components that
-        // should be exactly 0. The tolerance must absorb that noise.
         let exact: [Double] = [0, -1, 1, 0]
         let noisy: [Double] = [6.123e-17, -1, 1, 6.123e-17]
         XCTAssertTrue(RecordingSelfTest.transformsAreClose(exact, noisy))
@@ -233,66 +279,98 @@ final class OrientationPipelineTests: XCTestCase {
         XCTAssertFalse(RecordingSelfTest.transformsAreClose([1, 0, 0], [1, 0, 0, 1]))
     }
 
-    func testExpectedPlaybackAspectRatio9x16() {
-        // 9:16 portrait → 0.5625
+    // MARK: - expectedPlaybackAspectRatio (buffer-shape-aware)
+
+    func testExpectedPlaybackAspectRatio9x16Portrait() {
+        // Portrait buffer 2160×3840 with portrait-intent → playback 2160×3840
+        // → ratio = 2160/3840 = 0.5625 (9:16)
         XCTAssertEqual(
-            RecordingSelfTest.expectedPlaybackAspectRatio(for: .ratio9x16),
+            RecordingSelfTest.expectedPlaybackAspectRatio(
+                for: .ratio9x16, bufferShape: .portrait,
+                bufferWidth: 2160, bufferHeight: 3840
+            ),
             9.0 / 16.0,
             accuracy: 1e-9
         )
     }
 
-    func testExpectedPlaybackAspectRatio4x3IsPortrait() {
-        // 4:3 landscape buffer rotated to portrait playback → 3:4 = 0.75
+    func testExpectedPlaybackAspectRatio4x3LandscapeBuffer() {
+        // Landscape 4032×3024 with portrait-intent rotates → playback 3024×4032
+        // → ratio = 3024/4032 = 0.75 (3:4)
         XCTAssertEqual(
-            RecordingSelfTest.expectedPlaybackAspectRatio(for: .ratio4x3),
+            RecordingSelfTest.expectedPlaybackAspectRatio(
+                for: .ratio4x3, bufferShape: .landscape,
+                bufferWidth: 4032, bufferHeight: 3024
+            ),
             3.0 / 4.0,
             accuracy: 1e-9
         )
     }
 
-    func testExpectedPlaybackAspectRatio16x9IsPortrait() {
-        // 16:9 landscape buffer rotated to portrait playback → 9:16 = 0.5625
+    func testExpectedPlaybackAspectRatio16x9LandscapeBufferLandscapePlayback() {
+        // 16:9 is landscape intent — landscape buffer plays landscape.
+        // ratio = 4032/2268 = 1.778 (16:9)
         XCTAssertEqual(
-            RecordingSelfTest.expectedPlaybackAspectRatio(for: .ratio16x9),
-            9.0 / 16.0,
-            accuracy: 1e-9
+            RecordingSelfTest.expectedPlaybackAspectRatio(
+                for: .ratio16x9, bufferShape: .landscape,
+                bufferWidth: 4032, bufferHeight: 2268
+            ),
+            16.0 / 9.0,
+            accuracy: 1e-3
         )
     }
 
-    func testExpectedPlaybackAspectRatio1x1IsSquare() {
+    func testExpectedPlaybackAspectRatio1x1Square() {
         XCTAssertEqual(
-            RecordingSelfTest.expectedPlaybackAspectRatio(for: .ratio1x1),
+            RecordingSelfTest.expectedPlaybackAspectRatio(
+                for: .ratio1x1, bufferShape: .square,
+                bufferWidth: 3024, bufferHeight: 3024
+            ),
             1.0,
             accuracy: 1e-9
         )
     }
 
-    func testExpectedPlaybackAspectRatioOpenGateIsZeroSentinel() {
-        // .openGate is device-dependent; the helper returns 0 to signal
-        // "skip the aspect-ratio check." The self-test consumer must
-        // recognize 0 as "don't assert."
+    func testExpectedPlaybackAspectRatioOpenGateLandscapeFallback() {
+        // iPhone 17 + iOS 26.3.1: openGate falls back to ratio4x3 → 4032×3024
+        // landscape → rotated to portrait playback 3024×4032 → 0.75
         XCTAssertEqual(
-            RecordingSelfTest.expectedPlaybackAspectRatio(for: .openGate),
-            0.0
+            RecordingSelfTest.expectedPlaybackAspectRatio(
+                for: .openGate, bufferShape: .landscape,
+                bufferWidth: 4032, bufferHeight: 3024
+            ),
+            3.0 / 4.0,
+            accuracy: 1e-9
         )
     }
 
+    func testExpectedPlaybackAspectRatioOpenGateSquareFuture() {
+        // Future iOS exposing ratio1x1 in supportedDynamicAspectRatios:
+        // openGate gets the true square readout → 1.0
+        XCTAssertEqual(
+            RecordingSelfTest.expectedPlaybackAspectRatio(
+                for: .openGate, bufferShape: .square,
+                bufferWidth: 3024, bufferHeight: 3024
+            ),
+            1.0,
+            accuracy: 1e-9
+        )
+    }
+
+    // MARK: - BrightnessGrid
+
     func testBrightnessGridVerticalGradientTopBright() {
         let g = BrightnessGrid(topLeft: 0.8, topRight: 0.7, bottomLeft: 0.2, bottomRight: 0.3, center: 0.5)
-        // Top average 0.75, bottom average 0.25, gradient = +0.5
         XCTAssertEqual(g.verticalGradient, 0.5, accuracy: 1e-9)
     }
 
     func testBrightnessGridVerticalGradientBottomBright() {
         let g = BrightnessGrid(topLeft: 0.2, topRight: 0.3, bottomLeft: 0.8, bottomRight: 0.7, center: 0.5)
-        // Top average 0.25, bottom average 0.75, gradient = -0.5
         XCTAssertEqual(g.verticalGradient, -0.5, accuracy: 1e-9)
     }
 
     func testBrightnessGridHorizontalGradientLeftBright() {
         let g = BrightnessGrid(topLeft: 0.8, topRight: 0.2, bottomLeft: 0.7, bottomRight: 0.3, center: 0.5)
-        // Left average 0.75, right average 0.25, gradient = +0.5
         XCTAssertEqual(g.horizontalGradient, 0.5, accuracy: 1e-9)
     }
 

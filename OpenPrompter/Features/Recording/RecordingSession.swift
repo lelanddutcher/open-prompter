@@ -582,35 +582,32 @@ final class RecordingSession {
 
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.expectsMediaDataInRealTime = true
-        // QA REVIEWER FOCUS: writer transform is now derived from the
-        // user's picker aspect via `OrientationPolicy.writerTransform(for:)`
-        // — the SAME table the preview-layer rotation reads. Previously
-        // both inferred orientation from buffer dims read at first-sample
-        // time, but on a cold launch that read returned the wrong shape
-        // (the iOS 26 `setDynamicAspectRatio` async-no-completion-handler
-        // race captured in CLAUDE.md hard-won lesson #6) and we picked
-        // the wrong rotation. Per-aspect lookup is deterministic.
+        // QA REVIEWER FOCUS: the writer transform now depends on BOTH the
+        // user's picker aspect AND the actual buffer shape (read directly
+        // from the sample buffer's format description, which is reliable
+        // by first-sample time — no `dynamicDimensions` race).
+        //
+        // Why both: on iOS 26.3.1 the iPhone 17 Pro Max front camera does
+        // NOT expose ratio1x1 in `supportedDynamicAspectRatios`, so when
+        // the user picks `openGate` the format selector falls back to
+        // ratio4x3, producing a 4032×3024 LANDSCAPE buffer. The pass-11
+        // policy returned identity for openGate (assuming a square buffer)
+        // and shipped landscape playback. The buffer-shape-aware policy
+        // detects "landscape buffer + portrait-intent aspect" and applies
+        // +π/2 to land portrait playback.
         //
         // Per Apple QA1744 ("Setting the orientation of video with AV
         // Foundation"), AVAssetWriter pipelines should leave the capture
         // connection at native rotation and let the writer's
-        // preferredTransform metadata drive playback orientation — which
-        // is exactly what this transform encodes.
-        //
-        // The data-output connection is left un-rotated at CameraStore.swift
-        // (`isVideoMirrored = false`, no `videoRotationAngle = 90`) so the
-        // user's picker aspect is the single source of truth for the file's
-        // orientation metadata.
-        //
-        // `writerWidth` / `writerHeight` (passed in from
-        // `lazilyStartWriterOnFirstSample`) still seed `AVVideoWidthKey` /
-        // `AVVideoHeightKey` from the actual sample buffer's format
-        // description — that read is correct because by the time the first
-        // sample arrives, the buffer dims are observable. Only the
-        // ROTATION decision moves to the policy table; encoded dims still
-        // come from the sample buffer.
+        // `preferredTransform` metadata drive playback orientation —
+        // which is exactly what this transform encodes.
+        let bufferShape = OrientationPolicy.BufferShape.from(
+            width: writerWidth,
+            height: writerHeight
+        ) ?? .landscape  // Defensive default — buffer dims should be valid here.
         videoInput.transform = OrientationPolicy.writerTransform(
-            for: OrientationPolicy.current
+            for: OrientationPolicy.current,
+            bufferShape: bufferShape
         )
 
         // Audio input — AAC, voiceover bitrate.

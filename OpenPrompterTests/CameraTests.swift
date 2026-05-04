@@ -451,8 +451,49 @@ final class CameraTests: XCTestCase {
         }
     }
 
-    /// Aspect-preference fallback: 3×4 wins when neither 1×1 nor 4×3 are
-    /// declared. Last resort before the algorithm's "first declared"
+    /// Cross-format per-preference search: when the LARGEST dynamic format
+    /// only declares ratio4x3 but a SMALLER format declares ratio1x1, the
+    /// algorithm must pick the smaller format because ratio1x1 is the
+    /// higher openGate preference. This is the dogfood-pass-13 fix — the
+    /// previous "pick largest, then choose preferred aspect within it"
+    /// missed cases where the preferred aspect lived on a smaller format.
+    func testOpenGatePicksSmaller1x1FormatOverLarger4x3Format() {
+        if #available(iOS 26.0, *) {
+            let descriptors: [CameraStore.FormatDescriptor] = [
+                // Larger format with only 4:3 / 16:9.
+                CameraStore.FormatDescriptor(
+                    width: 4032, height: 3024,
+                    frameRateRanges: [(1, 30)],
+                    supportsDynamicAspectRatios: true,
+                    dynamicAspectRatios: [
+                        AVCaptureDevice.AspectRatio.ratio4x3.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio16x9.rawValue
+                    ]
+                ),
+                // Smaller format that DOES declare 1×1.
+                CameraStore.FormatDescriptor(
+                    width: 3024, height: 3024,
+                    frameRateRanges: [(1, 30)],
+                    supportsDynamicAspectRatios: true,
+                    dynamicAspectRatios: [
+                        AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio4x3.rawValue
+                    ]
+                )
+            ]
+            let pick = CameraStore.pickOpenGateFormat(
+                descriptors: descriptors, preferredFPS: 30
+            )
+            XCTAssertEqual(pick?.index, 1,
+                           "Cross-format search must select the smaller 1×1-capable format.")
+            XCTAssertEqual(pick?.dynamicAspectRaw,
+                           AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
+                           "1×1 must win even when only declared on a smaller format.")
+        }
+    }
+
+    /// Aspect-preference fallback: 3×4 wins when neither 1×1, 4×3, nor 9×16
+    /// are declared. Last resort before the algorithm's "first declared"
     /// tiebreaker.
     func testOpenGateFallsBackTo3x4WhenSquareAndLandscapeUnavailable() {
         if #available(iOS 26.0, *) {

@@ -101,22 +101,68 @@ final class PreviewView: UIView {
         }
     }
 
+    /// The raw aspect string the camera store told iOS to apply via
+    /// `setDynamicAspectRatio` (e.g. "AVCaptureAspectRatio4x3"). When set,
+    /// the preview rotation derives buffer shape from this raw value
+    /// SYNCHRONOUSLY (no waiting for `dynamicDimensions` to publish). When
+    /// nil, the rotation falls back to the `dynamicDimensions` KVO read.
+    var requestedDynamicAspectRaw: String?
+
     /// Apply the preview-layer connection's `videoRotationAngle` based on
-    /// the user's current `RecordingAspect` (via `OrientationPolicy`). The
-    /// policy is the SINGLE SOURCE OF TRUTH for rotation choices — the
-    /// writer (`RecordingSession.makeWriter`) and this view both read it.
+    /// the user's current `RecordingAspect` AND the buffer shape iOS will
+    /// produce after the dynamic-aspect reshape.
     ///
-    /// QA REVIEWER FOCUS: do NOT re-introduce buffer-dim probing here. The
-    /// `device.dynamicDimensions` read races on cold launch (returns (0,0)
-    /// for ~33-100 ms after `setDynamicAspectRatio`) and `activeFormat`
-    /// returns format-nominal dims that lie about the reshape. The picker
-    /// pref is the right authority — it's synchronous, racing-free, and
-    /// matches the user's intent.
+    /// Buffer shape sources, in order:
+    ///   1. `requestedDynamicAspectRaw` — set synchronously by the camera
+    ///      store at session-config time. Race-free.
+    ///   2. `device.dynamicDimensions` — async-published by iOS 26+ via KVO.
+    ///      Returns 0×0 for ~33-100 ms post-reshape, but is authoritative
+    ///      once it lands (handles the no-aspect-applied legacy path too).
+    ///
+    /// QA REVIEWER FOCUS: do NOT re-introduce blanket "always rotate 90°"
+    /// — that worked when the front sensor was always landscape, but iOS 26
+    /// can produce portrait or square buffers depending on the requested
+    /// aspect, and rotating those 90° lands the preview sideways.
     func applyOrientationDependentRotation() {
         guard let connection = previewLayer.connection,
+              connection.isVideoRotationAngleSupported(0),
               connection.isVideoRotationAngleSupported(90) else { return }
+
+        let aspect = OrientationPolicy.current
+
+        // 1. Try the synchronous race-free path: the requested aspect raw.
+        var bufferShape: OrientationPolicy.BufferShape? =
+            OrientationPolicy.BufferShape.from(dynamicAspectRaw: requestedDynamicAspectRaw)
+
+        // 2. Fall back to dynamicDimensions (iOS 26+) or activeFormat dims.
+        if bufferShape == nil,
+           let device = (previewLayer.session?.inputs
+            .compactMap { $0 as? AVCaptureDeviceInput }
+            .first { $0.device.hasMediaType(.video) })?.device {
+            if #available(iOS 26.0, *) {
+                let dyn = device.dynamicDimensions
+                if let s = OrientationPolicy.BufferShape.from(
+                    width: Int(dyn.width),
+                    height: Int(dyn.height)
+                ) {
+                    bufferShape = s
+                }
+            }
+            if bufferShape == nil {
+                let af = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+                bufferShape = OrientationPolicy.BufferShape.from(
+                    width: Int(af.width),
+                    height: Int(af.height)
+                )
+            }
+        }
+
+        // 3. Defensive default — front sensors are historically landscape.
+        let shape = bufferShape ?? .landscape
+
         let targetAngle = OrientationPolicy.previewRotationAngle(
-            for: OrientationPolicy.current
+            for: aspect,
+            bufferShape: shape
         )
         if connection.videoRotationAngle != targetAngle {
             connection.videoRotationAngle = targetAngle
@@ -142,11 +188,16 @@ struct CameraPreview: UIViewRepresentable {
     /// True when the user has vertical mirror enabled. Mirroring on this
     /// axis is unusual but supported for periscope rigs.
     var verticalMirror: Bool = false
+    /// Raw aspect string the camera store told iOS to apply via
+    /// `setDynamicAspectRatio`. Drives synchronous race-free preview
+    /// rotation — see `PreviewView.applyOrientationDependentRotation`.
+    var requestedDynamicAspectRaw: String?
 
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
         view.previewLayer.session = session
         view.previewLayer.videoGravity = gravity
+        view.requestedDynamicAspectRaw = requestedDynamicAspectRaw
         view.backgroundColor = .black
         applyPreviewRotation(to: view)
         applyMirrorTransform(to: view)
@@ -162,6 +213,7 @@ struct CameraPreview: UIViewRepresentable {
         // behind-with-different-fill swap; the SwiftUI struct is rebuilt
         // but the same UIView is reused if SwiftUI deems identity stable).
         uiView.previewLayer.videoGravity = gravity
+        uiView.requestedDynamicAspectRaw = requestedDynamicAspectRaw
         applyPreviewRotation(to: uiView)
         applyMirrorTransform(to: uiView)
         // Re-bind the iOS 26 dynamic-dimensions observer in case the input

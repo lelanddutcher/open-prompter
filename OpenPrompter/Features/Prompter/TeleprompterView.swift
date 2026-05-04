@@ -124,7 +124,8 @@ struct TeleprompterView: View {
                     session: appState.cameraStore.session,
                     gravity: .resizeAspectFill,
                     horizontalMirror: vm.mirroredHorizontal,
-                    verticalMirror: vm.mirroredVertical
+                    verticalMirror: vm.mirroredVertical,
+                    requestedDynamicAspectRaw: appState.cameraStore.requestedDynamicAspectRaw
                 )
                 .id("camera-preview-behind")
                 .ignoresSafeArea(.all)

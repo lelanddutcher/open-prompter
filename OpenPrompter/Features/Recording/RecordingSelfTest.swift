@@ -127,6 +127,16 @@ struct CaptureContext: Codable {
     let recordingQuality: String
     /// Recording framerate preset at self-test time (`"fps24"` / `"fps30"` / `"fps60"`).
     let recordingFramerate: String
+    /// All `AVCaptureDevice.AspectRatio` raw strings the front camera's
+    /// formats actually declare via `supportedDynamicAspectRatios`. Diagnostic-
+    /// only — definitively answers "does this device expose ratio1x1?" so we
+    /// don't have to guess from buffer behaviour. Sorted, deduplicated.
+    let supportedDynamicAspectsRaw: [String]
+    /// Resolved aspect string the camera store applied via
+    /// `setDynamicAspectRatio` for the current session (may differ from
+    /// `pickerAspectRaw` when the user picked an aspect the device doesn't
+    /// declare and we fell back). Nil if no dynamic aspect was applied.
+    let appliedDynamicAspectRaw: String?
 }
 
 /// Per-aspect expectation vs. actual file dims/transform. Computed from
@@ -342,15 +352,30 @@ enum RecordingSelfTest {
         let context = currentCaptureContext()
 
         // Per-aspect expectation: what does OrientationPolicy say the
-        // transform SHOULD be for the captured picker aspect?
+        // transform SHOULD be for the captured picker aspect AND the buffer
+        // shape iOS actually produced? Buffer shape comes from the file's
+        // encoded dims (the record-time truth — by the time the file was
+        // written, the dynamic-aspect reshape had landed).
         let pickerAspect = RecordingAspect(rawValue: context.pickerAspectRaw) ?? .default
-        let expectedTransform = OrientationPolicy.writerTransform(for: pickerAspect)
+        let bufferShape = OrientationPolicy.BufferShape.from(
+            width: videoWidth,
+            height: videoHeight
+        ) ?? .landscape
+        let expectedTransform = OrientationPolicy.writerTransform(
+            for: pickerAspect,
+            bufferShape: bufferShape
+        )
         let expectedTransformArray: [Double] = [
             Double(expectedTransform.a), Double(expectedTransform.b),
             Double(expectedTransform.c), Double(expectedTransform.d)
         ]
         let transformMatches = transformsAreClose(preferredTransform, expectedTransformArray, tolerance: 0.01)
-        let expectedAspectRatio = expectedPlaybackAspectRatio(for: pickerAspect)
+        let expectedAspectRatio = expectedPlaybackAspectRatio(
+            for: pickerAspect,
+            bufferShape: bufferShape,
+            bufferWidth: videoWidth,
+            bufferHeight: videoHeight
+        )
         let actualPlaybackAspect = playbackH > 0 ? Double(playbackW) / Double(playbackH) : 0.0
         // Vacuous-true when expectedAspectRatio == 0 (the N/A sentinel for
         // .openGate, where playback aspect is device-dependent). This keeps
@@ -648,6 +673,19 @@ enum RecordingSelfTest {
     private static func currentCaptureContext() -> CaptureContext {
         let aspectRaw = Prefs.recordingAspect
         let aspect = RecordingAspect(rawValue: aspectRaw) ?? .default
+
+        // Diagnostic: probe the front camera's actual format list to see
+        // exactly which dynamic aspect ratios iOS exposes. Definitive
+        // answer to "does this device support ratio1x1?" — answers from
+        // assumptions / Apple docs / past behaviour can be wrong.
+        var supportedRaw: [String] = []
+        if #available(iOS 26.0, *), let device = CameraStore.selectFrontCameraDevice() {
+            let allDeclared = Set(
+                device.formats.flatMap { $0.supportedDynamicAspectRatios.map { $0.rawValue } }
+            )
+            supportedRaw = allDeclared.sorted()
+        }
+
         return CaptureContext(
             pickerAspectRaw: aspectRaw,
             pickerAspectName: aspect.displayName,
@@ -657,7 +695,13 @@ enum RecordingSelfTest {
             deviceModelName: UIDevice.current.model,
             iosVersion: UIDevice.current.systemVersion,
             recordingQuality: Prefs.recordingQuality,
-            recordingFramerate: Prefs.recordingFramerate
+            recordingFramerate: Prefs.recordingFramerate,
+            supportedDynamicAspectsRaw: supportedRaw,
+            appliedDynamicAspectRaw: nil  // Filled in by analyze() if a
+                                          // running camera store is available
+                                          // — but at self-test time the session
+                                          // may already be torn down. Best-
+                                          // effort.
         )
     }
 
@@ -716,22 +760,39 @@ enum RecordingSelfTest {
         return true
     }
 
-    /// Predict the playback aspect ratio (W/H) for a given `RecordingAspect`.
-    /// Used by the per-aspect assertion to flag "the file's playback aspect
-    /// doesn't match the picker." Returns 0.0 for unknown aspects.
-    nonisolated static func expectedPlaybackAspectRatio(for aspect: RecordingAspect) -> Double {
-        switch aspect {
-        case .ratio9x16: return 9.0 / 16.0   // 0.5625 portrait
-        case .ratio4x3:  return 3.0 / 4.0    // 0.75 portrait (4:3 rotated to portrait)
-        case .ratio16x9: return 9.0 / 16.0   // 0.5625 portrait (16:9 rotated to portrait)
-        case .ratio1x1:  return 1.0          // square
-        case .openGate:
-            // Device-dependent. iPhone 17 1×1 sensor → 1:1 square; older
-            // 4:3 sensors → 0.75 portrait. The assertion accepts either by
-            // returning 0.0 here (skip the check). Per-device override
-            // would live in OrientationPolicy.
-            return 0.0
+    /// Predict the playback aspect ratio (W/H) for a given (RecordingAspect,
+    /// BufferShape, bufferDims) tuple. Buffer-shape aware: for openGate the
+    /// expected playback depends on whether iOS produced a square buffer
+    /// (ratio1x1 declared) or a landscape buffer (ratio4x3 fallback). For
+    /// portrait-intent aspects we always return W/H of the rotated playback,
+    /// computed from the actual buffer dims so the prediction stays accurate
+    /// across hardware classes.
+    nonisolated static func expectedPlaybackAspectRatio(
+        for aspect: RecordingAspect,
+        bufferShape: OrientationPolicy.BufferShape,
+        bufferWidth: Int,
+        bufferHeight: Int
+    ) -> Double {
+        guard bufferWidth > 0, bufferHeight > 0 else { return 0 }
+        let wantsPortrait = OrientationPolicy.wantsPortraitPlayback(for: aspect)
+
+        // Compute playback dims by composing buffer with the policy's
+        // transform: a portrait-intent + landscape buffer rotates → playback
+        // (h, w). Otherwise playback = (w, h).
+        let pbW: Int
+        let pbH: Int
+        if wantsPortrait && bufferShape == .landscape {
+            pbW = bufferHeight
+            pbH = bufferWidth
+        } else if !wantsPortrait && bufferShape == .portrait {
+            pbW = bufferHeight
+            pbH = bufferWidth
+        } else {
+            pbW = bufferWidth
+            pbH = bufferHeight
         }
+        guard pbH > 0 else { return 0 }
+        return Double(pbW) / Double(pbH)
     }
 }
 

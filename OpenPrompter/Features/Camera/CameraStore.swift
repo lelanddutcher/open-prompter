@@ -864,49 +864,41 @@ final class CameraStore {
         let dynamic = candidates.filter { $0.descriptor.supportsDynamicAspectRatios }
 
         if userAspect == .openGate {
-            // 2a — open-gate: largest dynamic-aspect format with the
-            // historical 4×3-first preference (sensor-natural orientation).
-            if let best = dynamic.max(by: byPixelArea) {
-                // See aspect preference comments below — ratio1x1 first for
-                // true open-gate on iPhone 17's 1:1 sensor.
-                //
-                // For openGate, the intent is "full sensor readout." On iPhone 17
-                // the front sensor is 1×1 square, so ratio1x1 (3024×3024) IS
-                // the true open-gate buffer. Prefer it over ratio4x3, which
-                // crops the 1×1 sensor to 4:3 (giving 4032×3024 landscape) —
-                // NOT a full-sensor readout and NOT what openGate means.
-                //
-                // Confirmed by self-test: the prior ratio4x3-first order
-                // produced a 4032×3024 landscape buffer with identity writer
-                // transform → landscape playback. Wrong.
-                //
-                // Order:
-                //   1. .ratio1x1 — true full-sensor readout on iPhone 17 (1:1
-                //      sensor). 3024×3024 square. Identity transform → square
-                //      playback. This is the open gate.
-                //   2. .ratio4x3 — fallback for devices whose sensor is natively
-                //      4:3 (iPhone 16 and older). The aspect is still "open" for
-                //      that sensor. Writer transform for openGate is identity;
-                //      legacy 4:3 devices land landscape playback (known issue
-                //      tracked in OrientationPolicy TODO).
-                //   3. .ratio3x4 — last resort; will look rotated on most
-                //      devices until iOS reshapes the pixel content.
-                //   4. First declared — total fallback.
-                let supported = best.descriptor.dynamicAspectRatios
-                let oneByOne = "AVCaptureAspectRatio1x1"
-                let fourByThree = "AVCaptureAspectRatio4x3"
-                let threeByFour = "AVCaptureAspectRatio3x4"
-                let aspect: String?
-                if supported.contains(oneByOne) {
-                    aspect = oneByOne
-                } else if supported.contains(fourByThree) {
-                    aspect = fourByThree
-                } else if supported.contains(threeByFour) {
-                    aspect = threeByFour
-                } else {
-                    aspect = supported.first
+            // 2a — open-gate: search ACROSS dynamic-aspect-capable formats
+            // per preference (NOT just within the largest format). On iPhone
+            // 17 + iOS 26.3.1 the front camera's largest dynamic format may
+            // not declare ratio1x1 even when a smaller format does — the
+            // prior "pick largest, then choose aspect" order missed that.
+            //
+            // For each preference, find every format that declares it and
+            // pick the LARGEST among those. First non-empty match wins.
+            //
+            // Preference order:
+            //   1. .ratio1x1 — true full-sensor readout on iPhone 17 (1×1
+            //      sensor) → 3024×3024 square. Identity writer transform.
+            //   2. .ratio4x3 — landscape full-width readout. iPhone 17 reshapes
+            //      its 1×1 sensor to 4032×3024. Writer rotates to portrait
+            //      via the new buffer-shape-aware OrientationPolicy.
+            //   3. .ratio9x16 — portrait reshape (loses sensor area but keeps
+            //      portrait playback intent).
+            //   4. .ratio3x4 — last resort portrait container.
+            //   5. First declared on the largest dynamic format.
+            let openGatePreferences = [
+                "AVCaptureAspectRatio1x1",
+                "AVCaptureAspectRatio4x3",
+                "AVCaptureAspectRatio9x16",
+                "AVCaptureAspectRatio3x4"
+            ]
+            for pref in openGatePreferences {
+                let matching = dynamic.filter { $0.descriptor.dynamicAspectRatios.contains(pref) }
+                if let best = matching.max(by: byPixelArea) {
+                    return (best.index, pref)
                 }
-                return (best.index, aspect)
+            }
+            // Total fallback within dynamic: largest dynamic-aspect format,
+            // first declared aspect.
+            if let best = dynamic.max(by: byPixelArea) {
+                return (best.index, best.descriptor.dynamicAspectRatios.first)
             }
         } else {
             // 2b — specific user-aspect. Look for a format that declares it
