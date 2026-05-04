@@ -114,10 +114,16 @@ final class OrientationPipelineTests: XCTestCase {
         }
     }
 
-    func testWriterTransformLandscapeIntentLandscapeBufferIdentity() {
-        // ratio16x9 wants landscape playback; landscape buffer → identity.
+    func testWriterTransformLandscapeIntentLandscapeBufferIs180() {
+        // ratio16x9 wants landscape playback. After the pass-13e swap, iOS
+        // produces a landscape buffer for ratio16x9 user-pick (via iOS
+        // .ratio9x16 mapping) with head-at-bottom orientation. 180° flips
+        // to upright (was identity, user-confirmed upside-down).
         let t = OrientationPolicy.writerTransform(for: .ratio16x9, bufferShape: .landscape)
-        XCTAssertEqual(t, .identity)
+        XCTAssertEqual(t.a, -1, accuracy: 1e-6)
+        XCTAssertEqual(t.b, 0, accuracy: 1e-6)
+        XCTAssertEqual(t.c, 0, accuracy: 1e-6)
+        XCTAssertEqual(t.d, -1, accuracy: 1e-6)
     }
 
     func testWriterTransformLandscapeIntentPortraitBufferReverseRotates() {

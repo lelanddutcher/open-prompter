@@ -136,7 +136,14 @@ enum OrientationPolicy {
         if !wantsPortraitPlayback(for: aspect) {
             // 16:9 landscape intent
             switch bufferShape {
-            case .landscape, .square:
+            case .landscape:
+                // After the pass-13e 9x16↔16x9 swap, user-picked 16:9 maps
+                // to iOS .ratio9x16, which produces a landscape buffer with
+                // head-at-bottom orientation (different from 4:3's head-at-
+                // left). Identity playback was upside-down per user testing
+                // 2026-05-04 — 180° rotation flips it to upright.
+                return CGAffineTransform(rotationAngle: .pi)
+            case .square:
                 return .identity
             case .portrait:
                 // Edge case: iOS reshapes ratio16x9 to portrait-dim buffer.
