@@ -109,34 +109,39 @@ final class PreviewView: UIView {
     var requestedDynamicAspectRaw: String?
 
     /// Apply the preview-layer connection's `videoRotationAngle` based on
-    /// the user's current `RecordingAspect` AND the buffer shape iOS will
-    /// produce after the dynamic-aspect reshape.
+    /// the user's current `RecordingAspect` AND the actual buffer shape
+    /// iOS produces after the dynamic-aspect reshape.
     ///
-    /// Buffer shape sources, in order:
-    ///   1. `requestedDynamicAspectRaw` — set synchronously by the camera
-    ///      store at session-config time. Race-free.
-    ///   2. `device.dynamicDimensions` — async-published by iOS 26+ via KVO.
-    ///      Returns 0×0 for ~33-100 ms post-reshape, but is authoritative
-    ///      once it lands (handles the no-aspect-applied legacy path too).
+    /// Buffer shape priority:
+    ///   1. `device.dynamicDimensions` (iOS 26+) — authoritative once iOS
+    ///      publishes the reshape result. Read every time so KVO callbacks
+    ///      pick up the latest values.
+    ///   2. `device.activeFormat.formatDescription` dims — fallback that
+    ///      works pre-iOS-26 too.
+    ///   3. Defensive `.landscape` default — used during the brief cold-
+    ///      start race when both reads return 0×0. KVO will correct it
+    ///      within ~100ms.
     ///
-    /// QA REVIEWER FOCUS: do NOT re-introduce blanket "always rotate 90°"
-    /// — that worked when the front sensor was always landscape, but iOS 26
-    /// can produce portrait or square buffers depending on the requested
-    /// aspect, and rotating those 90° lands the preview sideways.
+    /// We DON'T use a label-based mapping (e.g., "AVCaptureAspectRatio9x16"
+    /// → portrait) anymore. iOS 26.3.1 doesn't necessarily reshape pixel
+    /// dimensions to match the aspect's label — the label describes the
+    /// PROPORTION, but the buffer's actual pixel orientation can differ.
+    /// User-confirmed (post-pass-13b) PiP rotation bugs for ratio9x16 and
+    /// ratio4x3 traced to the label inference being wrong on this OS.
+    ///
+    /// QA REVIEWER FOCUS: do NOT re-introduce label-based shape inference
+    /// in the cold-start fallback. Trusting actual dims (with a defensive
+    /// landscape default) is more conservative and self-corrects via KVO.
     func applyOrientationDependentRotation() {
         guard let connection = previewLayer.connection,
-              connection.isVideoRotationAngleSupported(0),
               connection.isVideoRotationAngleSupported(90) else { return }
 
         let aspect = OrientationPolicy.current
 
-        // 1. Try the synchronous race-free path: the requested aspect raw.
-        var bufferShape: OrientationPolicy.BufferShape? =
-            OrientationPolicy.BufferShape.from(dynamicAspectRaw: requestedDynamicAspectRaw)
+        var bufferShape: OrientationPolicy.BufferShape?
+        var sourceTag: String = "default"
 
-        // 2. Fall back to dynamicDimensions (iOS 26+) or activeFormat dims.
-        if bufferShape == nil,
-           let device = (previewLayer.session?.inputs
+        if let device = (previewLayer.session?.inputs
             .compactMap { $0 as? AVCaptureDeviceInput }
             .first { $0.device.hasMediaType(.video) })?.device {
             if #available(iOS 26.0, *) {
@@ -146,24 +151,33 @@ final class PreviewView: UIView {
                     height: Int(dyn.height)
                 ) {
                     bufferShape = s
+                    sourceTag = "dynamicDimensions(\(Int(dyn.width))x\(Int(dyn.height)))"
                 }
             }
             if bufferShape == nil {
                 let af = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
-                bufferShape = OrientationPolicy.BufferShape.from(
+                if let s = OrientationPolicy.BufferShape.from(
                     width: Int(af.width),
                     height: Int(af.height)
-                )
+                ) {
+                    bufferShape = s
+                    sourceTag = "activeFormat(\(Int(af.width))x\(Int(af.height)))"
+                }
             }
         }
 
-        // 3. Defensive default — front sensors are historically landscape.
         let shape = bufferShape ?? .landscape
-
         let targetAngle = OrientationPolicy.previewRotationAngle(
             for: aspect,
             bufferShape: shape
         )
+
+        #if DEBUG
+        behindLog.info(
+            "preview rotation: aspect=\(aspect.rawValue, privacy: .public) shape=\(shape.rawValue, privacy: .public) source=\(sourceTag, privacy: .public) angle=\(targetAngle, privacy: .public)"
+        )
+        #endif
+
         if connection.videoRotationAngle != targetAngle {
             connection.videoRotationAngle = targetAngle
         }
@@ -189,9 +203,18 @@ struct CameraPreview: UIViewRepresentable {
     /// axis is unusual but supported for periscope rigs.
     var verticalMirror: Bool = false
     /// Raw aspect string the camera store told iOS to apply via
-    /// `setDynamicAspectRatio`. Drives synchronous race-free preview
-    /// rotation — see `PreviewView.applyOrientationDependentRotation`.
+    /// `setDynamicAspectRatio`. Diagnostic only — the preview rotation
+    /// itself reads actual buffer dims (race-free once KVO publishes),
+    /// not this label. Kept on the struct so the value flows through
+    /// SwiftUI's diff and triggers `updateUIView` when the user changes
+    /// aspect mid-session.
     var requestedDynamicAspectRaw: String?
+    /// Tracking signal. Bumped by `CameraStore` when the session reconfigures.
+    /// Reads here cause SwiftUI to track the property; when it changes,
+    /// `updateUIView` fires, which re-runs `refreshDynamicDimensionsObservation`
+    /// (re-attaches KVO if the device input wasn't attached before) and
+    /// `applyOrientationDependentRotation` (re-reads `dynamicDimensions`).
+    var sessionConfigurationVersion: Int = 0
 
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()

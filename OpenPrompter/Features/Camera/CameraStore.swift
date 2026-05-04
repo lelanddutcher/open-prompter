@@ -71,6 +71,18 @@ final class CameraStore {
     /// preview view to know when to wire its layer up.
     private(set) var isSessionRunning: Bool = false
 
+    /// Bumped each time `configureInputsLocked` finishes (e.g., on first
+    /// non-`.off` start, or when the user swaps aspect/fps mid-session).
+    /// SwiftUI views that read this in their body get re-evaluated when
+    /// the session reconfigures, which re-runs `CameraPreview.updateUIView`
+    /// → `refreshDynamicDimensionsObservation` (re-attaches KVO if the
+    /// device input wasn't there before) → `applyOrientationDependentRotation`
+    /// (reads fresh `dynamicDimensions`). Without this signal the preview's
+    /// rotation could be stuck at a cold-start default if the KVO observer
+    /// was attached before the input was added — see the dogfood-pass-13c
+    /// PiP-rotation report.
+    private(set) var sessionConfigurationVersion: Int = 0
+
     /// The shared capture session. Exposed so `CameraPreview` can hand it
     /// to its underlying `AVCaptureVideoPreviewLayer`. Owned strictly by
     /// the store — callers must NOT add inputs/outputs of their own.
@@ -365,10 +377,12 @@ final class CameraStore {
                 // Only wrap a begin/commit when we actually need to attach
                 // an input. Empty brackets on a running session interrupt
                 // frame delivery on iOS 26 — the dogfood symptom.
+                var didReconfigure = false
                 if self.currentInput == nil {
                     self.session.beginConfiguration()
                     self.configureInputsLocked()
                     self.session.commitConfiguration()
+                    didReconfigure = true
                 }
                 if !self.session.isRunning {
                     self.session.startRunning()
@@ -381,6 +395,13 @@ final class CameraStore {
                 #endif
                 Task { @MainActor in
                     self.isSessionRunning = running
+                    if didReconfigure {
+                        // Bump the version so SwiftUI views that read it
+                        // re-evaluate, giving CameraPreview a chance to
+                        // re-attach its dynamicDimensions KVO and re-derive
+                        // the rotation now that the input is attached.
+                        self.sessionConfigurationVersion &+= 1
+                    }
                     continuation.resume()
                 }
             }

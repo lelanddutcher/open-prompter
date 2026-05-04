@@ -180,7 +180,8 @@ struct PipTile: View {
                 gravity: .resizeAspect,
                 horizontalMirror: horizontalMirror,
                 verticalMirror: verticalMirror,
-                requestedDynamicAspectRaw: store.requestedDynamicAspectRaw
+                requestedDynamicAspectRaw: store.requestedDynamicAspectRaw,
+                sessionConfigurationVersion: store.sessionConfigurationVersion
             )
             .id("camera-preview-pip")
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
