@@ -2,53 +2,68 @@
 //  OrientationPolicy.swift
 //  OpenPrompter
 //
-//  Per-buffer-shape rotation policy. The writer's `videoInput.transform` and
-//  the preview layer's `connection.videoRotationAngle` both derive from
-//  TWO inputs:
-//    1. The user's picker aspect (`Prefs.recordingAspect`) — drives playback
-//       INTENT (portrait for 9:16/4:3/1:1/openGate, landscape for 16:9).
-//    2. The actual buffer shape (portrait/landscape/square) — read from the
-//       sample buffer dims (writer side) or the requested dynamic-aspect raw
-//       (preview side, race-free).
+//  Sensor-orientation-aware rotation policy for the iPhone 17 selfie camera.
 //
-//  Why this rewrite (post-pass-12):
-//  The pass-11 policy was keyed only on aspect, but iOS 26.3.1 on iPhone 17
-//  Pro Max does NOT expose `ratio1x1` in the front camera's
-//  `supportedDynamicAspectRatios`. So when the user picks `openGate`, the
-//  format selector falls back to `ratio4x3`, producing a 4032×3024 LANDSCAPE
-//  buffer. The pass-11 policy returned identity for openGate (assuming a
-//  square buffer), giving landscape playback — confirmed by self-test
-//  2026-05-04T02:50Z.
+//  Hard-won lessons across passes 11-13d:
 //
-//  The fix: derive rotation from buffer shape AND aspect intent, not just
-//  aspect. A landscape buffer with portrait-intent aspect gets +π/2 rotation;
-//  a portrait or square buffer with portrait-intent gets identity. This
-//  handles ALL fallbacks correctly:
-//    - iPhone 17 + ratio1x1 declared (future iOS): square buffer, identity, square playback ✓
-//    - iPhone 17 + ratio4x3 fallback (current iOS 26.3.1): landscape buffer, +π/2, portrait playback ✓
-//    - Legacy 4:3 sensor + openGate (no dynamic aspect): landscape buffer, +π/2, portrait playback ✓
-//    - ratio9x16 (portrait reshape): portrait buffer, identity, portrait playback ✓
-//    - ratio16x9 (landscape intent): landscape buffer, identity, landscape playback ✓
+//  1. iPhone 17 selfie cam pixels are ALWAYS in sensor-natural orientation
+//     (head pointing left, when phone is held in portrait), regardless of the
+//     dynamic-aspect choice. Square-dim buffers (1:1, openGate 3840×3840) and
+//     landscape-dim buffers (4:3 4032×3024) BOTH need the same rotation
+//     correction to display upright. The buffer's W vs H proportion is NOT
+//     a reliable signal for "should we rotate."
+//
+//  2. The WRITER's `videoInput.transform` and the PREVIEW's
+//     `connection.videoRotationAngle` produce DIFFERENT visual results for
+//     the same numeric angle, because the preview connection auto-mirrors
+//     for selfie cam (`automaticallyAdjustsVideoMirroring=true` by default)
+//     while the data output connection is explicitly un-mirrored. The mirror
+//     inverts rotation handedness:
+//       - WRITER (un-mirrored) +π/2 = visually upright portrait
+//       - PREVIEW (mirrored) +π/2 = visually rotated 90° to the LEFT (i.e.,
+//         the SAME numeric rotation but in the opposite visual direction).
+//     To get a visually upright preview we use 270° (= -90° = the opposite
+//     handedness).
+//
+//  3. iOS 26.3.1 doesn't expose ratio1x1 in the front camera's
+//     `supportedDynamicAspectRatios`. The format selector falls back to
+//     ratio4x3, producing a 4032×3024 LANDSCAPE buffer for openGate's
+//     ratio1x1 preference (or a 3840×3840 square if a smaller format
+//     declared ratio1x1 — confirmed working post-pass-13a). Either way the
+//     pixels need the same rotation.
+//
+//  Empirical evidence (user reports on iPhone 17 Pro Max + iOS 26.3.1):
+//    - 4:3 landscape buffer + writer +π/2 = upright playback ✓
+//    - 1:1 / openGate square buffer + writer identity = ROTATED 90° LEFT ✗
+//      → Square buffer pixels are in the SAME sensor orientation as landscape
+//        buffer pixels; identity is wrong; +π/2 is right.
+//    - 4:3 PIP at 90° preview = ROTATED 90° LEFT ✗
+//      → Preview is auto-mirrored; 90° produces the opposite visual rotation
+//        from the writer's +π/2; need 270° instead.
+//    - 1:1 / openGate PIP at 0° preview = solid / fantastic ✓
+//      → For square buffers, layer auto-handles the orientation (or the
+//        rotation is visually invisible because square stays square). Keep 0°.
 //
 
 import AVFoundation
 import CoreGraphics
 import Foundation
 
-/// Per-buffer-shape rotation policy. New device class behaviours that
-/// produce unexpected buffer shapes still work as long as the shape is
-/// classified correctly — no per-device overrides needed.
+/// Sensor-orientation-aware rotation policy.
 enum OrientationPolicy {
 
     /// Classification of the camera buffer's pixel shape. Driven by
-    /// width-vs-height comparison.
+    /// width-vs-height comparison. Used by callers that still want to
+    /// distinguish landscape from square (e.g., for self-test diagnostics
+    /// and for the preview rotation, which needs different angles for
+    /// landscape vs square because of the layer's mirror-handling).
     enum BufferShape: String, Sendable, Equatable {
         case portrait     // height > width (e.g., 2160×3840)
         case landscape    // width > height (e.g., 4032×3024)
         case square       // width == height (e.g., 3024×3024)
 
-        /// Classify from explicit dims. Treats 0×0 (the iOS 26 cold-start
-        /// race) as `.unknown`-equivalent — caller decides the fallback.
+        /// Classify from explicit dims. Returns nil for 0×0 (cold-start
+        /// race) so the caller can apply a defensive default.
         static func from(width: Int, height: Int) -> BufferShape? {
             guard width > 0, height > 0 else { return nil }
             if width == height { return .square }
@@ -56,14 +71,11 @@ enum OrientationPolicy {
         }
 
         /// Map an `AVCaptureDevice.AspectRatio` raw string to the buffer
-        /// shape iOS produces when that aspect is applied. Synchronous and
-        /// race-free: we know what we asked for, so we know what shape to
-        /// expect — no waiting for `dynamicDimensions` to publish.
-        ///
-        /// QA REVIEWER FOCUS: this mapping is the basis for race-free
-        /// preview rotation on cold start. If iOS ever changes how it
-        /// reshapes for a given aspect (Apple has done this between point
-        /// releases), this is where to update.
+        /// shape iOS produces when that aspect is applied. Best-effort
+        /// only — used for cold-start fallback when actual dims aren't
+        /// available yet. iOS 26.3.1's actual reshape behaviour may differ
+        /// from these labels, in which case the KVO on `dynamicDimensions`
+        /// corrects within ~100ms.
         static func from(dynamicAspectRaw: String?) -> BufferShape? {
             guard let raw = dynamicAspectRaw else { return nil }
             switch raw {
@@ -81,11 +93,8 @@ enum OrientationPolicy {
         }
     }
 
-    /// True for aspects whose intended PLAYBACK is portrait (taller than
-    /// wide). 9:16, 4:3, 1:1, and openGate are all portrait-intent — the
-    /// user holds the phone in portrait and expects portrait video out
-    /// (1:1 is "portrait-compatible" in the sense that it doesn't need
-    /// rotation either way). 16:9 is the only landscape-intent aspect.
+    /// True for aspects whose intended PLAYBACK is portrait. Everything
+    /// except 16:9 is portrait-intent on this app.
     static func wantsPortraitPlayback(for aspect: RecordingAspect) -> Bool {
         switch aspect {
         case .ratio9x16, .ratio4x3, .ratio1x1, .openGate:
@@ -95,19 +104,31 @@ enum OrientationPolicy {
         }
     }
 
-    /// Writer's `videoInput.transform` for a (aspect, bufferShape) pair.
+    /// Writer's `videoInput.transform`.
     ///
-    /// Logic:
-    ///   - 16:9 landscape-intent + landscape buffer → identity (already correct)
-    ///   - 16:9 landscape-intent + portrait buffer  → -π/2 (turn portrait sideways into landscape — edge case)
-    ///   - portrait-intent + landscape buffer       → +π/2 (rotate landscape to portrait)
-    ///   - portrait-intent + portrait/square buffer → identity (already correct)
+    /// The iPhone 17 selfie cam delivers pixels in TWO possible orientations
+    /// depending on the buffer's dim shape:
+    ///   - LANDSCAPE-DIM buffers (e.g., 4032×3024 for ratio4x3): pixels are
+    ///     in sensor-natural orientation (rotated 90° from device-upright).
+    ///     Need +π/2 to land upright portrait playback.
+    ///   - SQUARE-DIM buffers (3024×3024 for ratio1x1, 3840×3840 for openGate):
+    ///     pixels are ALSO sensor-natural — iOS doesn't rotate them because
+    ///     square dims don't have a "portrait vs landscape" distinction to
+    ///     trigger reshape. Same +π/2 rotation needed.
+    ///   - PORTRAIT-DIM buffers (e.g., 2160×3840 for ratio9x16 if iOS
+    ///     reshapes): pixels are device-upright because iOS physically rotated
+    ///     them to fit the portrait container. Identity transform suffices.
     ///
-    /// QA REVIEWER FOCUS: the +π/2 sign was empirically derived in dogfood
-    /// pass 11 from user reports of -π/2 producing upside-down playback.
-    /// The combination "landscape buffer + +π/2 transform" produces upright
-    /// portrait playback on iPhone 17 + iOS 26.x front camera (selfie-mounted).
-    /// If a future device requires a different sign, override here.
+    /// User-confirmed empirical evidence (iPhone 17 Pro Max + iOS 26.3.1):
+    ///   - 4:3 (landscape buffer) + π/2 → upright ✓
+    ///   - 1:1 / openGate (square buffer) + identity → ROTATED 90° LEFT ✗
+    ///     (the pass-13b bug — square was grouped with portrait, both identity)
+    ///   - 9:16 if iOS produces portrait buffer + identity → expected upright
+    ///     (untested — depends on iOS reshape behaviour for ratio9x16)
+    ///
+    /// QA REVIEWER FOCUS: SQUARE buffers belong with LANDSCAPE in the
+    /// portrait-intent branch (both need +π/2), NOT with portrait. This is
+    /// the post-pass-13b correction.
     static func writerTransform(
         for aspect: RecordingAspect,
         bufferShape: BufferShape
@@ -118,22 +139,36 @@ enum OrientationPolicy {
             case .landscape, .square:
                 return .identity
             case .portrait:
+                // Edge case: iOS reshapes ratio16x9 to portrait-dim buffer.
+                // -π/2 rotates portrait container into landscape playback.
                 return CGAffineTransform(rotationAngle: -.pi / 2)
             }
         }
-        // Portrait intent (everything except 16:9)
+        // Portrait intent
         switch bufferShape {
-        case .landscape:
+        case .landscape, .square:
+            // Sensor-natural pixels in non-portrait container — rotate +π/2
+            // to land upright portrait playback.
             return CGAffineTransform(rotationAngle: .pi / 2)
-        case .portrait, .square:
+        case .portrait:
+            // iOS reshape rotated pixels into portrait container; identity
+            // ships device-upright playback as-encoded.
             return .identity
         }
     }
 
-    /// Preview-layer connection's `videoRotationAngle` for a (aspect,
-    /// bufferShape) pair. AVCaptureConnection accepts 0/90/180/270;
-    /// negative values aren't supported, so 270 is used for "rotate the
-    /// other way."
+    /// Preview-layer connection's `videoRotationAngle`. Different from the
+    /// writer because the preview connection is auto-mirrored for selfie
+    /// cam, which inverts rotation handedness. The same content that needs
+    /// +π/2 in the writer (un-mirrored) needs 270° in the preview (mirrored)
+    /// to reach the same visual orientation.
+    ///
+    /// We DO branch on buffer shape here, because user testing showed:
+    ///   - landscape buffer + 90° = visually rotated 90° left (wrong)
+    ///   - square buffer + 0° = visually upright (the layer appears to
+    ///     auto-handle orientation, or the square stays visually square
+    ///     enough that the rotation isn't apparent)
+    /// So square keeps 0°, landscape uses 270°.
     static func previewRotationAngle(
         for aspect: RecordingAspect,
         bufferShape: BufferShape
@@ -144,13 +179,13 @@ enum OrientationPolicy {
             case .landscape, .square:
                 return 0
             case .portrait:
-                return 270
+                return 90  // turn portrait into landscape (mirrored handedness)
             }
         }
         // Portrait intent
         switch bufferShape {
         case .landscape:
-            return 90
+            return 270  // mirrored counterpart of writer's +π/2 (90° CCW)
         case .portrait, .square:
             return 0
         }

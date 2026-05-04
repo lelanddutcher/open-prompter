@@ -90,20 +90,27 @@ final class OrientationPipelineTests: XCTestCase {
     }
 
     func testWriterTransformPortraitIntentPortraitBufferIdentity() {
-        // ratio9x16 produces a 2160×3840 portrait buffer; identity is correct
-        // (rotating would sideways-land it — the dogfood-pass-10 symptom).
+        // ratio9x16 produces a 2160×3840 portrait buffer when iOS reshapes
+        // pixel content; identity ships device-upright playback (iOS already
+        // rotated pixels during the reshape).
         for aspect in [RecordingAspect.ratio9x16, .ratio4x3, .openGate] {
             let t = OrientationPolicy.writerTransform(for: aspect, bufferShape: .portrait)
             XCTAssertEqual(t, .identity, "\(aspect) on portrait buffer")
         }
     }
 
-    func testWriterTransformPortraitIntentSquareBufferIdentity() {
-        // ratio1x1 (or openGate when ratio1x1 is declared) → square buffer.
-        // Identity is correct — rotation is a visual no-op for square.
+    func testWriterTransformPortraitIntentSquareBufferRotates() {
+        // SQUARE buffers (1:1, openGate 3840×3840) come out with sensor-
+        // natural pixel orientation — iOS doesn't rotate them during reshape
+        // because square dims have no portrait/landscape distinction. Need
+        // +π/2 to land upright playback. This is the post-pass-13b fix
+        // (was identity; user-confirmed wrong on iPhone 17 Pro Max iOS 26.3.1).
         for aspect in [RecordingAspect.ratio1x1, .openGate] {
             let t = OrientationPolicy.writerTransform(for: aspect, bufferShape: .square)
-            XCTAssertEqual(t, .identity, "\(aspect) on square buffer")
+            XCTAssertEqual(t.a, 0, accuracy: 1e-6, "\(aspect) on square: a")
+            XCTAssertEqual(t.b, 1, accuracy: 1e-6, "\(aspect) on square: b")
+            XCTAssertEqual(t.c, -1, accuracy: 1e-6, "\(aspect) on square: c")
+            XCTAssertEqual(t.d, 0, accuracy: 1e-6, "\(aspect) on square: d")
         }
     }
 
@@ -124,18 +131,30 @@ final class OrientationPipelineTests: XCTestCase {
     }
 
     // MARK: - previewRotationAngle (aspect × bufferShape)
+    //
+    // Preview connection is auto-mirrored for selfie cam, which inverts
+    // rotation handedness compared to the unmirrored writer connection.
+    // The writer's +π/2 (CCW) for portrait-intent + landscape needs the
+    // OPPOSITE handedness (270° = CW direction) on the mirrored preview
+    // to land at the same visual orientation. User-confirmed: 90° on the
+    // 4:3 PIP showed content rotated 90° to the left; 270° flips the
+    // visual direction to upright.
 
-    func testPreviewAnglePortraitIntentLandscapeBufferIs90() {
+    func testPreviewAnglePortraitIntentLandscapeBufferIs270() {
+        // post-pass-13c fix: was 90, but mirrored preview needs the opposite
+        // handedness (270°) to match writer's +π/2 visually upright.
         for aspect in [RecordingAspect.openGate, .ratio4x3, .ratio9x16] {
             XCTAssertEqual(
                 OrientationPolicy.previewRotationAngle(for: aspect, bufferShape: .landscape),
-                90,
-                "\(aspect): landscape buffer → 90°"
+                270,
+                "\(aspect): landscape buffer → 270° (mirrored counterpart of writer +π/2)"
             )
         }
     }
 
     func testPreviewAnglePortraitIntentPortraitOrSquareBufferIs0() {
+        // Square + 0° was user-confirmed to look right on 1:1 / openGate.
+        // Portrait + 0° matches the writer's identity for portrait buffers.
         for aspect in [RecordingAspect.ratio9x16, .ratio1x1, .openGate] {
             XCTAssertEqual(
                 OrientationPolicy.previewRotationAngle(for: aspect, bufferShape: .portrait),
@@ -157,12 +176,12 @@ final class OrientationPipelineTests: XCTestCase {
         )
     }
 
-    func testPreviewAngleLandscapeIntentPortraitBufferIs270() {
-        // -π/2 on the connection isn't supported (it accepts 0/90/180/270);
-        // 270 is the equivalent of -90.
+    func testPreviewAngleLandscapeIntentPortraitBufferIs90() {
+        // 16:9 + portrait edge case: writer applies -π/2 to land landscape
+        // playback. Mirrored preview needs opposite (90°).
         XCTAssertEqual(
             OrientationPolicy.previewRotationAngle(for: .ratio16x9, bufferShape: .portrait),
-            270
+            90
         )
     }
 
