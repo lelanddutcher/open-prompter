@@ -157,38 +157,29 @@ enum OrientationPolicy {
         }
     }
 
-    /// Preview-layer connection's `videoRotationAngle`. Different from the
-    /// writer because the preview connection is auto-mirrored for selfie
-    /// cam, which inverts rotation handedness. The same content that needs
-    /// +π/2 in the writer (un-mirrored) needs 270° in the preview (mirrored)
-    /// to reach the same visual orientation.
+    /// Preview-layer connection's `videoRotationAngle`. Always 0°.
     ///
-    /// We DO branch on buffer shape here, because user testing showed:
-    ///   - landscape buffer + 90° = visually rotated 90° left (wrong)
-    ///   - square buffer + 0° = visually upright (the layer appears to
-    ///     auto-handle orientation, or the square stays visually square
-    ///     enough that the rotation isn't apparent)
-    /// So square keeps 0°, landscape uses 270°.
+    /// User testing on iPhone 17 Pro Max + iOS 26.3.1 (pass-13e):
+    ///   - 90° on landscape buffer → "rotated 90° to the left" (wrong)
+    ///   - 270° on landscape buffer → "rotated 90° to the right" (also wrong)
+    ///   - 0° on square buffer → upright (correct)
+    /// Both 90° and 270° produce wrong rotation in opposite directions for
+    /// landscape buffers, while 0° is confirmed correct for square. The
+    /// AVCaptureVideoPreviewLayer evidently applies its own device-orientation-
+    /// aware rotation when `videoRotationAngle == 0`, and any non-zero value
+    /// stacks ON TOP of that auto-rotation, breaking it.
+    ///
+    /// QA REVIEWER FOCUS: do NOT re-introduce buffer-shape branching here.
+    /// 0° lets AVCaptureVideoPreviewLayer's built-in orientation handling do
+    /// the right thing. The bufferShape parameter is kept for API symmetry
+    /// with `writerTransform` and for future test-only use, but is unused.
     static func previewRotationAngle(
         for aspect: RecordingAspect,
         bufferShape: BufferShape
     ) -> CGFloat {
-        if !wantsPortraitPlayback(for: aspect) {
-            // 16:9 landscape intent
-            switch bufferShape {
-            case .landscape, .square:
-                return 0
-            case .portrait:
-                return 90  // turn portrait into landscape (mirrored handedness)
-            }
-        }
-        // Portrait intent
-        switch bufferShape {
-        case .landscape:
-            return 270  // mirrored counterpart of writer's +π/2 (90° CCW)
-        case .portrait, .square:
-            return 0
-        }
+        _ = aspect       // kept for API symmetry / future per-aspect overrides
+        _ = bufferShape  // kept for API symmetry / future per-shape overrides
+        return 0
     }
 
     /// Resolve the user's current aspect from `Prefs`. Centralized so

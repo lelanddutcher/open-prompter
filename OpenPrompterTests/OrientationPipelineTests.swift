@@ -130,59 +130,31 @@ final class OrientationPipelineTests: XCTestCase {
         XCTAssertEqual(t.d, 0, accuracy: 1e-6)
     }
 
-    // MARK: - previewRotationAngle (aspect × bufferShape)
+    // MARK: - previewRotationAngle (always 0°)
     //
-    // Preview connection is auto-mirrored for selfie cam, which inverts
-    // rotation handedness compared to the unmirrored writer connection.
-    // The writer's +π/2 (CCW) for portrait-intent + landscape needs the
-    // OPPOSITE handedness (270° = CW direction) on the mirrored preview
-    // to land at the same visual orientation. User-confirmed: 90° on the
-    // 4:3 PIP showed content rotated 90° to the left; 270° flips the
-    // visual direction to upright.
+    // Post-pass-13e: AVCaptureVideoPreviewLayer applies its own device-
+    // orientation-aware rotation when videoRotationAngle == 0. Setting any
+    // non-zero value stacks on top of that auto-rotation, breaking it.
+    // User testing on iPhone 17 Pro Max + iOS 26.3.1 confirmed:
+    //   - 90° on landscape: "rotated 90° to the left" (wrong)
+    //   - 270° on landscape: "rotated 90° to the right" (also wrong)
+    //   - 0° on square: correct
+    // Hence 0° for all (aspect × bufferShape) pairs.
 
-    func testPreviewAnglePortraitIntentLandscapeBufferIs270() {
-        // post-pass-13c fix: was 90, but mirrored preview needs the opposite
-        // handedness (270°) to match writer's +π/2 visually upright.
-        for aspect in [RecordingAspect.openGate, .ratio4x3, .ratio9x16] {
-            XCTAssertEqual(
-                OrientationPolicy.previewRotationAngle(for: aspect, bufferShape: .landscape),
-                270,
-                "\(aspect): landscape buffer → 270° (mirrored counterpart of writer +π/2)"
-            )
+    func testPreviewAngleAlwaysZero() {
+        let aspects: [RecordingAspect] = [
+            .ratio9x16, .ratio4x3, .ratio16x9, .ratio1x1, .openGate
+        ]
+        let shapes: [OrientationPolicy.BufferShape] = [.landscape, .portrait, .square]
+        for aspect in aspects {
+            for shape in shapes {
+                XCTAssertEqual(
+                    OrientationPolicy.previewRotationAngle(for: aspect, bufferShape: shape),
+                    0,
+                    "\(aspect) × \(shape) must be 0° — let AVCaptureVideoPreviewLayer auto-handle"
+                )
+            }
         }
-    }
-
-    func testPreviewAnglePortraitIntentPortraitOrSquareBufferIs0() {
-        // Square + 0° was user-confirmed to look right on 1:1 / openGate.
-        // Portrait + 0° matches the writer's identity for portrait buffers.
-        for aspect in [RecordingAspect.ratio9x16, .ratio1x1, .openGate] {
-            XCTAssertEqual(
-                OrientationPolicy.previewRotationAngle(for: aspect, bufferShape: .portrait),
-                0,
-                "\(aspect): portrait buffer → 0°"
-            )
-            XCTAssertEqual(
-                OrientationPolicy.previewRotationAngle(for: aspect, bufferShape: .square),
-                0,
-                "\(aspect): square buffer → 0°"
-            )
-        }
-    }
-
-    func testPreviewAngleLandscapeIntentLandscapeBufferIs0() {
-        XCTAssertEqual(
-            OrientationPolicy.previewRotationAngle(for: .ratio16x9, bufferShape: .landscape),
-            0
-        )
-    }
-
-    func testPreviewAngleLandscapeIntentPortraitBufferIs90() {
-        // 16:9 + portrait edge case: writer applies -π/2 to land landscape
-        // playback. Mirrored preview needs opposite (90°).
-        XCTAssertEqual(
-            OrientationPolicy.previewRotationAngle(for: .ratio16x9, bufferShape: .portrait),
-            90
-        )
     }
 
     // MARK: - RecordingSelfTest.playbackDimensions (regression)

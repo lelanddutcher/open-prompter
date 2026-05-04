@@ -925,12 +925,15 @@ final class CameraStore {
             // 2b — specific user-aspect. Look for a format that declares it
             // and pick the largest. Raw string mapping matches Apple's
             // `AVCaptureDevice.AspectRatio` rawValue strings.
+            //
+            // SWAPPED 9x16↔16x9 (post-pass-13e): mirrors the swap in
+            // `RecordingAspect.avAspectRatio` — see that doc comment.
             let requestedRaw: String
             switch userAspect {
-            case .ratio9x16: requestedRaw = "AVCaptureAspectRatio9x16"
+            case .ratio9x16: requestedRaw = "AVCaptureAspectRatio16x9"  // SWAPPED
             case .ratio1x1:  requestedRaw = "AVCaptureAspectRatio1x1"
             case .ratio4x3:  requestedRaw = "AVCaptureAspectRatio4x3"
-            case .ratio16x9: requestedRaw = "AVCaptureAspectRatio16x9"
+            case .ratio16x9: requestedRaw = "AVCaptureAspectRatio9x16"  // SWAPPED
             case .openGate:  requestedRaw = "" // unreachable
             }
             let matching = dynamic.filter { $0.descriptor.dynamicAspectRatios.contains(requestedRaw) }

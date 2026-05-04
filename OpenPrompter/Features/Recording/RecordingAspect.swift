@@ -75,14 +75,23 @@ enum RecordingAspect: String, CaseIterable, Codable, Hashable, Sendable {
     /// Maps to the iOS 26 `AVCaptureDevice.AspectRatio` enum. Returns nil
     /// for `.openGate` because the format selector handles that case
     /// separately (no `setDynamicAspectRatio` call — keep the native
-    /// largest-area readout). Returns nil on non-mappable cases too.
+    /// largest-area readout).
+    ///
+    /// SWAPPED 9x16↔16x9 (post-pass-13e): user testing on iPhone 17 Pro Max +
+    /// iOS 26.3.1 confirmed iOS's reshape behaviour is INVERTED from the
+    /// label proportions for the front camera:
+    ///   - `AVCaptureAspectRatio9x16` (iOS) → produces a 16:9 LANDSCAPE buffer
+    ///   - `AVCaptureAspectRatio16x9` (iOS) → produces a 9:16 PORTRAIT buffer
+    /// To make our user-facing `.ratio9x16` (labelled "9:16 vertical") actually
+    /// produce vertical output, we request iOS's `.ratio16x9`, and vice versa.
+    /// The pure-square `.ratio1x1` and `.ratio4x3` aren't affected.
     @available(iOS 26.0, *)
     var avAspectRatio: AVCaptureDevice.AspectRatio? {
         switch self {
-        case .ratio9x16: return .ratio9x16
+        case .ratio9x16: return .ratio16x9   // SWAPPED: vertical intent → request iOS 16x9
         case .ratio1x1:  return .ratio1x1
         case .ratio4x3:  return .ratio4x3
-        case .ratio16x9: return .ratio16x9
+        case .ratio16x9: return .ratio9x16   // SWAPPED: horizontal intent → request iOS 9x16
         case .openGate:  return nil
         }
     }
