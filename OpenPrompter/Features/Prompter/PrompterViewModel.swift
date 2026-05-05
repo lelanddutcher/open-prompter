@@ -57,6 +57,13 @@ final class PrompterViewModel {
     var contentHeight: CGFloat = 0
     var viewportHeight: CGFloat = 0
 
+    /// Voice-tracking scroll target. Set on each successful alignment
+    /// match; the per-frame ticker in `TeleprompterView` lerps the
+    /// scroller toward this value. `nil` when no match is pending,
+    /// which short-circuits the ticker to a no-op. Cleared when voice
+    /// tracking stops.
+    var voiceTargetOffset: CGFloat?
+
     /// Scroll offset captured at the moment the user pressed play on the
     /// current take. Used by `jumpToStartOfTake()` (Feature 7's novel
     /// `jumpToStart` remote action) to return the scroll position to the

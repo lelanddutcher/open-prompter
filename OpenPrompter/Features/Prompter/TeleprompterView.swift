@@ -139,16 +139,13 @@ struct TeleprompterView: View {
                 .animation(.easeInOut(duration: Theme.mirrorAnim), value: vm.mirroredHorizontal)
                 .animation(.easeInOut(duration: Theme.mirrorAnim), value: vm.mirroredVertical)
 
-            // Auto-scroll driver — invisible, just ticks the AutoScroller.
-            TimelineView(.animation(minimumInterval: nil, paused: !vm.isPlaying)) { context in
+            // Auto-scroll + voice-lerp driver — invisible, just ticks
+            // the AutoScroller every frame. Active when EITHER play is
+            // running OR voice tracking has a pending lerp target.
+            TimelineView(.animation(minimumInterval: nil, paused: scrollTickerPaused)) { context in
                 Color.clear.frame(width: 1, height: 1)
                     .onChange(of: context.date) { _, newDate in
-                        guard vm.isPlaying else { return }
-                        let delta = vm.scroller.advance(now: newDate, speed: vm.speed)
-                        vm.scroller.apply(delta: delta, maxOffset: vm.maxScrollOffset)
-                        if vm.scroller.didReachEnd {
-                            vm.isPlaying = false
-                        }
+                        handleScrollTick(now: newDate)
                     }
             }
 
@@ -608,7 +605,8 @@ struct TeleprompterView: View {
             VoiceTrackingChrome(
                 tracker: appState.voiceTracker,
                 readingLineFraction: $voiceReadingLineFraction,
-                onCursorChange: handleVoiceCursorChange
+                onCursorChange: handleVoiceCursorChange,
+                layoutRecomputeKey: vm.fontSize
             )
         )
     }
@@ -1172,22 +1170,48 @@ struct TeleprompterView: View {
         }
     }
 
-    /// Translate a cursor advance into a scroll offset and seek there.
-    /// Approximate (uniform character density) — good enough for a
-    /// first cut while we settle the UX.
+    /// Translate a cursor advance into a target scroll offset. The
+    /// per-frame `handleScrollTick` then lerps the actual scroll
+    /// toward this target — gives a smooth glide instead of the jumpy
+    /// teleport-on-each-match feel of a direct seek.
     fileprivate func handleVoiceCursorChange() {
         guard appState.voiceTracker.isActive,
               let fraction = appState.voiceTracker.cursorScriptFraction,
               vm.contentHeight > 0 else { return }
-        // The matched word should land at `voiceReadingLineFraction` of
-        // the way down the viewport. Default 0.2 → near the top, which
-        // tracks well with selfie-camera eye contact (user looks at the
-        // lens; the next-to-read word sits just below). User can drag
-        // the on-screen indicator to relocate.
         let lineFromTop = vm.viewportHeight * CGFloat(voiceReadingLineFraction)
         let target = CGFloat(fraction) * vm.contentHeight - lineFromTop
-        withAnimation(.easeOut(duration: 0.4)) {
-            vm.scroller.seek(to: max(0, target), maxOffset: vm.maxScrollOffset)
+        vm.voiceTargetOffset = max(0, target)
+    }
+
+    /// Per-frame ticker — handles BOTH play auto-scroll AND voice-
+    /// tracking lerp-toward-target. Called from the TimelineView in
+    /// `body`.
+    private func handleScrollTick(now: Date) {
+        if vm.isPlaying {
+            let delta = vm.scroller.advance(now: now, speed: vm.speed)
+            vm.scroller.apply(delta: delta, maxOffset: vm.maxScrollOffset)
+            if vm.scroller.didReachEnd {
+                vm.isPlaying = false
+            }
         }
+        if appState.voiceTracker.isActive,
+           let target = vm.voiceTargetOffset {
+            // Alpha 0.08 — smooth glide; settles in ~30 frames at 60Hz.
+            // Could be made user-adjustable via a sensitivity slider in
+            // a later pass (V2 Design 03 §"Sensitivity / smoothness").
+            vm.scroller.lerpToward(
+                target: target,
+                alpha: 0.08,
+                maxOffset: vm.maxScrollOffset
+            )
+        }
+    }
+
+    /// Pause the scroll ticker only when nothing wants it. Voice
+    /// tracking with a pending target keeps it alive.
+    private var scrollTickerPaused: Bool {
+        if vm.isPlaying { return false }
+        if appState.voiceTracker.isActive && vm.voiceTargetOffset != nil { return false }
+        return true
     }
 }

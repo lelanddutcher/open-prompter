@@ -47,6 +47,11 @@ struct VoiceTrackingChrome: ViewModifier {
     let tracker: VoiceTracker
     @Binding var readingLineFraction: Double
     let onCursorChange: () -> Void
+    /// Layout-change signal — pass `vm.fontSize` (or any other value
+    /// that mutates `contentHeight`). When it changes mid-tracking the
+    /// chrome calls `onCursorChange` to recompute the lerp target so
+    /// the user doesn't have to toggle voice off/on after a font bump.
+    let layoutRecomputeKey: Double
 
     func body(content: Content) -> some View {
         content
@@ -57,6 +62,9 @@ struct VoiceTrackingChrome: ViewModifier {
                 )
             }
             .onChange(of: tracker.lastMatch?.cursorIndex) { _, _ in
+                onCursorChange()
+            }
+            .onChange(of: layoutRecomputeKey) { _, _ in
                 onCursorChange()
             }
     }
@@ -183,7 +191,11 @@ private struct VoiceReadingLineIndicatorView: View {
             DragGesture()
                 .onChanged { value in
                     let height = geo.size.height
-                    let newY = max(40, min(height - 40, value.location.y))
+                    // 20pt clamp at top/bottom — tighter than the
+                    // earlier 40pt so the user can push the line very
+                    // close to the screen edge for selfie-cam eye
+                    // contact (the previous limit hit them too soon).
+                    let newY = max(20, min(height - 20, value.location.y))
                     fraction = Double(newY / height)
                 }
         )

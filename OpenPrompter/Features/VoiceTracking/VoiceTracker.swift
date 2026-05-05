@@ -88,20 +88,22 @@ final class VoiceTracker {
     var currentCursor: Int { cursor }
 
     /// Approximate progress through the loaded script as a fraction
-    /// `[0.0, 1.0]`. Computed from the most recently matched token's
+    /// `[0.0, 1.0]`. Computed from the NEXT-to-be-read token's
     /// character offset divided by total script length. Returns nil
     /// when no script is loaded or the cursor is at 0.
     ///
-    /// Used by `TeleprompterView` to translate a cursor advance into a
-    /// scroll offset. Approximate (assumes uniform character density)
-    /// but good enough for a first cut — the lerp scroll math (V2
-    /// Design 03 §"Sensitivity / smoothness") will refine this later.
+    /// Why "next-to-be-read" rather than "just-matched"? The reading
+    /// line on screen marks "what to say next" — the matched word
+    /// should land ABOVE the line by the time the user has spoken it,
+    /// with the upcoming word AT the line. Using the cursor index
+    /// directly (one past the matched word) gives the lead-ahead
+    /// behavior teleprompter readers expect.
     var cursorScriptFraction: Double? {
         guard let aligner = aligner,
               let last = aligner.tokens.last,
               cursor > 0 else { return nil }
         let totalChars = max(1, last.charOffset + last.normalized.count)
-        let idx = min(cursor - 1, aligner.tokens.count - 1)
+        let idx = min(cursor, aligner.tokens.count - 1)
         guard idx >= 0 else { return nil }
         let charOffset = aligner.tokens[idx].charOffset
         return Double(charOffset) / Double(totalChars)
