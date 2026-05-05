@@ -184,6 +184,15 @@ final class RecordingSession {
     /// thread-safe, which is the canonical sink).
     nonisolated(unsafe) var audioFork: ((CMSampleBuffer) -> Void)?
 
+    /// Persistent sample-buffer router for the AUDIO output. Distinct
+    /// from the per-take router that handles video. Once installed by
+    /// `ensureAudioCaptureRunning()` it stays installed for the rest
+    /// of the session — voice tracking needs audio buffers even with
+    /// no recording in progress, and re-installing the delegate per
+    /// take created a hole where voice tracking received nothing
+    /// outside an active recording.
+    fileprivate var persistentAudioRouter: SampleBufferRouter?
+
     /// Drop this many video sample buffers at the start of every take. The
     /// iOS 26 hardware encoder + the camera sensor's settling pass after a
     /// session reconfigure produce half-rendered or near-black frames for
@@ -322,6 +331,40 @@ final class RecordingSession {
             state.cancelCountdown()
         }
         await endLiveActivityIfAny()
+    }
+
+    /// Idempotent. Installs a sample-buffer delegate on the camera's
+    /// audio data output (if one isn't already installed) so audio
+    /// buffers begin flowing through `appendSampleBuffer`. Call from
+    /// the voice-tracking activation path so audio reaches the
+    /// recognizer regardless of recording state.
+    ///
+    /// The persistent audio router lives for the rest of the session
+    /// — there's no symmetric "stop" because the buffer-handling code
+    /// is gated on consumer presence (`writer != nil` for recording,
+    /// `audioFork != nil` AND `voiceTracker.isActive` for voice
+    /// tracking). When neither consumer wants buffers, the router
+    /// just discards them with an early return.
+    func ensureAudioCaptureRunning() async {
+        guard !suppressDeviceWork else { return }
+        guard persistentAudioRouter == nil else { return }
+        guard let cameraSessionQueue = cameraSessionQueue,
+              let audioOut = cameraStore?.preAttachedAudioOutput else {
+            return
+        }
+        // The audio session needs to be active for the AVCapture audio
+        // path to actually deliver buffers. Re-running this is cheap
+        // and safe — it's also called at start of every recording.
+        configureAudioSession()
+        let router = SampleBufferRouter(session: self)
+        let recordQ = recordingQueue
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            cameraSessionQueue.async {
+                audioOut.setSampleBufferDelegate(router, queue: recordQ)
+                cont.resume()
+            }
+        }
+        self.persistentAudioRouter = router
     }
 
     // MARK: - Countdown
@@ -469,13 +512,16 @@ final class RecordingSession {
             }
         }
 
-        // Toggle delegates on the camera session queue so we don't race
-        // the store's own start/stop transitions. Track the outputs in
-        // writer state so finalize can clear the delegate symmetrically.
+        // Audio path: install the persistent audio router IF not already
+        // installed. Voice tracking needs audio whether or not a recording
+        // is in progress, so we keep the audio delegate set for the
+        // session's lifetime instead of toggling per-take.
+        await ensureAudioCaptureRunning()
+
+        // Video path: install per-take router. Cleared in `finalize`.
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             cameraSessionQueue.async {
                 videoOut.setSampleBufferDelegate(router, queue: recordQ)
-                audioOut.setSampleBufferDelegate(router, queue: recordQ)
                 lock.withLock { state in
                     state.videoOutput = videoOut
                     state.audioOutput = audioOut
@@ -695,7 +741,12 @@ final class RecordingSession {
                     return result
                 }
                 v?.setSampleBufferDelegate(nil, queue: nil)
-                a?.setSampleBufferDelegate(nil, queue: nil)
+                // Audio delegate is persistent (managed by
+                // `ensureAudioCaptureRunning`) — voice tracking can be
+                // active across recording cycles. The audio branch in
+                // `appendSampleBuffer` is gated on `writer != nil` so
+                // post-recording audio is dropped without effect.
+                _ = a
                 continuation.resume()
             }
         }

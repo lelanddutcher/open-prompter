@@ -250,6 +250,13 @@ struct TeleprompterView: View {
                 isActive: appState.recordingState.isRecording && tallyLightAllowedByPref
             )
         }
+        // Voice-tracking debug HUD — left edge, vertical audio meter +
+        // a strip of last-recognized words. Only renders while the
+        // tracker is active. Lets the user confirm mic input is
+        // landing AND see what SFSpeechRecognizer is hearing.
+        .overlay(alignment: .leading) {
+            voiceTrackingHUD
+        }
         // (Removed in dogfood pass 8: the in-app Dynamic-Island-style pill
         // overlay was redundant against the existing screen-edge tally
         // light AND the elapsed-time counter on the bottom-bar REC chip.
@@ -1092,6 +1099,53 @@ struct TeleprompterView: View {
             .uppercased()
     }
 
+    // MARK: - Voice tracking HUD (debug)
+
+    /// Left-edge HUD shown while voice tracking is active. Vertical
+    /// audio meter (8 segments) on top, three most-recent recognized
+    /// words below. Lets the user confirm mic input is reaching the
+    /// recognizer AND see what's been heard. Subtle styling so it
+    /// doesn't dominate the prompter.
+    @ViewBuilder
+    private var voiceTrackingHUD: some View {
+        if appState.voiceTracker.isActive {
+            let level = CGFloat(appState.voiceTracker.audioLevel)
+            let activeSegments = max(1, Int(level * 8))
+            VStack(alignment: .leading, spacing: 6) {
+                // Vertical level meter — 8 segments, bottom fills first.
+                VStack(spacing: 2) {
+                    ForEach(0..<8, id: \.self) { i in
+                        let segIndex = 8 - i  // 8 = top, 1 = bottom
+                        Rectangle()
+                            .fill(segIndex <= activeSegments ? Theme.green : Theme.surface2)
+                            .frame(width: 6, height: 8)
+                            .opacity(segIndex <= activeSegments ? 1.0 : 0.35)
+                    }
+                }
+                .animation(.linear(duration: 0.05), value: activeSegments)
+                Text("VOICE")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .tracking(0.5)
+                    .foregroundStyle(Theme.green)
+                // Last few recognized words, ASR transcript style. Tail-
+                // truncated so newest words are always visible.
+                let recent = appState.voiceTracker.lastRecognizedWords.suffix(3).joined(separator: " ")
+                if !recent.isEmpty {
+                    Text(recent)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Theme.muted)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: 90, alignment: .leading)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
+            .padding(.leading, 6)
+        }
+    }
+
     // MARK: - Voice tracking orchestration (V2 Feature 5)
 
     /// Tap handler for the PLAY half of the bottom row. Stops voice
@@ -1144,11 +1198,16 @@ struct TeleprompterView: View {
 
     private func startVoiceOrSurfaceFailure() {
         let tracker = appState.voiceTracker
-        if !tracker.start() {
-            // start() returned false — recognizer init failed or the
-            // locale isn't supported. Surface a generic message.
-            appState.userFacingError =
-                "Couldn't start voice tracking. Check that the camera is on so audio is available."
+        let session = appState.recordingSession
+        Task {
+            // Guarantees the audio sample-buffer delegate is installed
+            // on the camera's audio output. Without this, no audio
+            // reaches the recognizer when no recording is active.
+            await session.ensureAudioCaptureRunning()
+            if !tracker.start() {
+                appState.userFacingError =
+                    "Couldn't start voice tracking. Check that the camera is on so audio is available."
+            }
         }
     }
 

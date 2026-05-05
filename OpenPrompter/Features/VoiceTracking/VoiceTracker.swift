@@ -76,6 +76,13 @@ final class VoiceTracker {
     /// segments instead).
     private(set) var lastTranscription: String = ""
 
+    /// RMS amplitude of the most recent audio buffer fed to the
+    /// recognizer, in `[0.0, 1.0]`. Throttled to ~20 Hz updates so the
+    /// view layer doesn't drown in MainActor hops. Drops to 0 on stop.
+    /// Useful for an on-screen meter that confirms mic input is
+    /// reaching the recognizer.
+    private(set) var audioLevel: Float = 0
+
     /// Current believed token position in the script (one past the last
     /// matched word).
     var currentCursor: Int { cursor }
@@ -128,6 +135,10 @@ final class VoiceTracker {
     /// the camera audio queue can call it without a main-actor hop.
     private nonisolated(unsafe) var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+
+    /// Throttle gate for audio-level publishing — only post one update
+    /// every ~50ms to avoid drowning the MainActor in hops at 50 buf/s.
+    private nonisolated(unsafe) var lastAudioLevelPostTime: TimeInterval = 0
 
     // MARK: - Init
 
@@ -251,10 +262,12 @@ final class VoiceTracker {
     func stop() {
         if suppressDeviceWork {
             isActive = false
+            audioLevel = 0
             return
         }
         tearDownRecognition()
         isActive = false
+        audioLevel = 0
     }
 
     private func tearDownRecognition() {
@@ -270,12 +283,80 @@ final class VoiceTracker {
     /// Forward a sample buffer from `RecordingSession`'s audio sample-
     /// buffer delegate (camera audio queue) to the recognizer. Safe to
     /// call from any thread; no-op when not active or in test mode.
+    /// Also computes RMS amplitude and (throttled) publishes it as
+    /// `audioLevel` for the on-screen meter.
     nonisolated func feedAudio(_ sampleBuffer: CMSampleBuffer) {
         // Read the request pointer best-effort. start() / stop() always
         // happen on @MainActor so the pointer is stable across a single
         // delivery.
         guard let request = recognitionRequest else { return }
         request.appendAudioSampleBuffer(sampleBuffer)
+
+        // Audio level → throttled publish. ~20 Hz update rate is plenty
+        // for a visual meter and keeps MainActor hops light.
+        let now = CACurrentMediaTime()
+        if now - lastAudioLevelPostTime >= 0.05 {
+            lastAudioLevelPostTime = now
+            let level = Self.computeAudioLevel(sampleBuffer)
+            Task { @MainActor [weak self] in
+                self?.audioLevel = level
+            }
+        }
+    }
+
+    /// Compute RMS amplitude of a sample buffer, scaled to [0, 1].
+    /// Handles the two formats AVCaptureAudioDataOutput commonly emits
+    /// on iOS (16-bit signed PCM, 32-bit float). Returns 0 for unknown
+    /// formats — better silent than wrong.
+    nonisolated private static func computeAudioLevel(_ sampleBuffer: CMSampleBuffer) -> Float {
+        var blockBuffer: CMBlockBuffer?
+        var audioBufferList = AudioBufferList()
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: &audioBufferList,
+            bufferListSize: MemoryLayout<AudioBufferList>.size,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == noErr, let mData = audioBufferList.mBuffers.mData else { return 0 }
+        let byteCount = Int(audioBufferList.mBuffers.mDataByteSize)
+
+        guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
+            return 0
+        }
+        let flags = asbd.pointee.mFormatFlags
+        let bitsPerChannel = Int(asbd.pointee.mBitsPerChannel)
+        let isFloat = (flags & kAudioFormatFlagIsFloat) != 0
+
+        var sumSquares: Float = 0
+        var count = 0
+
+        if isFloat && bitsPerChannel == 32 {
+            count = byteCount / MemoryLayout<Float>.size
+            let ptr = mData.bindMemory(to: Float.self, capacity: count)
+            for i in 0..<count {
+                sumSquares += ptr[i] * ptr[i]
+            }
+        } else if !isFloat && bitsPerChannel == 16 {
+            count = byteCount / MemoryLayout<Int16>.size
+            let ptr = mData.bindMemory(to: Int16.self, capacity: count)
+            for i in 0..<count {
+                let s = Float(ptr[i]) / 32768.0
+                sumSquares += s * s
+            }
+        } else {
+            return 0
+        }
+
+        guard count > 0 else { return 0 }
+        let rms = sqrt(sumSquares / Float(count))
+        // Speech RMS sits well below 1.0 even on shouted input — scale
+        // up so the meter actually moves visibly. Cap at 1.0.
+        return min(1.0, rms * 5.0)
     }
 
     // MARK: - Recognition path
