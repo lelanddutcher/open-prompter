@@ -153,10 +153,18 @@ public struct ScriptAligner: Sendable {
     /// Find the best alignment for `recognizedBuffer` near `cursorIndex`.
     /// Returns the new cursor on a match, or the unchanged cursor with
     /// `matched: false` if no candidate cleared the threshold.
+    ///
+    /// `visibleRange`, when supplied, OVERRIDES the cursor-relative
+    /// search window (cursor ± lookBack/lookAhead) and forces the
+    /// aligner to consider only tokens in that range. Used by the view
+    /// layer to constrain matches to what's currently on screen, so a
+    /// generic word ("the", "and") can never teleport the cursor to an
+    /// offscreen instance.
     public func align(
         recognizedBuffer: [String],
         cursorIndex: Int,
-        elapsedSinceLastMatch: TimeInterval = 0
+        elapsedSinceLastMatch: TimeInterval = 0,
+        visibleRange: Range<Int>? = nil
     ) -> AlignmentResult {
         guard !recognizedBuffer.isEmpty else {
             return AlignmentResult(
@@ -183,10 +191,9 @@ public struct ScriptAligner: Sendable {
             .map { $0.lowercased() }
         let bufPhonetic: [String] = buf.map { PhoneticEncoder.encode($0) }
 
-        // Search window — widens after a quiet period, but cap the
-        // widened range so a stale/generic word can't teleport the
-        // cursor across the entire script (the "say 'the' at start, get
-        // teleported to end" failure mode reported on device).
+        // Search window — when the view layer supplies `visibleRange`,
+        // that range IS the window. Otherwise fall back to the cursor-
+        // relative window with optional widening on quiet periods.
         let widened = elapsedSinceLastMatch > config.widenTimeout
         let lookBack = widened
             ? min(config.widenedLookBack, cursorIndex)
@@ -194,8 +201,15 @@ public struct ScriptAligner: Sendable {
         let lookAhead = widened
             ? min(config.widenedLookAhead, max(0, tokens.count - cursorIndex))
             : config.lookAhead
-        let searchStart = max(0, cursorIndex - lookBack)
-        let searchEnd = min(tokens.count, cursorIndex + lookAhead)
+        let searchStart: Int
+        let searchEnd: Int
+        if let visible = visibleRange {
+            searchStart = max(0, visible.lowerBound)
+            searchEnd = min(tokens.count, visible.upperBound)
+        } else {
+            searchStart = max(0, cursorIndex - lookBack)
+            searchEnd = min(tokens.count, cursorIndex + lookAhead)
+        }
         let lastCandidate = searchEnd - bufN
 
         guard lastCandidate >= searchStart else {

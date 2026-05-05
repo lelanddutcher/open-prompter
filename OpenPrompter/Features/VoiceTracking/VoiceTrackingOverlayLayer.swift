@@ -67,6 +67,12 @@ struct VoiceTrackingChrome: ViewModifier {
             .onChange(of: layoutRecomputeKey) { _, _ in
                 onCursorChange()
             }
+            // The READ line is user-draggable. Re-aim the lerp target
+            // immediately when it moves so the prompter scroll glides
+            // to the new position without waiting for the next match.
+            .onChange(of: readingLineFraction) { _, _ in
+                onCursorChange()
+            }
     }
 }
 

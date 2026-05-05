@@ -1158,10 +1158,14 @@ struct TeleprompterView: View {
     private func startVoiceOrSurfaceFailure() {
         let tracker = appState.voiceTracker
         let session = appState.recordingSession
+        // Snapshot visible-range so the very first match is constrained
+        // to what's on screen, not the whole script.
+        tracker.updateVisibleTokenRange(
+            scrollOffset: vm.scroller.offset,
+            viewportHeight: vm.viewportHeight,
+            contentHeight: vm.contentHeight
+        )
         Task {
-            // Guarantees the audio sample-buffer delegate is installed
-            // on the camera's audio output. Without this, no audio
-            // reaches the recognizer when no recording is active.
             await session.ensureAudioCaptureRunning()
             if !tracker.start() {
                 appState.userFacingError =
@@ -1194,16 +1198,27 @@ struct TeleprompterView: View {
                 vm.isPlaying = false
             }
         }
-        if appState.voiceTracker.isActive,
-           let target = vm.voiceTargetOffset {
-            // Alpha 0.08 — smooth glide; settles in ~30 frames at 60Hz.
-            // Could be made user-adjustable via a sensitivity slider in
-            // a later pass (V2 Design 03 §"Sensitivity / smoothness").
-            vm.scroller.lerpToward(
-                target: target,
-                alpha: 0.08,
-                maxOffset: vm.maxScrollOffset
+        if appState.voiceTracker.isActive {
+            // Keep the aligner's visible-range constraint in sync with
+            // current scroll geometry so a generic word can't match an
+            // offscreen instance. Cheap O(n) walk over tokens.
+            appState.voiceTracker.updateVisibleTokenRange(
+                scrollOffset: vm.scroller.offset,
+                viewportHeight: vm.viewportHeight,
+                contentHeight: vm.contentHeight
             )
+            if let target = vm.voiceTargetOffset {
+                // Feathered glide: low alpha (asymptotic ease) + low
+                // maxStep cap (no per-tick lurch) → 180 pt/sec at 60Hz
+                // ceiling, settling smoothly when target is reached.
+                // The previous 0.08 alpha + uncapped step felt jumpy.
+                vm.scroller.lerpToward(
+                    target: target,
+                    alpha: 0.03,
+                    maxStep: 3,
+                    maxOffset: vm.maxScrollOffset
+                )
+            }
         }
     }
 

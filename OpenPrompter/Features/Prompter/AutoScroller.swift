@@ -65,18 +65,30 @@ final class AutoScroller {
 
     /// Per-frame interpolation toward `target`. Used by voice tracking
     /// to smoothly glide to the next matched-word position instead of
-    /// teleporting on every alignment update. `alpha` controls
-    /// responsiveness — 0.05 (smooth, lazy) to 0.20 (snappy). Returns
-    /// silently when already at target.
-    func lerpToward(target: CGFloat, alpha: CGFloat, maxOffset: CGFloat) {
+    /// teleporting on every alignment update.
+    ///
+    /// - `alpha`: fraction of remaining distance covered per tick. Low
+    ///   values (~0.03) feel feathered; high values (~0.15) feel
+    ///   responsive but lurch on big target jumps.
+    /// - `maxStep`: hard cap on per-tick movement in points. Keeps a
+    ///   multi-line cursor advance from translating to a sharp visual
+    ///   jump — instead the scroll glides at constant max velocity
+    ///   until it catches up.
+    func lerpToward(
+        target: CGFloat,
+        alpha: CGFloat,
+        maxStep: CGFloat,
+        maxOffset: CGFloat
+    ) {
         let clampedTarget = min(max(0, target), maxOffset)
-        let delta = (clampedTarget - offset) * alpha
-        // Cut off when within sub-pixel of target so the lerp settles
-        // instead of asymptoting forever.
-        if abs(delta) < 0.25 {
+        let distance = clampedTarget - offset
+        let raw = distance * alpha
+        let capped = max(-maxStep, min(maxStep, raw))
+        // Settle when distance is sub-pixel so we don't asymptote forever.
+        if abs(distance) < 0.5 {
             offset = clampedTarget
         } else {
-            offset = min(maxOffset, max(0, offset + delta))
+            offset = min(maxOffset, max(0, offset + capped))
         }
         if offset >= maxOffset { didReachEnd = true }
     }

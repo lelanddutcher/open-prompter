@@ -83,6 +83,13 @@ final class VoiceTracker {
     /// reaching the recognizer.
     private(set) var audioLevel: Float = 0
 
+    /// Token-index range that's currently visible on screen. When
+    /// non-nil, the aligner is constrained to consider ONLY this range
+    /// — a generic word like "the" can no longer teleport the cursor
+    /// to an offscreen instance. Updated by the view layer as the user
+    /// scrolls or changes font size.
+    var visibleTokenRange: Range<Int>?
+
     /// Current believed token position in the script (one past the last
     /// matched word).
     var currentCursor: Int { cursor }
@@ -167,6 +174,7 @@ final class VoiceTracker {
         self.lastRecognizedWords = []
         self.lastTranscription = ""
         self.lastMatchTime = Date()
+        self.visibleTokenRange = nil
     }
 
     // MARK: - Authorization
@@ -414,13 +422,58 @@ final class VoiceTracker {
         let result = aligner.align(
             recognizedBuffer: lastRecognizedWords,
             cursorIndex: cursor,
-            elapsedSinceLastMatch: elapsed
+            elapsedSinceLastMatch: elapsed,
+            visibleRange: visibleTokenRange
         )
         lastMatch = result
         if result.matched {
             cursor = result.cursorIndex
             lastMatchTime = Date()
         }
+    }
+
+    /// Recompute `visibleTokenRange` from current scroll geometry. The
+    /// view calls this on scroll change, font-size change, and content-
+    /// height change. The visible-range constraint then applies on the
+    /// NEXT `ingestRecognitionResult` callback. Margin lets words just
+    /// off-screen still match (~15 tokens above and below).
+    func updateVisibleTokenRange(
+        scrollOffset: CGFloat,
+        viewportHeight: CGFloat,
+        contentHeight: CGFloat,
+        margin: Int = 15
+    ) {
+        guard let aligner = aligner,
+              let last = aligner.tokens.last,
+              contentHeight > 0 else {
+            visibleTokenRange = nil
+            return
+        }
+        let totalChars = max(1, last.charOffset + last.normalized.count)
+        let pxPerChar = contentHeight / CGFloat(totalChars)
+        guard pxPerChar > 0 else {
+            visibleTokenRange = nil
+            return
+        }
+        let topCharOffset = Int(scrollOffset / pxPerChar)
+        let bottomCharOffset = Int((scrollOffset + viewportHeight) / pxPerChar)
+
+        // Linear scan — tokens are sorted by charOffset so this is
+        // O(n) once. For typical scripts (<5000 tokens) trivially fast.
+        var startIdx = aligner.tokens.count
+        var endIdx = aligner.tokens.count
+        for (i, tok) in aligner.tokens.enumerated() {
+            if startIdx == aligner.tokens.count, tok.charOffset >= topCharOffset {
+                startIdx = i
+            }
+            if tok.charOffset > bottomCharOffset {
+                endIdx = i
+                break
+            }
+        }
+        let lo = max(0, startIdx - margin)
+        let hi = min(aligner.tokens.count, endIdx + margin)
+        visibleTokenRange = lo < hi ? lo..<hi : nil
     }
 
     // MARK: - Test seams
