@@ -55,16 +55,18 @@ struct VoiceTrackingChrome: ViewModifier {
     /// always re-render the target until voice was toggled off/on).
     struct LayoutKey: Equatable {
         let fontSize: Double
-        /// Included so a font-size change re-fires onChange AFTER the
-        /// GeometryReader has measured the new content height. Without
-        /// this, the recompute used a stale contentHeight and the
-        /// scroll target landed at the wrong offset.
+        /// Font-size change re-fires onChange AFTER the GeometryReader
+        /// has measured the new content height. Without this, the
+        /// recompute used a stale contentHeight and the scroll target
+        /// landed at the wrong offset.
         let contentHeight: CGFloat
-        /// Included for the same reason — viewport changes (e.g. on
-        /// rotation, keyboard) re-aim the deadzone.
+        /// Same reasoning — viewport changes (rotation, keyboard)
+        /// re-aim the target.
         let viewportHeight: CGFloat
-        let boxTopFraction: Double
-        let boxBottomFraction: Double
+        // Note: box top/bottom fractions are deliberately NOT in this
+        // key. Dragging the box should NOT trigger scroll — that was
+        // the "phantom movement" reported on device. The box's bottom
+        // edge is read at the next genuine cursor advance instead.
     }
 
     let tracker: VoiceTracker

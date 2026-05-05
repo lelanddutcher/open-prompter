@@ -615,9 +615,7 @@ struct TeleprompterView: View {
                 layoutKey: VoiceTrackingChrome.LayoutKey(
                     fontSize: vm.fontSize,
                     contentHeight: vm.contentHeight,
-                    viewportHeight: vm.viewportHeight,
-                    boxTopFraction: voiceBoxTopFraction,
-                    boxBottomFraction: voiceBoxBottomFraction
+                    viewportHeight: vm.viewportHeight
                 )
             )
         )
@@ -1186,12 +1184,16 @@ struct TeleprompterView: View {
         }
     }
 
-    /// Translate a cursor advance into a target scroll offset using
-    /// the BOUNDING BOX model: matched word inside the box → no
-    /// scroll change (deadzone); above top → slow/reverse scroll;
-    /// below bottom → speed up scroll. The per-frame velocity
-    /// controller in `handleScrollTick` glides scroll toward this
-    /// target.
+    /// Translate a cursor advance into a target scroll offset.
+    ///
+    /// Model: BOTTOM edge is the user's eye-line — matched (just-
+    /// spoken) words land there. As the cursor advances, target
+    /// shifts so the new matched word lands at the bottom edge, and
+    /// the previous matched word drifts up through the band on its
+    /// way to scrolling off the TOP edge. The TOP edge is visual
+    /// reference for "where words leave the screen" — it does NOT
+    /// affect scroll math (so dragging it doesn't cause phantom
+    /// scroll movement).
     fileprivate func handleVoiceCursorChange() {
         guard appState.voiceTracker.isActive,
               vm.contentHeight > 0,
@@ -1206,24 +1208,9 @@ struct TeleprompterView: View {
         )
         guard let fraction = appState.voiceTracker.cursorScriptFraction else { return }
         let cursorContentY = CGFloat(fraction) * vm.contentHeight
-        let onScreenY = cursorContentY - vm.scroller.offset
-        let topY = vm.viewportHeight * CGFloat(voiceBoxTopFraction)
         let bottomY = vm.viewportHeight * CGFloat(voiceBoxBottomFraction)
-
-        let target: CGFloat
-        if onScreenY < topY {
-            // Matched word above the band — scroll has overshot or
-            // user paused. Roll back so matched word lands at top.
-            target = cursorContentY - topY
-        } else if onScreenY > bottomY {
-            // Matched word below the band — user is reading ahead of
-            // scroll. Push scroll forward so matched word lands at bottom.
-            target = cursorContentY - bottomY
-        } else {
-            // Inside the band — no correction. Hold current scroll;
-            // velocity controller decelerates to zero.
-            target = vm.scroller.offset
-        }
+        // Always aim for matched word at BOTTOM edge.
+        let target = cursorContentY - bottomY
         vm.voiceTargetOffset = max(0, target)
     }
 
@@ -1250,23 +1237,28 @@ struct TeleprompterView: View {
             if let target = vm.voiceTargetOffset {
                 // Velocity-controlled scroll. P-controller drives a
                 // velocity that aims at target; velocity itself is
-                // low-pass filtered for smooth acceleration AND smooth
-                // deceleration. Result: a constant gentle scroll that
-                // speeds up when behind and slows when caught up. No
-                // per-tick lurches even when target jumps after a
-                // 500ms recognizer gap.
+                // low-pass filtered for smooth acceleration AND
+                // deceleration.
                 let dt: TimeInterval
                 if let last = vm.lastVoiceTickAt {
-                    // Clamp dt against clock jumps (resume, throttle).
                     dt = min(0.1, max(0, now.timeIntervalSince(last)))
                 } else {
                     dt = 1.0 / 60.0
                 }
                 vm.lastVoiceTickAt = now
+                // Scale max velocity with font size — at 32pt one
+                // line is ~45pt tall; at 64pt it's ~90pt. Reading
+                // pace (lines/sec) is roughly font-independent, so
+                // velocity in pt/sec must scale with line height.
+                // 6 × fontSize gives ~4 lines/sec ceiling at any
+                // size. Floor of 150 to avoid pathologically slow
+                // catch-up at tiny fonts.
+                let maxVel: CGFloat = max(150, CGFloat(vm.fontSize) * 6)
                 vm.scroller.voiceTrackingTick(
                     target: target,
                     dt: dt,
-                    maxOffset: vm.maxScrollOffset
+                    maxOffset: vm.maxScrollOffset,
+                    maxVelocity: maxVel
                 )
             }
         } else {
