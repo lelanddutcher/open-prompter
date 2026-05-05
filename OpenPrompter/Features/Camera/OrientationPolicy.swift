@@ -134,21 +134,25 @@ enum OrientationPolicy {
         bufferShape: BufferShape
     ) -> CGAffineTransform {
         if !wantsPortraitPlayback(for: aspect) {
-            // 16:9 landscape intent
+            // 16:9 landscape intent. After the pass-13e 9x16↔16x9 swap,
+            // user-picked 16:9 maps to iOS .ratio9x16. Per the pass-13f
+            // self-test JSON for ratio16x9 user-pick on iPhone 17 Pro Max
+            // + iOS 26.3.1: iOS produces a 2160×3840 PORTRAIT buffer
+            // (not landscape). Buffer pixels are sensor-natural with head-
+            // at-right orientation; +π/2 rotates head-right to head-top
+            // (upright) and swaps dims to 3840×2160 landscape playback.
             switch bufferShape {
-            case .landscape:
-                // After the pass-13e 9x16↔16x9 swap, user-picked 16:9 maps
-                // to iOS .ratio9x16, which produces a landscape buffer with
-                // head-at-bottom orientation (different from 4:3's head-at-
-                // left). Identity playback was upside-down per user testing
-                // 2026-05-04 — 180° rotation flips it to upright.
-                return CGAffineTransform(rotationAngle: .pi)
-            case .square:
-                return .identity
             case .portrait:
-                // Edge case: iOS reshapes ratio16x9 to portrait-dim buffer.
-                // -π/2 rotates portrait container into landscape playback.
-                return CGAffineTransform(rotationAngle: -.pi / 2)
+                // The actual case hit by 16:9 user-pick. +π/2 was -π/2 in
+                // pass-13d/e (which gave upside-down per user 2026-05-04).
+                return CGAffineTransform(rotationAngle: .pi / 2)
+            case .landscape, .square:
+                // Defensive — not hit on iPhone 17 + iOS 26.3.1 for the
+                // current swap mapping, but kept for hardware classes that
+                // may produce non-portrait buffers for ratio9x16. Identity
+                // is the conservative default; revisit per-device if a user
+                // hits this path with rotated content.
+                return .identity
             }
         }
         // Portrait intent

@@ -114,25 +114,26 @@ final class OrientationPipelineTests: XCTestCase {
         }
     }
 
-    func testWriterTransformLandscapeIntentLandscapeBufferIs180() {
-        // ratio16x9 wants landscape playback. After the pass-13e swap, iOS
-        // produces a landscape buffer for ratio16x9 user-pick (via iOS
-        // .ratio9x16 mapping) with head-at-bottom orientation. 180° flips
-        // to upright (was identity, user-confirmed upside-down).
+    func testWriterTransformLandscapeIntentLandscapeBufferIdentity() {
+        // ratio16x9 + landscape buffer is defensive-only on iPhone 17 +
+        // iOS 26.3.1 — iOS produces portrait (not landscape) buffers for
+        // user-picked 16:9 (via the swapped iOS .ratio9x16 mapping). Kept
+        // as identity for hardware classes that may produce landscape.
         let t = OrientationPolicy.writerTransform(for: .ratio16x9, bufferShape: .landscape)
-        XCTAssertEqual(t.a, -1, accuracy: 1e-6)
-        XCTAssertEqual(t.b, 0, accuracy: 1e-6)
-        XCTAssertEqual(t.c, 0, accuracy: 1e-6)
-        XCTAssertEqual(t.d, -1, accuracy: 1e-6)
+        XCTAssertEqual(t, .identity)
     }
 
-    func testWriterTransformLandscapeIntentPortraitBufferReverseRotates() {
-        // 16:9 + portrait buffer → -π/2 to land landscape playback. Edge
-        // case; iOS shouldn't normally produce a portrait buffer for ratio16x9.
+    func testWriterTransformLandscapeIntentPortraitBufferIsPositivePiOverTwo() {
+        // The actual case hit on iPhone 17 + iOS 26.3.1 for user-picked
+        // 16:9. iOS produces a 2160×3840 portrait buffer for ratio9x16
+        // with sensor-natural pixels (head at right). +π/2 rotates head-
+        // at-right → head-at-top (upright) and swaps playback dims to
+        // 3840×2160 landscape. Was -π/2 in pass-13e (gave upside-down
+        // per user testing 2026-05-04, confirmed via self-test JSON).
         let t = OrientationPolicy.writerTransform(for: .ratio16x9, bufferShape: .portrait)
         XCTAssertEqual(t.a, 0, accuracy: 1e-6)
-        XCTAssertEqual(t.b, -1, accuracy: 1e-6)
-        XCTAssertEqual(t.c, 1, accuracy: 1e-6)
+        XCTAssertEqual(t.b, 1, accuracy: 1e-6)
+        XCTAssertEqual(t.c, -1, accuracy: 1e-6)
         XCTAssertEqual(t.d, 0, accuracy: 1e-6)
     }
 
