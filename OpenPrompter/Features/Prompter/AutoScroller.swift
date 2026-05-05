@@ -23,6 +23,11 @@ final class AutoScroller {
     /// flip the play button back to paused state.
     private(set) var didReachEnd: Bool = false
 
+    /// Internal velocity state for voice tracking — not part of the
+    /// auto-scroll path. Updated by `voiceTrackingTick`. Persists
+    /// across ticks so the velocity low-pass smoothing carries over.
+    private var voiceVelocity: CGFloat = 0
+
     func reset() {
         lastTick = nil
         offset = 0
@@ -63,33 +68,61 @@ final class AutoScroller {
         lastTick = nil
     }
 
-    /// Per-frame interpolation toward `target`. Used by voice tracking
-    /// to smoothly glide to the next matched-word position instead of
-    /// teleporting on every alignment update.
+    /// Per-frame velocity-controlled scroll toward `target`. Used by
+    /// voice tracking to feel like a constant smooth scroll rather
+    /// than a sequence of catch-up lerps.
     ///
-    /// - `alpha`: fraction of remaining distance covered per tick. Low
-    ///   values (~0.03) feel feathered; high values (~0.15) feel
-    ///   responsive but lurch on big target jumps.
-    /// - `maxStep`: hard cap on per-tick movement in points. Keeps a
-    ///   multi-line cursor advance from translating to a sharp visual
-    ///   jump — instead the scroll glides at constant max velocity
-    ///   until it catches up.
-    func lerpToward(
+    /// Model: a proportional controller computes desired velocity from
+    /// distance-to-target, then the actual `voiceVelocity` low-pass
+    /// filters toward that. Result is smooth acceleration AND smooth
+    /// deceleration — no per-tick lurches even when the target jumps a
+    /// long way after a 500ms recognizer gap. Velocity caps at
+    /// `maxVelocity` (pt/sec) so the experience stays comfortable
+    /// regardless of how far behind the cursor is.
+    ///
+    /// - `target`: scroll offset the user "should" be at, derived from
+    ///   the matched-word position and the reading-line fraction.
+    /// - `dt`: time since last tick. Framerate-independent.
+    /// - `gain`: P-controller gain (default 0.6). Higher = more
+    ///   aggressive catching up; lower = lazier.
+    /// - `velocityAlpha`: fraction of velocity adjustment applied per
+    ///   tick. Lower = smoother (slower acceleration), higher = more
+    ///   responsive.
+    /// - `maxVelocity`: hard ceiling on scroll velocity in pt/sec.
+    func voiceTrackingTick(
         target: CGFloat,
-        alpha: CGFloat,
-        maxStep: CGFloat,
-        maxOffset: CGFloat
+        dt: TimeInterval,
+        maxOffset: CGFloat,
+        gain: CGFloat = 0.6,
+        velocityAlpha: CGFloat = 0.05,
+        maxVelocity: CGFloat = 200
     ) {
         let clampedTarget = min(max(0, target), maxOffset)
         let distance = clampedTarget - offset
-        let raw = distance * alpha
-        let capped = max(-maxStep, min(maxStep, raw))
-        // Settle when distance is sub-pixel so we don't asymptote forever.
-        if abs(distance) < 0.5 {
+
+        // P-controller: velocity proportional to distance, clamped.
+        let desiredVelocity = max(-maxVelocity, min(maxVelocity, distance * gain))
+
+        // Low-pass on velocity to smooth acceleration.
+        voiceVelocity = voiceVelocity * (1 - velocityAlpha)
+                      + desiredVelocity * velocityAlpha
+
+        // Integrate position.
+        let proposed = offset + voiceVelocity * CGFloat(dt)
+        offset = min(maxOffset, max(0, proposed))
+
+        // Settle when we're effectively at target AND moving slowly so
+        // the controller doesn't jitter forever near the asymptote.
+        if abs(distance) < 0.5 && abs(voiceVelocity) < 2 {
             offset = clampedTarget
-        } else {
-            offset = min(maxOffset, max(0, offset + capped))
+            voiceVelocity = 0
         }
         if offset >= maxOffset { didReachEnd = true }
+    }
+
+    /// Reset voice-tracking velocity state. Call when voice tracking
+    /// stops so a future activation starts from a known zero.
+    func resetVoiceVelocity() {
+        voiceVelocity = 0
     }
 }

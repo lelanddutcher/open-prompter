@@ -606,7 +606,10 @@ struct TeleprompterView: View {
                 tracker: appState.voiceTracker,
                 readingLineFraction: $voiceReadingLineFraction,
                 onCursorChange: handleVoiceCursorChange,
-                layoutRecomputeKey: vm.fontSize
+                layoutKey: VoiceTrackingChrome.LayoutKey(
+                    fontSize: vm.fontSize,
+                    readingLineFraction: voiceReadingLineFraction
+                )
             )
         )
     }
@@ -1208,17 +1211,30 @@ struct TeleprompterView: View {
                 contentHeight: vm.contentHeight
             )
             if let target = vm.voiceTargetOffset {
-                // Feathered glide: low alpha (asymptotic ease) + low
-                // maxStep cap (no per-tick lurch) → 180 pt/sec at 60Hz
-                // ceiling, settling smoothly when target is reached.
-                // The previous 0.08 alpha + uncapped step felt jumpy.
-                vm.scroller.lerpToward(
+                // Velocity-controlled scroll. P-controller drives a
+                // velocity that aims at target; velocity itself is
+                // low-pass filtered for smooth acceleration AND smooth
+                // deceleration. Result: a constant gentle scroll that
+                // speeds up when behind and slows when caught up. No
+                // per-tick lurches even when target jumps after a
+                // 500ms recognizer gap.
+                let dt: TimeInterval
+                if let last = vm.lastVoiceTickAt {
+                    // Clamp dt against clock jumps (resume, throttle).
+                    dt = min(0.1, max(0, now.timeIntervalSince(last)))
+                } else {
+                    dt = 1.0 / 60.0
+                }
+                vm.lastVoiceTickAt = now
+                vm.scroller.voiceTrackingTick(
                     target: target,
-                    alpha: 0.03,
-                    maxStep: 3,
+                    dt: dt,
                     maxOffset: vm.maxScrollOffset
                 )
             }
+        } else {
+            vm.lastVoiceTickAt = nil
+            vm.scroller.resetVoiceVelocity()
         }
     }
 

@@ -44,14 +44,20 @@ struct VoiceTrackingOverlayLayer: View {
 /// Without this, the body's view-tree complexity exceeded SwiftUI's
 /// type-check budget on Swift 5.10.
 struct VoiceTrackingChrome: ViewModifier {
+    /// Bundle of values that, when ANY changes, should re-aim the
+    /// lerp target. Passed as a value-typed `Equatable` so SwiftUI's
+    /// `.onChange` reliably fires (observing the @Binding's wrapped
+    /// value directly was unreliable on device — drag updates didn't
+    /// always re-render the target until voice was toggled off/on).
+    struct LayoutKey: Equatable {
+        let fontSize: Double
+        let readingLineFraction: Double
+    }
+
     let tracker: VoiceTracker
     @Binding var readingLineFraction: Double
     let onCursorChange: () -> Void
-    /// Layout-change signal — pass `vm.fontSize` (or any other value
-    /// that mutates `contentHeight`). When it changes mid-tracking the
-    /// chrome calls `onCursorChange` to recompute the lerp target so
-    /// the user doesn't have to toggle voice off/on after a font bump.
-    let layoutRecomputeKey: Double
+    let layoutKey: LayoutKey
 
     func body(content: Content) -> some View {
         content
@@ -64,13 +70,10 @@ struct VoiceTrackingChrome: ViewModifier {
             .onChange(of: tracker.lastMatch?.cursorIndex) { _, _ in
                 onCursorChange()
             }
-            .onChange(of: layoutRecomputeKey) { _, _ in
-                onCursorChange()
-            }
-            // The READ line is user-draggable. Re-aim the lerp target
-            // immediately when it moves so the prompter scroll glides
-            // to the new position without waiting for the next match.
-            .onChange(of: readingLineFraction) { _, _ in
+            // Single onChange for both font-size AND reading-line
+            // moves. Whatever caused observing the @Binding's wrapped
+            // value to miss, the value-typed struct fires reliably.
+            .onChange(of: layoutKey) { _, _ in
                 onCursorChange()
             }
     }

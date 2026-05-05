@@ -64,6 +64,11 @@ final class PrompterViewModel {
     /// tracking stops.
     var voiceTargetOffset: CGFloat?
 
+    /// Wall-clock timestamp of the previous voice-tracking tick. Used
+    /// to compute dt for framerate-independent velocity integration in
+    /// `AutoScroller.voiceTrackingTick`. `nil` resets on activation.
+    var lastVoiceTickAt: Date?
+
     /// Scroll offset captured at the moment the user pressed play on the
     /// current take. Used by `jumpToStartOfTake()` (Feature 7's novel
     /// `jumpToStart` remote action) to return the scroll position to the
