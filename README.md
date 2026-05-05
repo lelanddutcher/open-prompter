@@ -15,8 +15,13 @@ a teleprompter for people who already write in markdown. point it at a folder in
 [![Buy Me a Coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-ffdd00?style=flat-square&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/lelanddutcher)
 
 <p align="center">
-  <img src="docs/hero.png" alt="Open Prompter on iPhone — markdown teleprompter" width="280">
+  <img src="docs/hero.png" alt="Open Prompter on iPhone — markdown teleprompter" width="220">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/controls.png" alt="Prompter controls" width="220">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/mirror.png" alt="Mirror mode for teleprompter rigs" width="220">
 </p>
+
 
 ---
 
@@ -106,11 +111,6 @@ set your development team in signing, then run on a simulator or device.
 - `SFSpeechRecognizer` (on-device) for voice tracking, with a custom `ScriptAligner` doing word-level Levenshtein + phonetic-folding + locality-biased matching
 - `SwiftData` (with CloudKit off) for the recents cache, `@AppStorage` + `NSUbiquitousKeyValueStore` for preferences, `ActivityKit` for the recording Live Activity
 
-<p align="center">
-  <img src="docs/controls.png" alt="Prompter controls" width="220">
-  &nbsp;&nbsp;&nbsp;
-  <img src="docs/mirror.png" alt="Mirror mode for teleprompter rigs" width="220">
-</p>
 
 ## contributing
 
