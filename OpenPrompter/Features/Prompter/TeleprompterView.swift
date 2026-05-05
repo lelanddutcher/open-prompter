@@ -1134,6 +1134,11 @@ struct TeleprompterView: View {
         let tracker = appState.voiceTracker
         if tracker.isActive {
             tracker.stop()
+            // Clear voice scroll state so the next activation
+            // doesn't inherit a stale target / velocity.
+            vm.voiceTargetOffset = nil
+            vm.lastVoiceTickAt = nil
+            vm.scroller.resetVoiceVelocity()
             return
         }
         // Activating — pause auto-scroll if it's running.
@@ -1147,6 +1152,14 @@ struct TeleprompterView: View {
             return
         }
         tracker.loadScript(body)
+        // Reset scroll state so this activation starts clean —
+        // without this, a leftover `voiceTargetOffset` from a prior
+        // session would drag the scroll back to that old position
+        // when the velocity ticker resumes (the "scrolls to top"
+        // symptom on re-activation).
+        vm.voiceTargetOffset = nil
+        vm.lastVoiceTickAt = nil
+        vm.scroller.resetVoiceVelocity()
 
         switch tracker.authorization {
         case .authorized:

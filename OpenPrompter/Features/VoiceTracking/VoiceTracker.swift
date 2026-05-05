@@ -439,7 +439,7 @@ final class VoiceTracker {
         scrollOffset: CGFloat,
         viewportHeight: CGFloat,
         contentHeight: CGFloat,
-        margin: Int = 5
+        margin: Int = 2
     ) {
         guard let aligner = aligner,
               let last = aligner.tokens.last,
