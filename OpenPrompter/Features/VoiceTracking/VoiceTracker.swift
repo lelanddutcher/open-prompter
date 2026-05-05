@@ -95,22 +95,20 @@ final class VoiceTracker {
     var currentCursor: Int { cursor }
 
     /// Approximate progress through the loaded script as a fraction
-    /// `[0.0, 1.0]`. Computed from the NEXT-to-be-read token's
-    /// character offset divided by total script length. Returns nil
-    /// when no script is loaded or the cursor is at 0.
+    /// `[0.0, 1.0]`. Computed from the JUST-MATCHED token (cursor - 1)
+    /// since the bounding-box model treats the recently-recognized
+    /// word as the "active" one that should sit inside the deadzone.
+    /// Returns nil when no script is loaded or no match has landed.
     ///
-    /// Why "next-to-be-read" rather than "just-matched"? The reading
-    /// line on screen marks "what to say next" — the matched word
-    /// should land ABOVE the line by the time the user has spoken it,
-    /// with the upcoming word AT the line. Using the cursor index
-    /// directly (one past the matched word) gives the lead-ahead
-    /// behavior teleprompter readers expect.
+    /// Earlier passes used `cursor` (next-to-read) for a "lead-ahead"
+    /// line indicator. With the box model the user thinks in terms of
+    /// "where my spoken words appear" — that's the matched word.
     var cursorScriptFraction: Double? {
         guard let aligner = aligner,
               let last = aligner.tokens.last,
               cursor > 0 else { return nil }
         let totalChars = max(1, last.charOffset + last.normalized.count)
-        let idx = min(cursor, aligner.tokens.count - 1)
+        let idx = min(cursor - 1, aligner.tokens.count - 1)
         guard idx >= 0 else { return nil }
         let charOffset = aligner.tokens[idx].charOffset
         return Double(charOffset) / Double(totalChars)

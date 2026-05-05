@@ -55,6 +55,14 @@ struct VoiceTrackingChrome: ViewModifier {
     /// always re-render the target until voice was toggled off/on).
     struct LayoutKey: Equatable {
         let fontSize: Double
+        /// Included so a font-size change re-fires onChange AFTER the
+        /// GeometryReader has measured the new content height. Without
+        /// this, the recompute used a stale contentHeight and the
+        /// scroll target landed at the wrong offset.
+        let contentHeight: CGFloat
+        /// Included for the same reason — viewport changes (e.g. on
+        /// rotation, keyboard) re-aim the deadzone.
+        let viewportHeight: CGFloat
         let boxTopFraction: Double
         let boxBottomFraction: Double
     }

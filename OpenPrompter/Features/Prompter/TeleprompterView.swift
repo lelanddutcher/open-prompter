@@ -48,15 +48,15 @@ struct TeleprompterView: View {
     /// edge (lower y), scroll slows / reverses to keep the matched word
     /// from drifting off-screen-up.
     @AppStorage("pref.voice.boxTopFraction")
-    private var voiceBoxTopFraction: Double = 0.15
+    private var voiceBoxTopFraction: Double = 0.10
 
     /// Reading-box bottom edge. Matched word BELOW this edge (higher y)
     /// triggers scroll speed-up. Between top and bottom = deadzone (no
-    /// scroll change). Default 0.45 — about 30% of viewport height
-    /// between the edges, comfortable reading band that lets the user
-    /// finish a sentence before scroll kicks in.
+    /// scroll change). Default 0.35 — keeps the band in the upper third
+    /// of the screen for selfie-camera eye contact, narrow enough that
+    /// scroll catches up before words drift far down.
     @AppStorage("pref.voice.boxBottomFraction")
-    private var voiceBoxBottomFraction: Double = 0.45
+    private var voiceBoxBottomFraction: Double = 0.35
 
     /// Mirror of `PipTile.hidden` published via `PipHiddenPreferenceKey`.
     /// Cosmetic only — `PipTile` now owns its own `CameraPreview` so the
@@ -614,6 +614,8 @@ struct TeleprompterView: View {
                 onCursorChange: handleVoiceCursorChange,
                 layoutKey: VoiceTrackingChrome.LayoutKey(
                     fontSize: vm.fontSize,
+                    contentHeight: vm.contentHeight,
+                    viewportHeight: vm.viewportHeight,
                     boxTopFraction: voiceBoxTopFraction,
                     boxBottomFraction: voiceBoxBottomFraction
                 )
@@ -1192,9 +1194,17 @@ struct TeleprompterView: View {
     /// target.
     fileprivate func handleVoiceCursorChange() {
         guard appState.voiceTracker.isActive,
-              let fraction = appState.voiceTracker.cursorScriptFraction,
               vm.contentHeight > 0,
               vm.viewportHeight > 0 else { return }
+        // Refresh the visible-range with current geometry FIRST. The
+        // aligner uses it on the next match. Without this, a font-
+        // size change would race the next match with stale geometry.
+        appState.voiceTracker.updateVisibleTokenRange(
+            scrollOffset: vm.scroller.offset,
+            viewportHeight: vm.viewportHeight,
+            contentHeight: vm.contentHeight
+        )
+        guard let fraction = appState.voiceTracker.cursorScriptFraction else { return }
         let cursorContentY = CGFloat(fraction) * vm.contentHeight
         let onScreenY = cursorContentY - vm.scroller.offset
         let topY = vm.viewportHeight * CGFloat(voiceBoxTopFraction)
@@ -1266,10 +1276,13 @@ struct TeleprompterView: View {
     }
 
     /// Pause the scroll ticker only when nothing wants it. Voice
-    /// tracking with a pending target keeps it alive.
+    /// tracking ALWAYS keeps it alive (even pre-first-match) so the
+    /// visible-range refresh in `handleScrollTick` keeps pace with
+    /// scroll changes — otherwise the aligner's first match runs with
+    /// a stale visible range from script-load time.
     private var scrollTickerPaused: Bool {
         if vm.isPlaying { return false }
-        if appState.voiceTracker.isActive && vm.voiceTargetOffset != nil { return false }
+        if appState.voiceTracker.isActive { return false }
         return true
     }
 }
