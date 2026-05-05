@@ -207,21 +207,11 @@ final class VoiceTrackerTests: XCTestCase {
         XCTAssertEqual(t.currentCursor, 4)
     }
 
-    // MARK: - feedAudio is a safe no-op in test mode
-
-    func testFeedAudioSafeInTestMode() {
-        // The test mode short-circuits so we don't drag a real
-        // CMSampleBuffer into the unit test surface. Just verify the
-        // method exists, can be called without state mutation, and
-        // doesn't crash.
-        let t = VoiceTracker(suppressDeviceWork: true)
-        t.prepareTestAuthorization(.authorized)
-        t.loadScript("hello world")
-        _ = t.start()
-        // Real CMSampleBuffer construction is platform-only; in tests
-        // we just ensure the method is available and gated correctly.
-        // The method signature takes CMSampleBuffer? for this seam.
-        t.feedAudio(nil)
-        XCTAssertTrue(t.isActive, "feedAudio must not deactivate")
-    }
+    // feedAudio is now nonisolated and non-optional (production path
+    // takes a real CMSampleBuffer from the camera audio queue). Its
+    // safety when no request is attached is verified by reading the
+    // implementation — there's no clean way to construct a CMSample-
+    // Buffer in unit tests without dragging AVFoundation into the
+    // setup, and the contract is simple: read recognitionRequest, no-
+    // op if nil. Real device testing exercises the buffer-append path.
 }

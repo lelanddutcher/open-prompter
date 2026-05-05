@@ -227,7 +227,12 @@ struct TeleprompterView: View {
                 // Camera Style and REC are gated by their respective Labs/
                 // permission flags; the others always render.
                 bottomChipStrip
-                PrompterControlsView(vm: vm)
+                PrompterControlsView(
+                    vm: vm,
+                    voiceTracker: appState.voiceTracker,
+                    onPlayTap: handlePlayTap,
+                    onVoiceTap: handleVoiceTap
+                )
             }
             .padding(.bottom, 6)
             .opacity(vm.focus || cameraPromoted ? 0.0 : 1.0)
@@ -554,6 +559,12 @@ struct TeleprompterView: View {
                 }
             }
         }
+        // Voice-tracking cursor → scroll. Fires whenever the aligner
+        // advances the cursor on a successful match. Approximate
+        // mapping (uniform character density) — refine in a later pass.
+        .onChange(of: appState.voiceTracker.lastMatch?.cursorIndex) { _, _ in
+            handleVoiceCursorChange()
+        }
         .task {
             // Drain a recovery banner queued before the prompter opened
             // (the AppState init-time scan posts to recordingState before
@@ -572,6 +583,10 @@ struct TeleprompterView: View {
             // Tear down a live recording on disappear so the file gets
             // saved if the user navigates away mid-take.
             Task { await appState.recordingSession.teardown() }
+            // Voice tracking is opt-in and per-script — stopping on
+            // disappear avoids a stale recognizer task lingering when
+            // the user navigates back to the library.
+            appState.voiceTracker.stop()
             appState.audioRouteMonitor.stop()
         }
         .statusBarHidden()
@@ -1075,5 +1090,78 @@ struct TeleprompterView: View {
         return Self.syncRelativeFormatter
             .localizedString(for: mtime, relativeTo: nowForSync)
             .uppercased()
+    }
+
+    // MARK: - Voice tracking orchestration (V2 Feature 5)
+
+    /// Tap handler for the PLAY half of the bottom row. Stops voice
+    /// tracking first (mutually exclusive) then runs the existing play
+    /// toggle.
+    private func handlePlayTap() {
+        if appState.voiceTracker.isActive {
+            appState.voiceTracker.stop()
+        }
+        vm.togglePlay()
+    }
+
+    /// Tap handler for the VOICE half. Toggles voice tracking on/off
+    /// with the permission flow on first use. Pauses auto-scroll if it
+    /// was running.
+    private func handleVoiceTap() {
+        let tracker = appState.voiceTracker
+        if tracker.isActive {
+            tracker.stop()
+            return
+        }
+        // Activating — pause auto-scroll if it's running.
+        if vm.isPlaying { vm.togglePlay() }
+
+        // Load the script's body text. Tokenization is fast (it
+        // walks the string once) so it's fine to do on tap.
+        let body = vm.parsed.bodyText
+        guard !body.isEmpty else {
+            appState.userFacingError = "Open a script first."
+            return
+        }
+        tracker.loadScript(body)
+
+        switch tracker.authorization {
+        case .authorized:
+            startVoiceOrSurfaceFailure()
+        case .notDetermined:
+            tracker.requestAuthorization { status in
+                if status == .authorized {
+                    startVoiceOrSurfaceFailure()
+                } else if let reason = tracker.ineligibilityReason {
+                    appState.userFacingError = reason
+                }
+            }
+        case .denied, .restricted:
+            appState.userFacingError = tracker.ineligibilityReason
+                ?? "Voice tracking is not available."
+        }
+    }
+
+    private func startVoiceOrSurfaceFailure() {
+        let tracker = appState.voiceTracker
+        if !tracker.start() {
+            // start() returned false — recognizer init failed or the
+            // locale isn't supported. Surface a generic message.
+            appState.userFacingError =
+                "Couldn't start voice tracking. Check that the camera is on so audio is available."
+        }
+    }
+
+    /// Translate a cursor advance into a scroll offset and seek there.
+    /// Approximate (uniform character density) — good enough for a
+    /// first cut while we settle the UX.
+    fileprivate func handleVoiceCursorChange() {
+        guard appState.voiceTracker.isActive,
+              let fraction = appState.voiceTracker.cursorScriptFraction,
+              vm.contentHeight > 0 else { return }
+        let target = CGFloat(fraction) * vm.contentHeight - vm.viewportHeight * 0.4
+        withAnimation(.easeOut(duration: 0.4)) {
+            vm.scroller.seek(to: max(0, target), maxOffset: vm.maxScrollOffset)
+        }
     }
 }

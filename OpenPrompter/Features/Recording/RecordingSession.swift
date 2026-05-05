@@ -173,6 +173,17 @@ final class RecordingSession {
     /// `suppressDeviceWork` pattern.
     private let suppressDeviceWork: Bool
 
+    /// Optional callback invoked from the camera audio queue with every
+    /// `AVCaptureAudioDataOutput` sample buffer — REGARDLESS of recording
+    /// state. Wired by `AppState` to forward to `VoiceTracker.feedAudio`
+    /// so voice tracking works whenever the camera session is running
+    /// with audio attached, even without a recording in progress. Held
+    /// `nonisolated(unsafe)` because the audio delegate runs on the
+    /// recording queue and the closure body is responsible for its own
+    /// thread safety (Apple documents `appendAudioSampleBuffer` as
+    /// thread-safe, which is the canonical sink).
+    nonisolated(unsafe) var audioFork: ((CMSampleBuffer) -> Void)?
+
     /// Drop this many video sample buffers at the start of every take. The
     /// iOS 26 hardware encoder + the camera sensor's settling pass after a
     /// session reconfigure produce half-rendered or near-black frames for
@@ -1268,6 +1279,12 @@ fileprivate final class SampleBufferRouter:
         from connection: AVCaptureConnection
     ) {
         guard let session else { return }
+        // Voice-tracking fork — independent of recording state. Runs
+        // BEFORE the writer path so audio reaches the recognizer even
+        // when no recording is in progress.
+        if output is AVCaptureAudioDataOutput {
+            session.audioFork?(sampleBuffer)
+        }
         // The session's `appendSampleBuffer` is `nonisolated` — we can call
         // it directly from this background queue without hopping actors.
         session.appendSampleBuffer(sampleBuffer, from: output)

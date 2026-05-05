@@ -77,6 +77,11 @@ targets:
         # is a READ operation that crashes apps with only `addOnly` scope on
         # iOS 26. Dropping the album keeps us strictly write-only.
         NSPhotoLibraryAddUsageDescription: "Open Prompter saves your finished recordings to Photos so you can edit and share them."
+        # Speech recognition — V2 Feature 5 voice-tracked auto-scroll.
+        # Surfaces a SEPARATE iOS prompt from the mic permission above
+        # the first time the user taps the voice button. Speech is
+        # processed on-device only (`requiresOnDeviceRecognition = true`).
+        NSSpeechRecognitionUsageDescription: "Open Prompter listens to your reading and scrolls the script in time. Speech is processed on this device and never leaves it."
         # Live Activities — required so the recording chip can post a
         # `Activity.request(...)` for the Dynamic Island indicator.
         NSSupportsLiveActivities: true

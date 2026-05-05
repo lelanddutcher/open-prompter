@@ -34,6 +34,8 @@
 	<string>Open Prompter records audio with your video and follows along with your reading on-device. Audio is processed locally and never leaves your device.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Open Prompter saves your finished recordings to Photos so you can edit and share them.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Open Prompter listens to your reading and scrolls the script in time. Speech is processed on this device and never leaves it.</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>UIAppFonts</key>

@@ -4,28 +4,24 @@
 //
 //  V2 Feature 5 — Voice-Tracked Auto-Scroll.
 //
-//  Skeleton wrapper around `SFSpeechRecognizer` with a
-//  `suppressDeviceWork` seam mirroring `CameraStore`'s pattern. Owns:
+//  `SFSpeechRecognizer` wrapper with a `suppressDeviceWork` seam
+//  matching `CameraStore`'s pattern.
 //
-//  - Speech-recognition authorization status (mapped to a public enum
-//    so tests don't need to import Speech).
-//  - The active/inactive flag.
-//  - The script's `ScriptAligner` and the rolling cursor / recognized
-//    buffer that drives it.
+//  Audio architecture: voice tracking SHARES the camera session's
+//  audio output. The `feedAudio(_:)` entry point is invoked from
+//  `RecordingSession`'s audio sample-buffer delegate (the camera's
+//  `AVCaptureAudioDataOutput`). No `AVAudioEngine`, no second mic
+//  tap. This means voice tracking only delivers audio while the
+//  camera session is running with audio attached — i.e., when the
+//  PiP camera is on. Documented design choice (V2 Design 03 §"Audio
+//  architecture: shared mic via CMSampleBuffer fork").
 //
-//  This step deliberately leaves THREE integration points for later
-//  passes (steps 4-7 in `V2 Design 03 — Voice Tracking.md`):
-//
-//    1. The actual `SFSpeechRecognizer` + recognition-task wiring in
-//       `start()` / `stop()` is stubbed. Real recognition needs device
-//       hardware and runs in step 4 (or later).
-//    2. `feedAudio(_:)` accepts a `CMSampleBuffer?` so tests can pass
-//       `nil`. Step 5 (the audio fork in `RecordingSession`) feeds real
-//       buffers.
-//    3. Permission request is async-ready but no UI driver is wired.
-//
-//  See `OpenPrompter/Features/Camera/CameraStore.swift` for the
-//  reference implementation of the `suppressDeviceWork` pattern.
+//  Threading: the public `@MainActor` API drives lifecycle (start /
+//  stop / loadScript / state). Audio buffers arrive on the camera
+//  audio queue (background) and reach the recognizer via the
+//  nonisolated `feedAudio(_:)` method. The recognition request is
+//  documented thread-safe by Apple, so we hold it as
+//  `nonisolated(unsafe)` and rely on Apple's contract.
 //
 
 import AVFoundation
@@ -72,14 +68,52 @@ final class VoiceTracker {
     /// after `start()`. Reset by `loadScript(_:)`.
     private(set) var lastMatch: AlignmentResult?
 
-    /// Last `windowSize` filler-stripped recognized words, in the
-    /// order they arrived. Useful for debug overlays AND for the
-    /// aligner to consume.
+    /// Last `windowSize` filler-stripped recognized words.
     private(set) var lastRecognizedWords: [String] = []
 
+    /// Cumulative best-transcription string from the recognizer. Useful
+    /// for a debug overlay; not used for alignment (we use word-level
+    /// segments instead).
+    private(set) var lastTranscription: String = ""
+
     /// Current believed token position in the script (one past the last
-    /// matched word). Read-only externally; mutated by ingest.
+    /// matched word).
     var currentCursor: Int { cursor }
+
+    /// Approximate progress through the loaded script as a fraction
+    /// `[0.0, 1.0]`. Computed from the most recently matched token's
+    /// character offset divided by total script length. Returns nil
+    /// when no script is loaded or the cursor is at 0.
+    ///
+    /// Used by `TeleprompterView` to translate a cursor advance into a
+    /// scroll offset. Approximate (assumes uniform character density)
+    /// but good enough for a first cut — the lerp scroll math (V2
+    /// Design 03 §"Sensitivity / smoothness") will refine this later.
+    var cursorScriptFraction: Double? {
+        guard let aligner = aligner,
+              let last = aligner.tokens.last,
+              cursor > 0 else { return nil }
+        let totalChars = max(1, last.charOffset + last.normalized.count)
+        let idx = min(cursor - 1, aligner.tokens.count - 1)
+        guard idx >= 0 else { return nil }
+        let charOffset = aligner.tokens[idx].charOffset
+        return Double(charOffset) / Double(totalChars)
+    }
+
+    /// Reason the user-visible voice button should be disabled, or nil
+    /// if it should be enabled. Useful for surface UX.
+    var ineligibilityReason: String? {
+        switch authorization {
+        case .notDetermined:
+            return nil  // tappable; tap triggers the request
+        case .denied:
+            return "Speech recognition denied. Enable in Settings."
+        case .restricted:
+            return "Speech recognition restricted on this device."
+        case .authorized:
+            return aligner == nil ? "Script not loaded yet." : nil
+        }
+    }
 
     // MARK: - Internals
 
@@ -87,6 +121,13 @@ final class VoiceTracker {
     private var aligner: ScriptAligner?
     private var cursor: Int = 0
     private var lastMatchTime: Date = Date()
+
+    private var recognizer: SFSpeechRecognizer?
+    /// Apple's `SFSpeechAudioBufferRecognitionRequest` is documented
+    /// thread-safe for `appendAudioSampleBuffer`. Held nonisolated so
+    /// the camera audio queue can call it without a main-actor hop.
+    private nonisolated(unsafe) var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionTask: SFSpeechRecognitionTask?
 
     // MARK: - Init
 
@@ -111,13 +152,14 @@ final class VoiceTracker {
         self.cursor = 0
         self.lastMatch = nil
         self.lastRecognizedWords = []
+        self.lastTranscription = ""
         self.lastMatchTime = Date()
     }
 
     // MARK: - Authorization
 
-    /// Request speech-recognition permission. The closure is invoked on
-    /// the main actor with the new authorization status.
+    /// Request speech-recognition permission. Closure runs on the main
+    /// actor with the resulting status.
     func requestAuthorization(_ completion: @escaping @MainActor (VoiceTrackerAuthorizationStatus) -> Void) {
         if suppressDeviceWork {
             completion(authorization)
@@ -134,29 +176,73 @@ final class VoiceTracker {
 
     // MARK: - Lifecycle
 
-    /// Begin tracking. Returns `true` if the tracker is now active. A
-    /// false return means either authorization is missing OR no script
-    /// has been loaded yet.
+    /// Begin tracking. Returns `true` if the tracker is now active.
+    /// Returns `false` if authorization is missing OR no script is
+    /// loaded OR the recognizer cannot be initialized for the device's
+    /// locale.
     @discardableResult
     func start() -> Bool {
         guard authorization == .authorized else { return false }
         guard aligner != nil else { return false }
+        guard !isActive else { return true }
 
         if suppressDeviceWork {
             isActive = true
             return true
         }
 
-        // Real path (deferred to a later step):
-        //   - create SFSpeechAudioBufferRecognitionRequest
-        //   - configure: requiresOnDeviceRecognition = true,
-        //                shouldReportPartialResults = true,
-        //                contextualStrings = scriptVocabulary()
-        //   - start SFSpeechRecognitionTask, route partial results to
-        //     ingestRecognizedWords(_:)
-        //
-        // Step 3 commits the skeleton; the recognition loop ships in
-        // step 4 once it can be device-tested.
+        // Real path. Build the recognizer + request + task.
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
+              recognizer.isAvailable else {
+            return false
+        }
+        self.recognizer = recognizer
+
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        // On-device only — privacy, no 60s server cap, works offline.
+        request.requiresOnDeviceRecognition = true
+        // Feed the script's vocabulary so unusual words get recognized.
+        if let aligner = aligner {
+            // Use the unique normalized tokens. SFSpeechRecognizer
+            // documentation suggests sub-100 entries works best;
+            // truncate generously.
+            let unique = Array(Set(aligner.tokens.map(\.normalized))).prefix(200)
+            request.contextualStrings = Array(unique)
+        }
+        self.recognitionRequest = request
+
+        let task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            // Callback runs on a background queue. Hop to main and
+            // process. Capture only Sendable values out of `result`.
+            let resultSnapshot: (segments: [String], formatted: String, isFinal: Bool)?
+            if let result = result {
+                resultSnapshot = (
+                    segments: result.bestTranscription.segments.map { $0.substring },
+                    formatted: result.bestTranscription.formattedString,
+                    isFinal: result.isFinal
+                )
+            } else {
+                resultSnapshot = nil
+            }
+            let errorSnapshot = (error as NSError?)
+
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                if let snap = resultSnapshot {
+                    self.lastTranscription = snap.formatted
+                    self.handleRecognizerResult(allWords: snap.segments)
+                }
+                // The recognizer task ends on `isFinal` or error. Tear
+                // down so the next start() builds a fresh request.
+                if errorSnapshot != nil || resultSnapshot?.isFinal == true {
+                    self.tearDownRecognition()
+                    if errorSnapshot != nil { self.isActive = false }
+                }
+            }
+        }
+        self.recognitionTask = task
+
         isActive = true
         return true
     }
@@ -167,41 +253,56 @@ final class VoiceTracker {
             isActive = false
             return
         }
-        // Real path (deferred):
-        //   - cancel recognition task
-        //   - end audio request
+        tearDownRecognition()
         isActive = false
+    }
+
+    private func tearDownRecognition() {
+        recognitionRequest?.endAudio()
+        recognitionTask?.cancel()
+        recognitionRequest = nil
+        recognitionTask = nil
+        recognizer = nil
     }
 
     // MARK: - Audio
 
-    /// Forward a sample buffer from the camera session's audio output
-    /// to the speech recognizer. Step 5 calls this from
-    /// `RecordingSession`'s audio delegate. No-op in test mode and when
-    /// the tracker is inactive.
-    func feedAudio(_ sampleBuffer: CMSampleBuffer?) {
-        guard isActive, !suppressDeviceWork, let _ = sampleBuffer else { return }
-        // Real path (deferred):
-        //   request?.appendAudioSampleBuffer(sampleBuffer)
+    /// Forward a sample buffer from `RecordingSession`'s audio sample-
+    /// buffer delegate (camera audio queue) to the recognizer. Safe to
+    /// call from any thread; no-op when not active or in test mode.
+    nonisolated func feedAudio(_ sampleBuffer: CMSampleBuffer) {
+        // Read the request pointer best-effort. start() / stop() always
+        // happen on @MainActor so the pointer is stable across a single
+        // delivery.
+        guard let request = recognitionRequest else { return }
+        request.appendAudioSampleBuffer(sampleBuffer)
     }
 
     // MARK: - Recognition path
 
-    /// Process recognized words. Strips fillers, caps the rolling
-    /// buffer at `windowSize`, and (when active) runs the aligner —
-    /// updating `lastMatch` and the cursor on a successful match.
-    ///
-    /// In production this is called by the `SFSpeechRecognitionTask`
-    /// result handler with the partial-result transcription. In tests
-    /// it's the seam for synthetic "the user said X" injection.
+    /// Production path: replace the rolling buffer with the tail of the
+    /// recognizer's cumulative result, then run the aligner.
+    private func handleRecognizerResult(allWords: [String]) {
+        guard let aligner = aligner, isActive else { return }
+        let stripped = FillerWords.strip(allWords)
+        let cap = aligner.config.windowSize
+        lastRecognizedWords = Array(stripped.suffix(cap))
+        runAlignmentIfActive()
+    }
+
+    /// Test / synthetic path: APPEND the supplied words to the rolling
+    /// buffer, capping at `windowSize`, then run the aligner. Existing
+    /// unit tests rely on append semantics.
     func ingestRecognizedWords(_ words: [String]) {
         let stripped = FillerWords.strip(words)
         let cap = aligner?.config.windowSize ?? 6
         let combined = lastRecognizedWords + stripped
         lastRecognizedWords = Array(combined.suffix(cap))
+        runAlignmentIfActive()
+    }
 
+    private func runAlignmentIfActive() {
         guard let aligner = aligner, isActive else { return }
-
         let elapsed = Date().timeIntervalSince(lastMatchTime)
         let result = aligner.align(
             recognizedBuffer: lastRecognizedWords,
@@ -217,9 +318,7 @@ final class VoiceTracker {
 
     // MARK: - Test seams
 
-    /// Seed authorization status for unit tests. No-op outside test
-    /// mode — the production path always reads `SFSpeechRecognizer`
-    /// directly.
+    /// Seed authorization status for unit tests. No-op in production.
     func prepareTestAuthorization(_ status: VoiceTrackerAuthorizationStatus) {
         guard suppressDeviceWork else { return }
         self.authorization = status

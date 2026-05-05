@@ -82,6 +82,14 @@ final class AppState {
     /// single source of truth.
     let reviewPromptCounter = ReviewPromptCounter()
 
+    /// Voice-tracked auto-scroll (V2 Feature 5). Single instance held
+    /// here so the SFSpeechRecognizer lifetime survives prompter
+    /// open/close cycles. Per-script tokens are loaded via
+    /// `loadScript` when the prompter opens. The tracker receives
+    /// audio via `RecordingSession`'s `audioFork` callback (wired
+    /// below) — no second mic tap, no AVAudioEngine.
+    let voiceTracker = VoiceTracker()
+
     // MARK: - Banner
 
     enum BannerKind: Equatable {
@@ -116,6 +124,14 @@ final class AppState {
                 counter.recordSuccessfulRecording()
             }
         )
+        // Wire the audio fork: every camera audio sample buffer is
+        // forwarded to the voice tracker. The tracker no-ops when its
+        // recognition request is nil (i.e., not active), so the cost
+        // when voice tracking is off is one nil check per buffer.
+        let tracker = self.voiceTracker
+        self.recordingSession.audioFork = { [weak tracker] buffer in
+            tracker?.feedAudio(buffer)
+        }
         resolveBookmarkAndStart()
         scanForInterruptedRecording()
         // Debug-only: launch flag `-autoDemo 1` opens the demo prompter

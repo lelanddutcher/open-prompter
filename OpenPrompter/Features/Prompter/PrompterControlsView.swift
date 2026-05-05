@@ -12,6 +12,14 @@ import SwiftUI
 
 struct PrompterControlsView: View {
     var vm: PrompterViewModel
+    /// Voice tracker injected from `AppState` so the right half of the
+    /// play row can read `.isActive` and re-render when the tracker
+    /// flips. Action handling lives in the parent (`TeleprompterView`)
+    /// so the orchestration logic — permission flow, mutual exclusion
+    /// with PLAY — has access to both `vm` and `appState`.
+    var voiceTracker: VoiceTracker
+    var onPlayTap: () -> Void
+    var onVoiceTap: () -> Void
 
     private let rowHeight: CGFloat = 40
     private let buttonHeight: CGFloat = 44
@@ -20,13 +28,12 @@ struct PrompterControlsView: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            // Row 1 — primary action. The MIRROR button lived alongside
-            // PLAY here until the post-merge dogfood-pass-2 control move
-            // centralized mirror handling on the bottom chip strip
-            // (`TeleprompterView.mirrorStatusPill` does the toggle there).
-            // PLAY now spans the row width.
-            HStack(spacing: 8) {
-                Button(action: { vm.togglePlay() }) {
+            // Row 1 — primary action. PLAY (left half) and VOICE (right
+            // half) are mutually exclusive; tapping either stops the
+            // other (orchestration handled by parent's onPlayTap /
+            // onVoiceTap closures).
+            HStack(spacing: 6) {
+                Button(action: onPlayTap) {
                     HStack(spacing: 6) {
                         Image(systemName: vm.isPlaying ? "pause.fill" : "play.fill")
                             .font(.system(size: 12, weight: .bold))
@@ -44,6 +51,26 @@ struct PrompterControlsView: View {
                             .stroke(vm.isPlaying ? Theme.green : Theme.border, lineWidth: 1)
                     )
                 }
+
+                Button(action: onVoiceTap) {
+                    HStack(spacing: 6) {
+                        Image(systemName: voiceTracker.isActive ? "waveform.circle.fill" : "waveform")
+                            .font(.system(size: 12, weight: .bold))
+                        Text(voiceTracker.isActive ? "TRACK" : "VOICE")
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .tracking(1.0)
+                    }
+                    .frame(height: buttonHeight)
+                    .frame(maxWidth: .infinity)
+                    .background(voiceTracker.isActive ? Theme.green : Theme.surface)
+                    .foregroundStyle(voiceTracker.isActive ? Color(red: 0.03, green: 0.09, blue: 0.05) : Theme.fg)
+                    .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: corner, style: .continuous)
+                            .stroke(voiceTracker.isActive ? Theme.green : Theme.border, lineWidth: 1)
+                    )
+                }
+                .accessibilityLabel(voiceTracker.isActive ? "Stop voice tracking" : "Start voice tracking")
             }
 
             // Row 2 — speed
