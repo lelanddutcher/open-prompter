@@ -44,7 +44,7 @@ open prompter reads the markdown file you already have, from iCloud Drive or you
 
 these are shipping behind the scenes — they work, they've been dogfooded, but the polish dial is still turning. expect rough edges; report bugs.
 
-#### 🎥 selfie camera with **open-gate recording**
+#### selfie camera with **open-gate recording**
 
 front-camera picture-in-picture so you can frame your shot while you read. the thing creators care about: **open gate** mode reads the iPhone's full 1×1 sensor (3840×3840 on iPhone 17 family) so you have headroom to reframe in post — vertical for shorts, horizontal for YouTube, square for socials, all from one take. zero cropping at capture.
 
@@ -53,7 +53,7 @@ front-camera picture-in-picture so you can frame your shot while you read. the t
 - tally light border + dynamic island live activity while recording
 - per-take stabilization, mic source picker, quality + framerate controls
 
-#### 💾 save next to your script
+#### save next to your script
 
 the toggle that's saved me hours: **save the recording right next to the markdown file it goes with.** in the same folder, with a matching filename. no Photos library hunt, no AirDrop dance — your script and your B-roll live together where you can edit on your mac.
 
@@ -61,7 +61,7 @@ the toggle that's saved me hours: **save the recording right next to the markdow
 - iCloud Drive recognizes the new file immediately on the desktop
 - recovery banner if a take got force-quit mid-write
 
-#### 🎙️ voice-tracked auto-scroll **(beta)**
+#### voice-tracked auto-scroll **(beta)**
 
 stop fiddling with the speed slider. tap the voice button (right half of the play button) and read — the prompter follows you. on-device speech recognition; nothing leaves your phone. comes with:
 
@@ -70,13 +70,9 @@ stop fiddling with the speed slider. tap the voice button (right half of the pla
 - velocity-controlled scroll that smoothly accelerates and decelerates with your pace
 - silence detection: pause talking for ~1.5s and the scroll halts so you can scroll back to re-read
 
-#### 🎛️ bluetooth remote control
+#### bluetooth remote control
 
 map keyboard / presenter / media-key events to play, pause, mirror, jump-to-start, and other prompter actions. the hardware-vendor zoo (Logitech R400, AirTurn, Apple keyboards, generic media keys) is supported through one unified event bus.
-
-#### 📺 Live Activity
-
-the recording chip surfaces in the Dynamic Island while you're filming. island shows elapsed time and recording state; tally light border in the prompter view itself stays your primary indicator.
 
 ---
 
@@ -115,12 +111,6 @@ set your development team in signing, then run on a simulator or device.
   &nbsp;&nbsp;&nbsp;
   <img src="docs/mirror.png" alt="Mirror mode for teleprompter rigs" width="220">
 </p>
-
-## design language
-
-the visual system lives in [`design-language.md`](./design-language.md). it covers the color tokens (prompter black, open green, mirror red), the type scale (JetBrains Mono for chrome, Inter for body), the shape language, and the rules for how the terminal / markdown motifs get used.
-
-the animated brand mark is specified in [`logo-animation.md`](./logo-animation.md) — two brackets with eyes inside that sweep and blink like a reader. the reference implementation is in [`OpenPrompter/UI/OpenPrompterLogo.swift`](./OpenPrompter/UI/OpenPrompterLogo.swift).
 
 ## contributing
 
