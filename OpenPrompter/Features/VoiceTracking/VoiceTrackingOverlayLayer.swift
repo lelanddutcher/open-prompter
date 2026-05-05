@@ -12,24 +12,28 @@
 //  - **Audio meter HUD** (left edge): an 8-segment vertical bar fed
 //    by `VoiceTracker.audioLevel`, plus the last few recognized words
 //    and a RESET button.
-//  - **Reading-line indicator** (full width): a thin horizontal line
-//    at `viewportHeight * readingLineFraction`, with a draggable
-//    chevron handle on the right that updates the fraction binding.
+//  - **Reading-box indicator** (full width): a tinted band between
+//    two draggable horizontal edges (TOP + BOT). The velocity
+//    controller treats the band as a deadzone — matched word inside
+//    → no scroll correction; above top → slow/reverse; below bottom
+//    → speed up. Two zones to dial in feel (position + tolerance).
 //
 
 import SwiftUI
 
 struct VoiceTrackingOverlayLayer: View {
     let tracker: VoiceTracker
-    @Binding var readingLineFraction: Double
+    @Binding var boxTopFraction: Double
+    @Binding var boxBottomFraction: Double
 
     var body: some View {
         ZStack {
             VoiceTrackingHUDView(tracker: tracker)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            VoiceReadingLineIndicatorView(
+            VoiceReadingBoxIndicatorView(
                 isActive: tracker.isActive,
-                fraction: $readingLineFraction
+                topFraction: $boxTopFraction,
+                bottomFraction: $boxBottomFraction
             )
         }
         .allowsHitTesting(tracker.isActive)
@@ -51,11 +55,13 @@ struct VoiceTrackingChrome: ViewModifier {
     /// always re-render the target until voice was toggled off/on).
     struct LayoutKey: Equatable {
         let fontSize: Double
-        let readingLineFraction: Double
+        let boxTopFraction: Double
+        let boxBottomFraction: Double
     }
 
     let tracker: VoiceTracker
-    @Binding var readingLineFraction: Double
+    @Binding var boxTopFraction: Double
+    @Binding var boxBottomFraction: Double
     let onCursorChange: () -> Void
     let layoutKey: LayoutKey
 
@@ -64,15 +70,13 @@ struct VoiceTrackingChrome: ViewModifier {
             .overlay {
                 VoiceTrackingOverlayLayer(
                     tracker: tracker,
-                    readingLineFraction: $readingLineFraction
+                    boxTopFraction: $boxTopFraction,
+                    boxBottomFraction: $boxBottomFraction
                 )
             }
             .onChange(of: tracker.lastMatch?.cursorIndex) { _, _ in
                 onCursorChange()
             }
-            // Single onChange for both font-size AND reading-line
-            // moves. Whatever caused observing the @Binding's wrapped
-            // value to miss, the value-typed struct fires reliably.
             .onChange(of: layoutKey) { _, _ in
                 onCursorChange()
             }
@@ -153,11 +157,18 @@ private struct VoiceTrackingHUDView: View {
     }
 }
 
-// MARK: - Reading-line indicator
+// MARK: - Reading-box indicator
 
-private struct VoiceReadingLineIndicatorView: View {
+/// Two-handle band (top edge + bottom edge) marking where matched
+/// words should land on screen. The velocity controller treats
+/// the band as a deadzone — matched word inside the band → no
+/// scroll correction; above the top → slow down; below the bottom
+/// → speed up. Two zones to dial in feel (position + tolerance)
+/// instead of a single line.
+private struct VoiceReadingBoxIndicatorView: View {
     let isActive: Bool
-    @Binding var fraction: Double
+    @Binding var topFraction: Double
+    @Binding var bottomFraction: Double
 
     var body: some View {
         if isActive {
@@ -169,24 +180,42 @@ private struct VoiceReadingLineIndicatorView: View {
     }
 
     private func content(geo: GeometryProxy) -> some View {
-        let y = geo.size.height * CGFloat(fraction)
+        let topY = geo.size.height * CGFloat(topFraction)
+        let bottomY = geo.size.height * CGFloat(bottomFraction)
         return ZStack(alignment: .topLeading) {
             Color.clear
+            // Tinted band between top + bottom — visualizes the
+            // deadzone for the velocity controller.
+            Rectangle()
+                .fill(Theme.green.opacity(0.07))
+                .frame(height: max(0, bottomY - topY))
+                .padding(.leading, geo.size.width * 0.55)
+                .padding(.trailing, 16)
+                .offset(y: topY)
+            // Edge lines — top + bottom.
             Rectangle()
                 .fill(Theme.green.opacity(0.35))
                 .frame(height: 1)
-                .padding(.leading, geo.size.width * 0.6)
+                .padding(.leading, geo.size.width * 0.55)
                 .padding(.trailing, 60)
-                .offset(y: y)
-            handle(geo: geo, y: y)
+                .offset(y: topY)
+            Rectangle()
+                .fill(Theme.green.opacity(0.35))
+                .frame(height: 1)
+                .padding(.leading, geo.size.width * 0.55)
+                .padding(.trailing, 60)
+                .offset(y: bottomY)
+            // Handles for each edge.
+            handle(label: "TOP", geo: geo, y: topY, isTop: true)
+            handle(label: "BOT", geo: geo, y: bottomY, isTop: false)
         }
     }
 
-    private func handle(geo: GeometryProxy, y: CGFloat) -> some View {
+    private func handle(label: String, geo: GeometryProxy, y: CGFloat, isTop: Bool) -> some View {
         HStack(spacing: 3) {
             Image(systemName: "chevron.up.chevron.down")
                 .font(.system(size: 9, weight: .bold))
-            Text("READ")
+            Text(label)
                 .font(.system(size: 8, weight: .bold, design: .monospaced))
                 .tracking(0.5)
         }
@@ -200,12 +229,15 @@ private struct VoiceReadingLineIndicatorView: View {
             DragGesture()
                 .onChanged { value in
                     let height = geo.size.height
-                    // 20pt clamp at top/bottom — tighter than the
-                    // earlier 40pt so the user can push the line very
-                    // close to the screen edge for selfie-cam eye
-                    // contact (the previous limit hit them too soon).
-                    let newY = max(20, min(height - 20, value.location.y))
-                    fraction = Double(newY / height)
+                    let raw = max(20, min(height - 20, value.location.y))
+                    let newFrac = Double(raw / height)
+                    if isTop {
+                        // Top can't go below bottom - 0.05 of viewport.
+                        topFraction = min(newFrac, bottomFraction - 0.05)
+                    } else {
+                        // Bottom can't go above top + 0.05.
+                        bottomFraction = max(newFrac, topFraction + 0.05)
+                    }
                 }
         )
     }

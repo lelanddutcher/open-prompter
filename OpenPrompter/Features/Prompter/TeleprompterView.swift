@@ -43,15 +43,20 @@ struct TeleprompterView: View {
     /// for Feature 8's engagement signal. `nil` when paused.
     @State private var playSessionStartedAt: Date? = nil
 
-    /// Reading-line position for voice tracking — fraction of viewport
-    /// height where the cursor lands when a match is found. 0.2 puts
-    /// the matched word near the top of the viewport, which tracks
-    /// well with selfie-camera eye contact (the user looks at the lens,
-    /// the next-to-read word sits just below). Adjustable in-prompter
-    /// via the draggable indicator on screen when voice tracking is
-    /// active.
-    @AppStorage("pref.voice.readingLineFraction")
-    private var voiceReadingLineFraction: Double = 0.2
+    /// Reading-box top edge — fraction of viewport height. When voice
+    /// tracking and the matched word's on-screen position is ABOVE this
+    /// edge (lower y), scroll slows / reverses to keep the matched word
+    /// from drifting off-screen-up.
+    @AppStorage("pref.voice.boxTopFraction")
+    private var voiceBoxTopFraction: Double = 0.15
+
+    /// Reading-box bottom edge. Matched word BELOW this edge (higher y)
+    /// triggers scroll speed-up. Between top and bottom = deadzone (no
+    /// scroll change). Default 0.45 — about 30% of viewport height
+    /// between the edges, comfortable reading band that lets the user
+    /// finish a sentence before scroll kicks in.
+    @AppStorage("pref.voice.boxBottomFraction")
+    private var voiceBoxBottomFraction: Double = 0.45
 
     /// Mirror of `PipTile.hidden` published via `PipHiddenPreferenceKey`.
     /// Cosmetic only — `PipTile` now owns its own `CameraPreview` so the
@@ -604,11 +609,13 @@ struct TeleprompterView: View {
         .modifier(
             VoiceTrackingChrome(
                 tracker: appState.voiceTracker,
-                readingLineFraction: $voiceReadingLineFraction,
+                boxTopFraction: $voiceBoxTopFraction,
+                boxBottomFraction: $voiceBoxBottomFraction,
                 onCursorChange: handleVoiceCursorChange,
                 layoutKey: VoiceTrackingChrome.LayoutKey(
                     fontSize: vm.fontSize,
-                    readingLineFraction: voiceReadingLineFraction
+                    boxTopFraction: voiceBoxTopFraction,
+                    boxBottomFraction: voiceBoxBottomFraction
                 )
             )
         )
@@ -1177,16 +1184,36 @@ struct TeleprompterView: View {
         }
     }
 
-    /// Translate a cursor advance into a target scroll offset. The
-    /// per-frame `handleScrollTick` then lerps the actual scroll
-    /// toward this target — gives a smooth glide instead of the jumpy
-    /// teleport-on-each-match feel of a direct seek.
+    /// Translate a cursor advance into a target scroll offset using
+    /// the BOUNDING BOX model: matched word inside the box → no
+    /// scroll change (deadzone); above top → slow/reverse scroll;
+    /// below bottom → speed up scroll. The per-frame velocity
+    /// controller in `handleScrollTick` glides scroll toward this
+    /// target.
     fileprivate func handleVoiceCursorChange() {
         guard appState.voiceTracker.isActive,
               let fraction = appState.voiceTracker.cursorScriptFraction,
-              vm.contentHeight > 0 else { return }
-        let lineFromTop = vm.viewportHeight * CGFloat(voiceReadingLineFraction)
-        let target = CGFloat(fraction) * vm.contentHeight - lineFromTop
+              vm.contentHeight > 0,
+              vm.viewportHeight > 0 else { return }
+        let cursorContentY = CGFloat(fraction) * vm.contentHeight
+        let onScreenY = cursorContentY - vm.scroller.offset
+        let topY = vm.viewportHeight * CGFloat(voiceBoxTopFraction)
+        let bottomY = vm.viewportHeight * CGFloat(voiceBoxBottomFraction)
+
+        let target: CGFloat
+        if onScreenY < topY {
+            // Matched word above the band — scroll has overshot or
+            // user paused. Roll back so matched word lands at top.
+            target = cursorContentY - topY
+        } else if onScreenY > bottomY {
+            // Matched word below the band — user is reading ahead of
+            // scroll. Push scroll forward so matched word lands at bottom.
+            target = cursorContentY - bottomY
+        } else {
+            // Inside the band — no correction. Hold current scroll;
+            // velocity controller decelerates to zero.
+            target = vm.scroller.offset
+        }
         vm.voiceTargetOffset = max(0, target)
     }
 

@@ -201,14 +201,32 @@ public struct ScriptAligner: Sendable {
         let lookAhead = widened
             ? min(config.widenedLookAhead, max(0, tokens.count - cursorIndex))
             : config.lookAhead
+        let cursorStart = max(0, cursorIndex - lookBack)
+        let cursorEnd = min(tokens.count, cursorIndex + lookAhead)
         let searchStart: Int
         let searchEnd: Int
         if let visible = visibleRange {
-            searchStart = max(0, visible.lowerBound)
-            searchEnd = min(tokens.count, visible.upperBound)
+            // INTERSECT visible + cursor-relative. Both must agree:
+            // visible alone was letting a generic word at cursor=10
+            // jump to the same word at position 80 inside the visible
+            // window. Now the cursor-relative window also caps the
+            // search. Fallback to visible-only if cursor is outside
+            // the visible range — handles "user scrolled manually,
+            // wants voice to pick up from new position".
+            let visStart = max(0, visible.lowerBound)
+            let visEnd = min(tokens.count, visible.upperBound)
+            let lo = max(cursorStart, visStart)
+            let hi = min(cursorEnd, visEnd)
+            if lo < hi {
+                searchStart = lo
+                searchEnd = hi
+            } else {
+                searchStart = visStart
+                searchEnd = visEnd
+            }
         } else {
-            searchStart = max(0, cursorIndex - lookBack)
-            searchEnd = min(tokens.count, cursorIndex + lookAhead)
+            searchStart = cursorStart
+            searchEnd = cursorEnd
         }
         let lastCandidate = searchEnd - bufN
 
