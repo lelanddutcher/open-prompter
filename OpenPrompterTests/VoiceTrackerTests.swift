@@ -1,0 +1,227 @@
+//
+//  VoiceTrackerTests.swift
+//  OpenPrompterTests
+//
+//  Unit tests for VoiceTracker (V2 Feature 5 — Voice-Tracked Auto-Scroll).
+//
+//  These tests exercise ONLY the permission state machine and the
+//  inject-then-align integration path. The actual SFSpeechRecognizer
+//  and audio sample-buffer feeding require a real device and are NOT
+//  exercised here. The seam is `suppressDeviceWork: true` on init, plus
+//  `prepareTestAuthorization(_:)` to seed status and
+//  `ingestRecognizedWords(_:)` to simulate ASR partial results.
+//
+//  Pattern mirrors `CameraStore`'s `suppressDeviceWork` model — see
+//  CameraTests.swift for the equivalent style on the camera side.
+//
+
+import XCTest
+@testable import OpenPrompter
+
+@MainActor
+final class VoiceTrackerTests: XCTestCase {
+
+    // MARK: - Init
+
+    func testInitDefaults() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        XCTAssertFalse(t.isActive)
+        XCTAssertNil(t.lastMatch)
+        XCTAssertEqual(t.authorization, .notDetermined)
+        XCTAssertEqual(t.lastRecognizedWords, [])
+        XCTAssertEqual(t.currentCursor, 0)
+    }
+
+    // MARK: - Permission seam
+
+    func testPrepareTestAuthorizationAuthorized() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        XCTAssertEqual(t.authorization, .authorized)
+    }
+
+    func testPrepareTestAuthorizationDenied() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.denied)
+        XCTAssertEqual(t.authorization, .denied)
+    }
+
+    func testPrepareTestAuthorizationRestricted() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.restricted)
+        XCTAssertEqual(t.authorization, .restricted)
+    }
+
+    // MARK: - Start gating on authorization
+
+    func testStartFailsWhenNotDetermined() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.loadScript("hello world")
+        // notDetermined: must NOT silently start. Caller is expected to
+        // request permission first.
+        XCTAssertFalse(t.start())
+        XCTAssertFalse(t.isActive)
+    }
+
+    func testStartFailsWhenDenied() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.denied)
+        t.loadScript("hello world")
+        XCTAssertFalse(t.start())
+        XCTAssertFalse(t.isActive)
+    }
+
+    func testStartFailsWhenRestricted() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.restricted)
+        t.loadScript("hello world")
+        XCTAssertFalse(t.start())
+        XCTAssertFalse(t.isActive)
+    }
+
+    func testStartFailsWithoutScript() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        // No loadScript yet — there is nothing to align against.
+        XCTAssertFalse(t.start())
+        XCTAssertFalse(t.isActive)
+    }
+
+    func testStartSucceedsWhenAuthorizedAndScriptLoaded() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("hello world there")
+        XCTAssertTrue(t.start())
+        XCTAssertTrue(t.isActive)
+    }
+
+    // MARK: - Stop / restart
+
+    func testStopDeactivates() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("hello world")
+        XCTAssertTrue(t.start())
+        t.stop()
+        XCTAssertFalse(t.isActive)
+    }
+
+    func testStopAllowsRestart() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("hello world")
+        _ = t.start()
+        t.stop()
+        XCTAssertTrue(t.start(), "must be able to restart after stop")
+        XCTAssertTrue(t.isActive)
+    }
+
+    // MARK: - loadScript reset
+
+    func testLoadScriptResetsState() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("first script with several words to align")
+        XCTAssertTrue(t.start())
+        t.ingestRecognizedWords(["first", "script"])
+        XCTAssertGreaterThan(t.currentCursor, 0,
+                             "cursor must advance after a forward match")
+
+        t.loadScript("a different script entirely loaded fresh")
+        XCTAssertEqual(t.currentCursor, 0)
+        XCTAssertNil(t.lastMatch)
+        XCTAssertEqual(t.lastRecognizedWords, [])
+    }
+
+    // MARK: - Ingest path (filler stripping + alignment)
+
+    func testIngestStripsFillers() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("hello world")
+        t.ingestRecognizedWords(["welcome", "um", "back", "uh", "to", "show"])
+        XCTAssertFalse(t.lastRecognizedWords.contains("um"))
+        XCTAssertFalse(t.lastRecognizedWords.contains("uh"))
+        XCTAssertTrue(t.lastRecognizedWords.contains("welcome"))
+        XCTAssertTrue(t.lastRecognizedWords.contains("back"))
+    }
+
+    func testIngestUpdatesMatchWhenActive() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("the quick brown fox jumps over")
+        XCTAssertTrue(t.start())
+        t.ingestRecognizedWords(["the", "quick", "brown"])
+        XCTAssertNotNil(t.lastMatch)
+        XCTAssertTrue(t.lastMatch?.matched ?? false)
+        XCTAssertEqual(t.currentCursor, 3)
+    }
+
+    func testIngestSkipsAlignmentWhenInactive() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("the quick brown fox")
+        // Don't start — isActive remains false.
+        t.ingestRecognizedWords(["the", "quick"])
+        XCTAssertNil(t.lastMatch, "alignment must not run when inactive")
+        XCTAssertEqual(t.currentCursor, 0)
+        // Buffer SHOULD still update so callers (e.g., a debug overlay)
+        // can show the recognition output.
+        XCTAssertEqual(t.lastRecognizedWords, ["the", "quick"])
+    }
+
+    func testIngestNoMatchKeepsCursor() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("hello world there")
+        XCTAssertTrue(t.start())
+        t.ingestRecognizedWords(["unrelated", "stuff", "here"])
+        XCTAssertNotNil(t.lastMatch)
+        XCTAssertFalse(t.lastMatch?.matched ?? true)
+        XCTAssertEqual(t.currentCursor, 0)
+    }
+
+    func testIngestBufferCappedAtWindowSize() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("alpha beta gamma delta epsilon zeta eta theta")
+        // Inject 20 distinct words. Buffer must cap at config.windowSize
+        // (default 6).
+        let words = (0..<20).map { "noise\($0)" }
+        t.ingestRecognizedWords(words)
+        XCTAssertLessThanOrEqual(t.lastRecognizedWords.count, 6)
+    }
+
+    func testIngestAdvancesCursorAcrossCalls() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("alpha beta gamma delta epsilon zeta")
+        XCTAssertTrue(t.start())
+
+        t.ingestRecognizedWords(["alpha", "beta"])
+        XCTAssertEqual(t.currentCursor, 2)
+
+        // Buffer accumulates [alpha, beta, gamma, delta]. Aligner finds
+        // the perfect match at script[0..<4]; cursor advances to 4.
+        t.ingestRecognizedWords(["gamma", "delta"])
+        XCTAssertEqual(t.currentCursor, 4)
+    }
+
+    // MARK: - feedAudio is a safe no-op in test mode
+
+    func testFeedAudioSafeInTestMode() {
+        // The test mode short-circuits so we don't drag a real
+        // CMSampleBuffer into the unit test surface. Just verify the
+        // method exists, can be called without state mutation, and
+        // doesn't crash.
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("hello world")
+        _ = t.start()
+        // Real CMSampleBuffer construction is platform-only; in tests
+        // we just ensure the method is available and gated correctly.
+        // The method signature takes CMSampleBuffer? for this seam.
+        t.feedAudio(nil)
+        XCTAssertTrue(t.isActive, "feedAudio must not deactivate")
+    }
+}
