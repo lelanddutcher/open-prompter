@@ -201,7 +201,7 @@ struct SettingsView: View {
                         .foregroundStyle(Theme.dim)
 
                     Toggle("camera style", isOn: $labsCameraStyle)
-                    Text("in-progress: three-mode camera composition picker (off, picture-in-picture, behind text) with a draggable corner-snapping pip tile. surface a camera section above when on.")
+                    Text("camera composition picker (off / picture-in-picture). tap the pip tile to expand to full-screen preview.")
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.dim)
 

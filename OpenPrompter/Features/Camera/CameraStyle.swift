@@ -57,13 +57,14 @@ enum CameraStyle: String, CaseIterable, Codable, Hashable, Sendable {
         }
     }
 
-    /// Cycle order for the chip tap gesture. `off → pip → behind → off`,
-    /// per V2 Design 01 §"Gestures on the chip".
+    /// Cycle order for the chip tap gesture. `off → pip → off`.
+    /// Behind mode was removed — the full-screen camera check is now a
+    /// tap-to-promote interaction on the PiP tile (iOS PiP expand style).
     var nextStyle: CameraStyle {
         switch self {
         case .off:    return .pip
-        case .pip:    return .behind
-        case .behind: return .off
+        case .pip:    return .off
+        case .behind: return .off  // legacy fallback for users who had it set
         }
     }
 

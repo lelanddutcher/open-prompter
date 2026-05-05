@@ -64,11 +64,15 @@ struct PipTile: View {
     /// for the controls so the tile can't be dragged under them. When the
     /// chrome is hidden the safe area expands to the full viewport.
     var chromeVisible: Bool
+    /// When true, the tile expands to fill the full screen — a "how do I
+    /// look?" preview showing the complete recording frame. The SAME
+    /// CameraPreview layer is reused (no cold-start delay). The parent
+    /// manages this binding; PipTile renders the full-screen layout
+    /// (camera + minimize button) in place of the draggable tile.
+    @Binding var promoted: Bool
     /// Promotion handler — called when the user single-taps the tile. The
-    /// parent flips the prompter into a "preview is full frame, text is in
-    /// a bottom band" mode. Feature 1 ships the gesture and persists the
-    /// position; the promote/demote layout shift comes when the parent
-    /// adopts it.
+    /// parent flips `promoted` to true. Kept for API compatibility; the
+    /// parent can also set `promoted` directly.
     var onPromote: (() -> Void)? = nil
 
     @State private var size: PipSize
@@ -105,12 +109,14 @@ struct PipTile: View {
         horizontalMirror: Bool,
         verticalMirror: Bool,
         chromeVisible: Bool,
+        promoted: Binding<Bool> = .constant(false),
         onPromote: (() -> Void)? = nil
     ) {
         self.store = store
         self.horizontalMirror = horizontalMirror
         self.verticalMirror = verticalMirror
         self.chromeVisible = chromeVisible
+        self._promoted = promoted
         self.onPromote = onPromote
         // Seed from prefs so re-entry into the prompter remembers the user's
         // last drop point and size. Position falls back to the registered
@@ -123,24 +129,28 @@ struct PipTile: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                if hidden {
+                if hidden && !promoted {
                     chevronTab(in: geo.size)
                 } else {
-                    tileBody(in: geo.size, safeArea: geo.safeAreaInsets)
+                    // Single structural path for the CameraPreview — frame
+                    // and position change based on `promoted`, but the view
+                    // stays at the same spot in the tree. SwiftUI reuses the
+                    // UIView (no teardown/rebuild, no cold-start delay).
+                    unifiedCameraBody(
+                        in: geo.size,
+                        safeArea: geo.safeAreaInsets
+                    )
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .allowsHitTesting(true)
-            // Publish the hidden state so the parent can dim peer chrome
-            // when the user has tucked the tile away (purely cosmetic; no
-            // longer load-bearing for camera mount, since the camera lives
-            // inside this view).
             .preference(key: PipHiddenPreferenceKey.self, value: hidden)
         }
+        .ignoresSafeArea(promoted ? .all : [])
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("camera tile")
-        .accessibilityValue(Text(size.displayName))
-        .accessibilityHint("double tap to swap sizes; drag to move")
+        .accessibilityLabel(promoted ? "full-screen camera preview" : "camera tile")
+        .accessibilityValue(Text(promoted ? "full screen" : size.displayName))
+        .accessibilityHint(promoted ? "tap minimize to return to tile" : "double tap to swap sizes; drag to move")
         .accessibilityAction(named: "cycle size") { cycleSize() }
         .accessibilityAction(named: hidden ? "show tile" : "hide tile") {
             if hidden { restoreTile() } else { hideTile() }
@@ -149,32 +159,43 @@ struct PipTile: View {
 
     // MARK: - Sub-views
 
+    /// Unified camera body — ONE structural CameraPreview that stays in
+    /// the view tree regardless of `promoted`. When `promoted == false`,
+    /// it renders as the draggable PiP tile. When `promoted == true`, the
+    /// same view expands to fill the viewport. SwiftUI reuses the backing
+    /// UIView (same AVCaptureVideoPreviewLayer), so the transition is
+    /// instant — no teardown, no cold-start, no black frames.
     @ViewBuilder
-    private func tileBody(in viewport: CGSize, safeArea: EdgeInsets) -> some View {
-        let dims = size.dimensions
-        // Resolve the persisted normalized position to a viewport-space
-        // center, then clamp into the visible safe area before applying the
-        // live drag translation. Clamping the _persisted_ position rather
-        // than the post-translation position means the user can briefly
-        // overshoot during a drag; it snaps back to in-bounds on release.
-        let resolved = resolvedCenter(in: viewport, dims: dims, safeArea: safeArea)
-        let tileCenter = CGPoint(
-            x: resolved.x + dragOffset.width,
-            y: resolved.y + dragOffset.height
-        )
+    private func unifiedCameraBody(
+        in viewport: CGSize,
+        safeArea: EdgeInsets
+    ) -> some View {
+        let dims = promoted
+            ? CGSize(width: viewport.width, height: viewport.height)
+            : size.dimensions
+        let center: CGPoint = {
+            if promoted {
+                return CGPoint(x: viewport.width / 2, y: viewport.height / 2)
+            }
+            let resolved = resolvedCenter(
+                in: viewport, dims: size.dimensions, safeArea: safeArea
+            )
+            return CGPoint(
+                x: resolved.x + dragOffset.width,
+                y: resolved.y + dragOffset.height
+            )
+        }()
+        let cornerRadius: CGFloat = promoted ? 0 : 14
 
-        // QA REVIEWER FOCUS: the CameraPreview is mounted INSIDE the tile
-        // body (dogfood-pass-11 reversion of the pass-8 frame-preference
-        // hoist). The preview layer's session is the shared one from
-        // CameraStore — so swapping between `.pip` and `.behind` does NOT
-        // pay an AVFoundation cold-start cost; only the layer attachment
-        // is rebuilt, and that's microseconds. Leaving the preview here
-        // also means the rect is owned by SwiftUI's normal layout pass
-        // (via `.frame` + `.position` on this very ZStack child), so
-        // there's no coordinate-space mismatch between the published
-        // `pipFrame` and the parent's `.position(x:y:)` — the bug that
-        // broke the empty-PiP rendering in pass-8 to pass-10.
         ZStack {
+            // Black background — only visible in promoted mode (fills
+            // the full screen behind letterboxed content).
+            if promoted {
+                Color.black
+            }
+
+            // THE camera preview — structurally stable across promote/
+            // demote. Same session, same layer, same id.
             CameraPreview(
                 session: store.session,
                 gravity: .resizeAspect,
@@ -184,43 +205,54 @@ struct PipTile: View {
                 sessionConfigurationVersion: store.sessionConfigurationVersion
             )
             .id("camera-preview-pip")
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
 
-            // Border + shadow drawn ON TOP of the preview so the rounded
-            // stroke remains crisp against any preview content.
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Theme.border, lineWidth: 1)
+            // Tile border — hidden when promoted.
+            if !promoted {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Theme.border, lineWidth: 1)
+            }
+
+            // Minimize button — only in promoted mode, bottom-right.
+            if promoted {
+                Button { promoted = false } label: {
+                    Image(systemName: "pip.enter")
+                        .font(.system(size: 22, weight: .semibold))
+                        .frame(width: 56, height: 56)
+                        .foregroundStyle(.white)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().stroke(.white.opacity(0.25), lineWidth: 1))
+                        .shadow(color: .black.opacity(0.5), radius: 10, y: 4)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(.trailing, 24)
+                .padding(.bottom, 44)
+            }
         }
         .frame(width: dims.width, height: dims.height)
         .contentShape(Rectangle())
-        .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 4)
-        .position(tileCenter)
-        // Gesture ordering matters: SwiftUI evaluates `onTapGesture`
-        // modifiers from outside-in, and a `count: 1` recognized first
-        // commits before SwiftUI ever waits for the second tap. Apply
-        // the higher-count gesture first (closer to the view) so single
-        // taps get the chance to be recognized as the start of a
-        // double tap.
-        // Double-tap → cycle preset sizes. Reduce-motion drops the
-        // spring; the size still changes, just instantly.
-        .onTapGesture(count: 2) { cycleSize() }
-        // Single tap → promote (handled by parent). Currently
-        // `onPromote` is unwired — Feature 2 adds the layout reorg
-        // that listens here.
-        .onTapGesture(count: 1) { onPromote?() }
-        // Drag → live track + drop-and-stay on release. We do NOT
-        // spring back to a corner; the tile stays where the user
-        // lifted off.
+        .shadow(color: promoted ? .clear : .black.opacity(0.35), radius: 8, x: 0, y: 4)
+        .position(center)
+        // Gestures — disabled when promoted (only the minimize button
+        // is interactive in full-screen mode).
+        .onTapGesture(count: 2) { if !promoted { cycleSize() } }
+        .onTapGesture(count: 1) {
+            if !promoted { onPromote?() }
+        }
         .gesture(
             DragGesture()
-                .onChanged { value in dragOffset = value.translation }
+                .onChanged { value in
+                    if !promoted { dragOffset = value.translation }
+                }
                 .onEnded { value in
-                    onDragEnded(
-                        value: value,
-                        in: viewport,
-                        dims: dims,
-                        safeArea: safeArea
-                    )
+                    if !promoted {
+                        onDragEnded(
+                            value: value,
+                            in: viewport,
+                            dims: size.dimensions,
+                            safeArea: safeArea
+                        )
+                    }
                 }
         )
     }

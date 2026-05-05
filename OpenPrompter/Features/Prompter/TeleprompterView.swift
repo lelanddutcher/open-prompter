@@ -50,6 +50,13 @@ struct TeleprompterView: View {
     /// tile is hidden" affordance.
     @State private var pipHidden: Bool = false
 
+    /// True when the user tapped the PiP tile to expand it to full-screen
+    /// preview ("how do I look?" check). The full-screen overlay shows the
+    /// camera feed filling the screen with a minimize button to return to
+    /// PiP. Replaces the old "behind" mode with a more intuitive iOS-PiP-
+    /// style expand/collapse interaction.
+    @State private var cameraPromoted: Bool = false
+
     /// Captured `vm.scroller.offset` at the moment a manual drag begins.
     /// The DragGesture's `value.translation` is relative to gesture start,
     /// so we apply the cumulative translation against this baseline and
@@ -102,47 +109,8 @@ struct TeleprompterView: View {
 
     var body: some View {
         ZStack {
-            // Backdrop. Opacity-driven instead of conditional-mount so the
-            // behind-mode CameraPreview below stays in the view tree (pre-
-            // warmed) when in pip mode — see pre-warm note below.
+            // Backdrop — Prompter Black behind the scrolling text.
             Theme.bg.ignoresSafeArea()
-                .opacity(cameraStyle != .behind ? 1 : 0)
-
-            // Behind-mode CameraPreview — pre-warmed even when in .pip so
-            // the .pip → .behind switch is instant (no fresh AVFoundation
-            // layer construction). Both layers share the same
-            // `AVCaptureSession`, so neither pays cold-start cost; only the
-            // opacity flips. The layer is invisible (opacity 0) in pip mode
-            // and hit-testing is disabled when not the active mode.
-            //
-            // PiP mode's CameraPreview is owned by PipTile (mounted in the
-            // overlay below) — the dogfood-pass-11 fix for the empty-PiP
-            // coordinate-space mismatch. PipTile's layer is similarly kept
-            // alive for instant behind → pip switching.
-            if cameraStyle != .off {
-                CameraPreview(
-                    session: appState.cameraStore.session,
-                    gravity: .resizeAspectFill,
-                    horizontalMirror: vm.mirroredHorizontal,
-                    verticalMirror: vm.mirroredVertical,
-                    requestedDynamicAspectRaw: appState.cameraStore.requestedDynamicAspectRaw,
-                    sessionConfigurationVersion: appState.cameraStore.sessionConfigurationVersion
-                )
-                .id("camera-preview-behind")
-                .ignoresSafeArea(.all)
-                .allowsHitTesting(false)
-                .opacity(cameraStyle == .behind ? 1 : 0)
-
-                // Scrim behind the reading line: WCAG 2.2 AA contrast over
-                // live video. 0.55 is the spec default; raise to 0.7 at
-                // AX5 Dynamic Type sizes per V2 Design 01 §"`behind` —
-                // full-frame camera, prompter overlay". Opacity-driven so
-                // the layer stays composed but invisible outside behind mode.
-                Color(red: 10.0/255, green: 10.0/255, blue: 11.0/255)
-                    .opacity(cameraStyle == .behind ? scrimOpacityForBehindMode : 0)
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
-            }
 
             // Scrolling text — full-bleed, measures its own viewport internally.
             // Mirror is applied as a pair of independent scale flips per
@@ -209,15 +177,15 @@ struct TeleprompterView: View {
         // Opacity 0 + allowsHitTesting(false) keeps it invisible and inert
         // in behind mode. Goes away entirely in .off (session stopped).
         .overlay {
-            if cameraStyle != .off {
+            if cameraStyle == .pip {
                 PipTile(
                     store: appState.cameraStore,
                     horizontalMirror: vm.mirroredHorizontal,
                     verticalMirror: vm.mirroredVertical,
-                    chromeVisible: !vm.focus
+                    chromeVisible: !vm.focus,
+                    promoted: $cameraPromoted,
+                    onPromote: { cameraPromoted = true }
                 )
-                .opacity(cameraStyle == .pip ? 1 : 0)
-                .allowsHitTesting(cameraStyle == .pip)
             }
         }
         .overlay(alignment: .top) {
@@ -246,8 +214,8 @@ struct TeleprompterView: View {
             // No extra top padding — sit flush with the safe-area inset so
             // the reading line falls under the front-camera lens (the user
             // wanted the script raised toward eye-level).
-            .opacity(vm.focus ? 0.0 : 1.0)
-            .allowsHitTesting(!vm.focus)
+            .opacity(vm.focus || cameraPromoted ? 0.0 : 1.0)
+            .allowsHitTesting(!vm.focus && !cameraPromoted)
             .animation(.easeInOut(duration: Theme.focusAnim), value: vm.focus)
         }
         .overlay(alignment: .bottom) {
@@ -262,7 +230,7 @@ struct TeleprompterView: View {
                 PrompterControlsView(vm: vm)
             }
             .padding(.bottom, 6)
-            .opacity(vm.focus ? 0.0 : 1.0)
+            .opacity(vm.focus || cameraPromoted ? 0.0 : 1.0)
             .allowsHitTesting(!vm.focus)
             .animation(.easeInOut(duration: Theme.focusAnim), value: vm.focus)
         }
@@ -324,7 +292,7 @@ struct TeleprompterView: View {
         }
         .ignoresSafeArea(.keyboard)
         .contentShape(Rectangle())
-        .onTapGesture { vm.togglePlay() }
+        .onTapGesture { if !cameraPromoted { vm.togglePlay() } }
         // Manual scrub-back / scrub-forward via finger drag while paused.
         // The ScrollView underneath has `scrollDisabled(true)` always, so
         // this DragGesture is the only path that actually moves the
@@ -740,16 +708,6 @@ struct TeleprompterView: View {
     /// `Prefs.register()` seeds the right `#if DEBUG` default.
     private var showCameraChip: Bool {
         labsCameraStyleEnabled || cameraStyle != .off
-    }
-
-    /// Scrim opacity for `.behind` mode. 0.55 by default (per V2 Design 01
-    /// §"`behind` — full-frame camera, prompter overlay"); raised to 0.7 at
-    /// AX5 Dynamic Type sizes for WCAG 2.2 AA contrast over live video.
-    private var scrimOpacityForBehindMode: Double {
-        switch dynamicTypeSize {
-        case .accessibility5, .accessibility4: return 0.7
-        default: return 0.55
-        }
     }
 
     @ViewBuilder
