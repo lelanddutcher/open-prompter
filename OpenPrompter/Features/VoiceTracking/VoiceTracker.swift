@@ -213,13 +213,26 @@ final class VoiceTracker {
         request.shouldReportPartialResults = true
         // On-device only — privacy, no 60s server cap, works offline.
         request.requiresOnDeviceRecognition = true
-        // Feed the script's vocabulary so unusual words get recognized.
+        // Bias recognition toward words NEAR THE CURRENT CURSOR. Feeding
+        // the entire script's vocabulary made common words match at far
+        // positions ("say 'the' once at start, recognizer hears 'the',
+        // aligner finds 'the' at end of script"). A sliding ~100-word
+        // window near the cursor keeps the recognizer's prior consistent
+        // with where we expect the user to be.
+        //
+        // SFSpeechRecognizer doesn't reapply contextualStrings mid-task,
+        // so this snapshot reflects the cursor at start time only. A
+        // future pass can periodically restart the recognition task as
+        // the cursor advances; for now, short scripts get the whole
+        // vocabulary and long scripts get a forward-biased window.
         if let aligner = aligner {
-            // Use the unique normalized tokens. SFSpeechRecognizer
-            // documentation suggests sub-100 entries works best;
-            // truncate generously.
-            let unique = Array(Set(aligner.tokens.map(\.normalized))).prefix(200)
-            request.contextualStrings = Array(unique)
+            let from = max(0, cursor - 10)
+            let nearCursor = aligner.tokens
+                .dropFirst(from)
+                .prefix(100)
+                .map(\.normalized)
+            let unique = Array(Set(nearCursor))
+            request.contextualStrings = unique
         }
         self.recognitionRequest = request
 
@@ -256,6 +269,17 @@ final class VoiceTracker {
 
         isActive = true
         return true
+    }
+
+    /// Reset the cursor to the start of the script. Use when tracking
+    /// has gotten lost and the user wants to start over. Keeps the
+    /// loaded aligner; doesn't toggle isActive.
+    func resetCursor() {
+        cursor = 0
+        lastMatch = nil
+        lastRecognizedWords = []
+        lastTranscription = ""
+        lastMatchTime = Date()
     }
 
     /// Stop tracking. Idempotent.

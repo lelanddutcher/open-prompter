@@ -43,6 +43,16 @@ struct TeleprompterView: View {
     /// for Feature 8's engagement signal. `nil` when paused.
     @State private var playSessionStartedAt: Date? = nil
 
+    /// Reading-line position for voice tracking — fraction of viewport
+    /// height where the cursor lands when a match is found. 0.2 puts
+    /// the matched word near the top of the viewport, which tracks
+    /// well with selfie-camera eye contact (the user looks at the lens,
+    /// the next-to-read word sits just below). Adjustable in-prompter
+    /// via the draggable indicator on screen when voice tracking is
+    /// active.
+    @AppStorage("pref.voice.readingLineFraction")
+    private var voiceReadingLineFraction: Double = 0.2
+
     /// Mirror of `PipTile.hidden` published via `PipHiddenPreferenceKey`.
     /// Cosmetic only — `PipTile` now owns its own `CameraPreview` so the
     /// chevron-hidden state doesn't gate any camera mount up here. The
@@ -249,13 +259,6 @@ struct TeleprompterView: View {
             TallyLightOverlay(
                 isActive: appState.recordingState.isRecording && tallyLightAllowedByPref
             )
-        }
-        // Voice-tracking debug HUD — left edge, vertical audio meter +
-        // a strip of last-recognized words. Only renders while the
-        // tracker is active. Lets the user confirm mic input is
-        // landing AND see what SFSpeechRecognizer is hearing.
-        .overlay(alignment: .leading) {
-            voiceTrackingHUD
         }
         // (Removed in dogfood pass 8: the in-app Dynamic-Island-style pill
         // overlay was redundant against the existing screen-edge tally
@@ -566,12 +569,6 @@ struct TeleprompterView: View {
                 }
             }
         }
-        // Voice-tracking cursor → scroll. Fires whenever the aligner
-        // advances the cursor on a successful match. Approximate
-        // mapping (uniform character density) — refine in a later pass.
-        .onChange(of: appState.voiceTracker.lastMatch?.cursorIndex) { _, _ in
-            handleVoiceCursorChange()
-        }
         .task {
             // Drain a recovery banner queued before the prompter opened
             // (the AppState init-time scan posts to recordingState before
@@ -603,6 +600,17 @@ struct TeleprompterView: View {
         // appearance pref only controls the library/settings/picker chrome.
         .environment(\.colorScheme, .dark)
         .preferredColorScheme(.dark)
+        // Voice-tracking surface — debug HUD overlay + reading-line
+        // indicator + cursor-advance scroll. Wrapped as a single
+        // ViewModifier so the type-checker doesn't have to consider
+        // these additions as part of TeleprompterView.body's chain.
+        .modifier(
+            VoiceTrackingChrome(
+                tracker: appState.voiceTracker,
+                readingLineFraction: $voiceReadingLineFraction,
+                onCursorChange: handleVoiceCursorChange
+            )
+        )
     }
 
     @ViewBuilder
@@ -1099,53 +1107,6 @@ struct TeleprompterView: View {
             .uppercased()
     }
 
-    // MARK: - Voice tracking HUD (debug)
-
-    /// Left-edge HUD shown while voice tracking is active. Vertical
-    /// audio meter (8 segments) on top, three most-recent recognized
-    /// words below. Lets the user confirm mic input is reaching the
-    /// recognizer AND see what's been heard. Subtle styling so it
-    /// doesn't dominate the prompter.
-    @ViewBuilder
-    private var voiceTrackingHUD: some View {
-        if appState.voiceTracker.isActive {
-            let level = CGFloat(appState.voiceTracker.audioLevel)
-            let activeSegments = max(1, Int(level * 8))
-            VStack(alignment: .leading, spacing: 6) {
-                // Vertical level meter — 8 segments, bottom fills first.
-                VStack(spacing: 2) {
-                    ForEach(0..<8, id: \.self) { i in
-                        let segIndex = 8 - i  // 8 = top, 1 = bottom
-                        Rectangle()
-                            .fill(segIndex <= activeSegments ? Theme.green : Theme.surface2)
-                            .frame(width: 6, height: 8)
-                            .opacity(segIndex <= activeSegments ? 1.0 : 0.35)
-                    }
-                }
-                .animation(.linear(duration: 0.05), value: activeSegments)
-                Text("VOICE")
-                    .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .tracking(0.5)
-                    .foregroundStyle(Theme.green)
-                // Last few recognized words, ASR transcript style. Tail-
-                // truncated so newest words are always visible.
-                let recent = appState.voiceTracker.lastRecognizedWords.suffix(3).joined(separator: " ")
-                if !recent.isEmpty {
-                    Text(recent)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(Theme.muted)
-                        .lineLimit(2)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: 90, alignment: .leading)
-                }
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 6)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-            .padding(.leading, 6)
-        }
-    }
-
     // MARK: - Voice tracking orchestration (V2 Feature 5)
 
     /// Tap handler for the PLAY half of the bottom row. Stops voice
@@ -1218,7 +1179,13 @@ struct TeleprompterView: View {
         guard appState.voiceTracker.isActive,
               let fraction = appState.voiceTracker.cursorScriptFraction,
               vm.contentHeight > 0 else { return }
-        let target = CGFloat(fraction) * vm.contentHeight - vm.viewportHeight * 0.4
+        // The matched word should land at `voiceReadingLineFraction` of
+        // the way down the viewport. Default 0.2 → near the top, which
+        // tracks well with selfie-camera eye contact (user looks at the
+        // lens; the next-to-read word sits just below). User can drag
+        // the on-screen indicator to relocate.
+        let lineFromTop = vm.viewportHeight * CGFloat(voiceReadingLineFraction)
+        let target = CGFloat(fraction) * vm.contentHeight - lineFromTop
         withAnimation(.easeOut(duration: 0.4)) {
             vm.scroller.seek(to: max(0, target), maxOffset: vm.maxScrollOffset)
         }

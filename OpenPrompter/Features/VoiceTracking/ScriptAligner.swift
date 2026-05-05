@@ -62,6 +62,14 @@ public struct AlignerConfig: Sendable {
     /// script (handles `User skips entire section` case).
     public var widenTimeout: TimeInterval = 5.0
 
+    /// Cap on the widened search window so a brief loss of tracking
+    /// can't teleport the cursor across the entire script when a
+    /// generic word ("the", "and") matches at a far position. Widening
+    /// ALWAYS expands the window past `lookBack`/`lookAhead`, but never
+    /// past these caps.
+    public var widenedLookBack: Int = 50
+    public var widenedLookAhead: Int = 150
+
     public init() {}
 }
 
@@ -175,11 +183,17 @@ public struct ScriptAligner: Sendable {
             .map { $0.lowercased() }
         let bufPhonetic: [String] = buf.map { PhoneticEncoder.encode($0) }
 
-        // Search window — widens to the full script when we've gone too
-        // long without a match.
+        // Search window — widens after a quiet period, but cap the
+        // widened range so a stale/generic word can't teleport the
+        // cursor across the entire script (the "say 'the' at start, get
+        // teleported to end" failure mode reported on device).
         let widened = elapsedSinceLastMatch > config.widenTimeout
-        let lookBack = widened ? cursorIndex : config.lookBack
-        let lookAhead = widened ? max(0, tokens.count - cursorIndex) : config.lookAhead
+        let lookBack = widened
+            ? min(config.widenedLookBack, cursorIndex)
+            : config.lookBack
+        let lookAhead = widened
+            ? min(config.widenedLookAhead, max(0, tokens.count - cursorIndex))
+            : config.lookAhead
         let searchStart = max(0, cursorIndex - lookBack)
         let searchEnd = min(tokens.count, cursorIndex + lookAhead)
         let lastCandidate = searchEnd - bufN
