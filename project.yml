@@ -112,6 +112,13 @@ targets:
         CODE_SIGN_ENTITLEMENTS: OpenPrompter/OpenPrompter.entitlements
         CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        Release:
+          # Strip DEBUG-only test fixtures from App Store builds. The
+          # voice-tracking sample audio (1.2 MB) is only consumed by
+          # the DEBUG-gated Settings → Labs replay row; bundling it
+          # in Release would ship dead weight to production.
+          EXCLUDED_SOURCE_FILE_NAMES: voice-tracking-test-sample.m4a
     dependencies:
       - package: swift-markdown
         product: Markdown

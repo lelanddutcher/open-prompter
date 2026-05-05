@@ -1221,6 +1221,12 @@ struct TeleprompterView: View {
         guard appState.voiceTracker.isActive,
               vm.contentHeight > 0,
               vm.viewportHeight > 0 else { return }
+        // Don't fight the user's finger. If a manual drag is in
+        // progress, ignore match-driven target updates until the
+        // drag ends — otherwise a match arriving mid-drag would
+        // re-set the lerp target and the velocity controller would
+        // pull scroll away from where the user is dragging.
+        if manualScrollBaseline != nil { return }
         // Refresh the visible-range with current geometry FIRST. The
         // aligner uses it on the next match. Without this, a font-
         // size change would race the next match with stale geometry.

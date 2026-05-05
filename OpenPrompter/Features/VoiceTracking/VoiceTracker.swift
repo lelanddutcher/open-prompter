@@ -346,9 +346,14 @@ final class VoiceTracker {
                     self.lastTranscription = snap.formatted
                     self.handleRecognizerResult(allWords: snap.segments)
                 }
+                // URL replay is one-shot: when the file ends (isFinal)
+                // OR an error occurs, deactivate. The live mic path
+                // keeps `isActive = true` on isFinal because real
+                // sessions are session-scoped; the URL path is not.
                 if errorSnapshot != nil || resultSnapshot?.isFinal == true {
                     self.tearDownRecognition()
-                    if errorSnapshot != nil { self.isActive = false }
+                    self.isActive = false
+                    self.audioLevel = 0
                 }
             }
         }
@@ -507,7 +512,7 @@ final class VoiceTracker {
     /// view calls this on scroll change, font-size change, and content-
     /// height change. The visible-range constraint then applies on the
     /// NEXT `ingestRecognitionResult` callback. Margin lets words just
-    /// off-screen still match (~15 tokens above and below).
+    /// off-screen still match — default 2 tokens above and below.
     func updateVisibleTokenRange(
         scrollOffset: CGFloat,
         viewportHeight: CGFloat,
