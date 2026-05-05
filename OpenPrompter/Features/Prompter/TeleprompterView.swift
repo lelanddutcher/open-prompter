@@ -43,20 +43,21 @@ struct TeleprompterView: View {
     /// for Feature 8's engagement signal. `nil` when paused.
     @State private var playSessionStartedAt: Date? = nil
 
-    /// Reading-box top edge — fraction of viewport height. When voice
-    /// tracking and the matched word's on-screen position is ABOVE this
-    /// edge (lower y), scroll slows / reverses to keep the matched word
-    /// from drifting off-screen-up.
+    /// Reading-box top edge — fraction of viewport height. Matched
+    /// (just-spoken) words land at this edge. Default 0.05 puts the
+    /// matched word right at the top of the screen for selfie-cam
+    /// eye contact.
     @AppStorage("pref.voice.boxTopFraction")
-    private var voiceBoxTopFraction: Double = 0.10
+    private var voiceBoxTopFraction: Double = 0.05
 
-    /// Reading-box bottom edge. Matched word BELOW this edge (higher y)
-    /// triggers scroll speed-up. Between top and bottom = deadzone (no
-    /// scroll change). Default 0.35 — keeps the band in the upper third
-    /// of the screen for selfie-camera eye contact, narrow enough that
-    /// scroll catches up before words drift far down.
+    /// Reading-box bottom edge — visual reference for where the user's
+    /// eyes are when reading the upcoming word. Default 0.18 ≈ 100pt
+    /// below the top edge on an 800pt viewport, roughly one or two
+    /// lines of text. The bottom edge has no scroll-math role (only
+    /// the top edge drives the lerp target); it's purely a visual
+    /// guide for the reading band.
     @AppStorage("pref.voice.boxBottomFraction")
-    private var voiceBoxBottomFraction: Double = 0.35
+    private var voiceBoxBottomFraction: Double = 0.18
 
     /// Mirror of `PipTile.hidden` published via `PipHiddenPreferenceKey`.
     /// Cosmetic only — `PipTile` now owns its own `CameraPreview` so the
@@ -1209,14 +1210,20 @@ struct TeleprompterView: View {
 
     /// Translate a cursor advance into a target scroll offset.
     ///
-    /// Model: BOTTOM edge is the user's eye-line — matched (just-
-    /// spoken) words land there. As the cursor advances, target
-    /// shifts so the new matched word lands at the bottom edge, and
-    /// the previous matched word drifts up through the band on its
-    /// way to scrolling off the TOP edge. The TOP edge is visual
-    /// reference for "where words leave the screen" — it does NOT
-    /// affect scroll math (so dragging it doesn't cause phantom
-    /// scroll movement).
+    /// Model: TOP edge is where matched (just-spoken) words land.
+    /// As the cursor advances, target shifts so the new matched word
+    /// lands at the top edge — meaning the previous matched word has
+    /// already drifted UP and is on its way to scrolling off-screen,
+    /// and the next-to-be-spoken word sits BELOW the matched word
+    /// (typically near the BOTTOM edge if the band height matches
+    /// roughly one word height). This is the "top = words leaving,
+    /// bottom = eyeballs" semantic the user requested.
+    ///
+    /// Critically, this also means scroll responds to the VERY FIRST
+    /// matched word (target = matchedContentY - topY). The previous
+    /// "matched at bottom" model clamped target to 0 until the user
+    /// had read past `bottomY` of content — feeling like "scroll
+    /// doesn't move until I'm at the bottom of the screen".
     fileprivate func handleVoiceCursorChange() {
         guard appState.voiceTracker.isActive,
               vm.contentHeight > 0,
@@ -1237,9 +1244,9 @@ struct TeleprompterView: View {
         )
         guard let fraction = appState.voiceTracker.cursorScriptFraction else { return }
         let cursorContentY = CGFloat(fraction) * vm.contentHeight
-        let bottomY = vm.viewportHeight * CGFloat(voiceBoxBottomFraction)
-        // Always aim for matched word at BOTTOM edge.
-        let target = cursorContentY - bottomY
+        let topY = vm.viewportHeight * CGFloat(voiceBoxTopFraction)
+        // Always aim for matched word at TOP edge.
+        let target = cursorContentY - topY
         vm.voiceTargetOffset = max(0, target)
     }
 

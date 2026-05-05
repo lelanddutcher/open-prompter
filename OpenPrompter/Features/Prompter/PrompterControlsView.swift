@@ -28,6 +28,11 @@ struct PrompterControlsView: View {
 
     var body: some View {
         VStack(spacing: 6) {
+            // Voice-tracking HUD strip — only renders when voice is
+            // active. Sits ABOVE the play/voice row, no blur, hides
+            // automatically with the rest of the bottom chrome on
+            // focus mode (the parent VStack handles opacity).
+            VoiceTrackingHUDStrip(tracker: voiceTracker)
             // Row 1 — primary action. PLAY (left half) and VOICE (right
             // half) are mutually exclusive; tapping either stops the
             // other (orchestration handled by parent's onPlayTap /

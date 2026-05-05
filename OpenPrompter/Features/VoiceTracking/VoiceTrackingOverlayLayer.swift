@@ -27,15 +27,14 @@ struct VoiceTrackingOverlayLayer: View {
     @Binding var boxBottomFraction: Double
 
     var body: some View {
-        ZStack {
-            VoiceTrackingHUDView(tracker: tracker)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            VoiceReadingBoxIndicatorView(
-                isActive: tracker.isActive,
-                topFraction: $boxTopFraction,
-                bottomFraction: $boxBottomFraction
-            )
-        }
+        // The audio-meter HUD moved into `PrompterControlsView` as a
+        // horizontal strip (see VoiceTrackingHUDStrip). This overlay
+        // now only paints the reading-box indicator on the prompter.
+        VoiceReadingBoxIndicatorView(
+            isActive: tracker.isActive,
+            topFraction: $boxTopFraction,
+            bottomFraction: $boxBottomFraction
+        )
         .allowsHitTesting(tracker.isActive)
     }
 }
@@ -93,9 +92,14 @@ struct VoiceTrackingChrome: ViewModifier {
     }
 }
 
-// MARK: - HUD
+// MARK: - HUD strip
 
-private struct VoiceTrackingHUDView: View {
+/// Horizontal status strip rendered ABOVE the prompter controls
+/// (inside `PrompterControlsView`). No background blur — sits
+/// directly on the prompter backdrop. Auto-hides with the rest of
+/// the bottom chrome when focus mode is on (because it's part of
+/// the bottom VStack, which already inherits the focus opacity).
+struct VoiceTrackingHUDStrip: View {
     let tracker: VoiceTracker
 
     var body: some View {
@@ -107,63 +111,45 @@ private struct VoiceTrackingHUDView: View {
     @ViewBuilder
     private var content: some View {
         let level = CGFloat(tracker.audioLevel)
-        let activeSegments = max(1, Int(level * 8))
-        VStack(alignment: .leading, spacing: 6) {
-            audioMeter(activeSegments: activeSegments)
-            Text("VOICE")
-                .font(.system(size: 8, weight: .bold, design: .monospaced))
-                .tracking(0.5)
+        let activeSegments = max(0, Int(level * 8))
+        HStack(spacing: 8) {
+            // Horizontal level meter — 8 segments fill left-to-right
+            // as audio level rises.
+            HStack(spacing: 2) {
+                ForEach(0..<8, id: \.self) { i in
+                    let isLit = i < activeSegments
+                    Rectangle()
+                        .fill(isLit ? Theme.green : Theme.surface2)
+                        .frame(width: 4, height: 10)
+                        .opacity(isLit ? 1.0 : 0.4)
+                }
+            }
+            .animation(.linear(duration: 0.05), value: activeSegments)
+            // Last-recognized-words preview, monospaced so the strip
+            // doesn't reflow as recognition delivers new content.
+            let recent = tracker.lastRecognizedWords.suffix(4).joined(separator: " ")
+            Text(recent.isEmpty ? "listening…" : recent)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(recent.isEmpty ? Theme.dim : Theme.muted)
+                .lineLimit(1)
+                .truncationMode(.head)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            // RESET — drops the cursor to start of script.
+            Button(action: { tracker.resetCursor() }) {
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.uturn.up")
+                        .font(.system(size: 9, weight: .bold))
+                    Text("RESET")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .tracking(0.5)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
                 .foregroundStyle(Theme.green)
-            recognizedWordsView
-            resetButton
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-        .padding(.leading, 6)
-    }
-
-    private func audioMeter(activeSegments: Int) -> some View {
-        VStack(spacing: 2) {
-            ForEach(0..<8, id: \.self) { i in
-                let segIndex = 8 - i
-                let isLit = segIndex <= activeSegments
-                Rectangle()
-                    .fill(isLit ? Theme.green : Theme.surface2)
-                    .frame(width: 6, height: 8)
-                    .opacity(isLit ? 1.0 : 0.35)
             }
         }
-        .animation(.linear(duration: 0.05), value: activeSegments)
-    }
-
-    @ViewBuilder
-    private var recognizedWordsView: some View {
-        let recent = tracker.lastRecognizedWords.suffix(3).joined(separator: " ")
-        if !recent.isEmpty {
-            Text(recent)
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(Theme.muted)
-                .lineLimit(2)
-                .truncationMode(.tail)
-                .frame(maxWidth: 90, alignment: .leading)
-        }
-    }
-
-    private var resetButton: some View {
-        Button(action: { tracker.resetCursor() }) {
-            HStack(spacing: 3) {
-                Image(systemName: "arrow.uturn.up")
-                    .font(.system(size: 8, weight: .bold))
-                Text("RESET")
-                    .font(.system(size: 7, weight: .bold, design: .monospaced))
-                    .tracking(0.5)
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(Theme.surface2, in: Capsule())
-            .foregroundStyle(Theme.fg)
-        }
+        .padding(.horizontal, 10)
+        .frame(height: 24)
     }
 }
 
