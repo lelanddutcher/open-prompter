@@ -41,6 +41,10 @@ targets:
       - path: OpenPrompter/Resources/Assets.xcassets
       - path: OpenPrompter/Resources/Fonts
       - path: OpenPrompter/Resources/PrivacyInfo.xcprivacy
+      # Voice-tracking debug audio sample. DEBUG-only; bundled so the
+      # Settings → Labs replay button can drive SFSpeechRecognizer
+      # from a known recording without going through the live mic.
+      - path: OpenPrompter/Resources/voice-tracking-test-sample.m4a
     info:
       path: OpenPrompter/Resources/Info.plist
       properties:

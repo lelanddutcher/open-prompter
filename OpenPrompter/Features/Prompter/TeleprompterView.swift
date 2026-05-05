@@ -336,6 +336,16 @@ struct TeleprompterView: View {
                     guard !vm.isPlaying else { return }
                     if manualScrollBaseline == nil {
                         manualScrollBaseline = vm.scroller.offset
+                        // First tick of a fresh drag — if voice tracking
+                        // is active, suspend its momentum so the velocity
+                        // controller doesn't fight the user's manual
+                        // scroll (the "scrolls back forward when I try to
+                        // re-read a section" symptom). The next genuine
+                        // match will re-aim from the new scroll position.
+                        if appState.voiceTracker.isActive {
+                            vm.voiceTargetOffset = nil
+                            vm.scroller.resetVoiceVelocity()
+                        }
                     }
                     let baseline = manualScrollBaseline ?? 0
                     // Translation.height: + when finger moves down, − when up.
@@ -1247,6 +1257,18 @@ struct TeleprompterView: View {
                 viewportHeight: vm.viewportHeight,
                 contentHeight: vm.contentHeight
             )
+            // Silence detection: if no successful match in the last
+            // 1.5s, halt momentum so a paused user can scroll back to
+            // re-read a section without the prompter pulling forward.
+            // The next match will set a fresh target and the velocity
+            // controller will ramp up smoothly from zero.
+            let elapsedSinceMatch = Date().timeIntervalSince(appState.voiceTracker.lastMatchTime)
+            if elapsedSinceMatch > 1.5 {
+                if vm.voiceTargetOffset != nil {
+                    vm.voiceTargetOffset = nil
+                    vm.scroller.resetVoiceVelocity()
+                }
+            }
             if let target = vm.voiceTargetOffset {
                 // Velocity-controlled scroll. P-controller drives a
                 // velocity that aims at target; velocity itself is

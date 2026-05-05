@@ -134,7 +134,11 @@ final class VoiceTracker {
     private let suppressDeviceWork: Bool
     private var aligner: ScriptAligner?
     private var cursor: Int = 0
-    private var lastMatchTime: Date = Date()
+    /// Last time a successful alignment landed. Reset on `loadScript`.
+    /// Public-readable so the view layer can detect silence and halt
+    /// scroll momentum (the per-frame ticker freezes the lerp target
+    /// after ~1.5 seconds without a match).
+    private(set) var lastMatchTime: Date = Date()
 
     private var recognizer: SFSpeechRecognizer?
     /// Apple's `SFSpeechAudioBufferRecognitionRequest` is documented
@@ -289,6 +293,75 @@ final class VoiceTracker {
         lastTranscription = ""
         lastMatchTime = Date()
     }
+
+    #if DEBUG
+    /// DEBUG-only replay path. Drives the recognizer from a bundled or
+    /// supplied audio file instead of the live mic, so we can exercise
+    /// the alignment + scroll pipeline against a reproducible sample.
+    /// Routes results through the same `handleRecognizerResult` path
+    /// the live mic uses, so any change in scoring / scroll math gets
+    /// tested by replaying the same audio.
+    func startWithSampleAudio(url: URL) -> Bool {
+        guard authorization == .authorized else { return false }
+        guard aligner != nil else { return false }
+        guard !isActive else { return true }
+        guard !suppressDeviceWork else {
+            isActive = true
+            return true
+        }
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
+              recognizer.isAvailable else {
+            return false
+        }
+        self.recognizer = recognizer
+
+        let request = SFSpeechURLRecognitionRequest(url: url)
+        request.shouldReportPartialResults = true
+        request.requiresOnDeviceRecognition = true
+        if let aligner = aligner {
+            let from = max(0, cursor - 10)
+            let nearCursor = aligner.tokens
+                .dropFirst(from)
+                .prefix(100)
+                .map(\.normalized)
+            let unique = Array(Set(nearCursor))
+            request.contextualStrings = unique
+        }
+
+        let task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            let resultSnapshot: (segments: [String], formatted: String, isFinal: Bool)?
+            if let result = result {
+                resultSnapshot = (
+                    segments: result.bestTranscription.segments.map { $0.substring },
+                    formatted: result.bestTranscription.formattedString,
+                    isFinal: result.isFinal
+                )
+            } else {
+                resultSnapshot = nil
+            }
+            let errorSnapshot = (error as NSError?)
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                if let snap = resultSnapshot {
+                    self.lastTranscription = snap.formatted
+                    self.handleRecognizerResult(allWords: snap.segments)
+                }
+                if errorSnapshot != nil || resultSnapshot?.isFinal == true {
+                    self.tearDownRecognition()
+                    if errorSnapshot != nil { self.isActive = false }
+                }
+            }
+        }
+        self.recognitionTask = task
+        // No live request — the URL request feeds itself. Set the
+        // pointer to nil so feedAudio remains a no-op (samples come
+        // from the file, not the camera audio queue).
+        self.recognitionRequest = nil
+
+        isActive = true
+        return true
+    }
+    #endif
 
     /// Stop tracking. Idempotent.
     func stop() {

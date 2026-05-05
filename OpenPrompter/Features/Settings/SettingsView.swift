@@ -216,6 +216,12 @@ struct SettingsView: View {
                     // writes Documents/SelfTest.json so the orchestrator
                     // can pull it via devicectl. See RecordingSelfTest.swift.
                     selfTestRow
+
+                    // Voice-tracking replay harness — DEBUG only. Plays
+                    // the bundled sample audio through SFSpeechRecognizer
+                    // so we can iterate on alignment / scroll math
+                    // without needing to read aloud each time.
+                    voiceSampleReplayRow
                     #endif
                 }
             }
@@ -287,6 +293,55 @@ struct SettingsView: View {
                 let failureLines = failed.prefix(5).map { "✗ \($0.name)\n  \($0.detail)" }.joined(separator: "\n\n")
                 selfTestAlertMessage = summaryHeader + "\n\n" + failureLines + "\n\nfull JSON: Documents/SelfTest.json"
             }
+            selfTestAlertVisible = true
+        }
+    }
+
+    /// Voice-tracking replay harness — plays the bundled audio file
+    /// (`voice-tracking-test-sample.m4a`) through `SFSpeechRecognizer`
+    /// so the alignment + scroll pipeline gets exercised against a
+    /// known recording. The user must have a script open AND have
+    /// tapped VOICE at least once (so the tracker has a tokenized
+    /// script to align against). The current sample was recorded
+    /// against the `beta premiere color testing` script — tracking
+    /// against any other script will produce mostly no-match results
+    /// (still useful for observing scroll behavior under noise).
+    private var voiceSampleReplayRow: some View {
+        Button {
+            replayVoiceSample()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "waveform.badge.magnifyingglass")
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("replay voice sample")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.fg)
+                    Text("Plays bundled audio through SFSpeechRecognizer. Open the 'beta premiere color testing' script and tap VOICE briefly first to load the aligner.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.dim)
+                }
+            }
+        }
+    }
+
+    private func replayVoiceSample() {
+        guard let url = Bundle.main.url(
+            forResource: "voice-tracking-test-sample",
+            withExtension: "m4a"
+        ) else {
+            selfTestAlertTitle = "voice sample missing"
+            selfTestAlertMessage = "voice-tracking-test-sample.m4a not in bundle. Run xcodegen + rebuild."
+            selfTestAlertVisible = true
+            return
+        }
+        // Stop any live tracking so we don't have two recognizers.
+        appState.voiceTracker.stop()
+        if appState.voiceTracker.startWithSampleAudio(url: url) {
+            dismiss()
+        } else {
+            selfTestAlertTitle = "voice replay failed"
+            selfTestAlertMessage = "Open a script first and tap VOICE briefly so the aligner gets loaded with the script's tokens, then re-try."
             selfTestAlertVisible = true
         }
     }
