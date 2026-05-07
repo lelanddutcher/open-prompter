@@ -1,6 +1,6 @@
 # open prompter
 
-**the free, open-source teleprompter for markdown creators.**
+**the pro, open-source teleprompter for creators.**
 
 a teleprompter that supports markdown files and every "Pro" feature you need to record content (plus some extras). point it at a folder in iCloud Drive, an Obsidian vault, or anywhere the iOS Files app can reach. pick a file. hit play. read it back at your pace with voice tracking while the selfie camera records you. the take saves to Photos AND back to the same folder as the script — so when you switch to your mac, your edit is sitting next to the .md it came from. no subscription. no account. no cloud upload. no copy-paste.
 
