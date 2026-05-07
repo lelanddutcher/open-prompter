@@ -48,6 +48,26 @@ enum PermissionPrimer {
         await requestSpeechRecognitionIfNeeded()
     }
 
+    /// 2.0.3 follow-up to the 2.0.1 default flip: with `cameraStyle`
+    /// defaulting to `"pip"`, `CameraStore.init` reads the persisted
+    /// style and stores it on `self.style`, but it does NOT start the
+    /// session — the session only starts on a user-initiated
+    /// `setStyle(...)` call from the chip. Result: fresh launch shows
+    /// a black PiP tile because the preview is attached to a session
+    /// that's `.style = .pip` but `isSessionRunning = false`. User
+    /// cycles chip pip→off→pip to "fix" it.
+    ///
+    /// Call this AFTER `requestAllIfNeeded()` so camera permission has
+    /// been resolved before we try to start. Delegates to
+    /// `CameraStore.bootstrapSessionForLaunchStyle()` which bypasses
+    /// the same-style early-return in `setStyle` (passing the current
+    /// style guards out and returns without starting). No-op if the
+    /// persisted style is already `.off`.
+    @MainActor
+    static func bootstrapCameraIfNeeded(_ store: CameraStore) async {
+        await store.bootstrapSessionForLaunchStyle()
+    }
+
     private static func requestCameraIfNeeded() async {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .notDetermined:

@@ -197,6 +197,39 @@ final class CameraStore {
         self.authorization = AVCaptureDevice.authorizationStatus(for: .video)
     }
 
+    /// 2.0.3: bootstrap the session for the persisted style at app
+    /// launch. `init` reads `Prefs.cameraStyle` into `self.style` but
+    /// does NOT call `start()` — historically only user gestures
+    /// flipped style and started sessions. With `cameraStyle`
+    /// defaulting to `.pip` (2.0.1+) the persisted style on a fresh
+    /// install is already non-off, so the camera chip in the bottom
+    /// toolbar reads "pip" and the PiP tile renders, but its preview
+    /// is attached to a session whose `isSessionRunning == false` —
+    /// the user sees a black tile until they cycle the chip
+    /// (pip→off→pip) which forces a real `setStyle` transition.
+    ///
+    /// Bypasses the same-style early-return in `setStyle` by calling
+    /// `start()` directly when style is already non-off. Idempotent —
+    /// the AVFoundation `startRunning` is itself a no-op when the
+    /// session is already running. Call from the app entry once
+    /// camera permission has been resolved.
+    func bootstrapSessionForLaunchStyle() async {
+        guard !suppressDeviceWork else { return }
+        guard style != .off else { return }
+        guard !isSessionRunning else { return }
+        // Permission may not be granted yet; fall through `requestAccessIfNeeded`
+        // so a denied user snaps back to `.off` cleanly instead of leaving
+        // a "phantom non-off style with no session" state behind.
+        let granted = await requestAccessIfNeeded()
+        guard granted else {
+            style = .off
+            persistStyle()
+            pendingPermissionDeniedBanner = true
+            return
+        }
+        await start()
+    }
+
     // MARK: - Mode transitions (the core state machine)
 
     /// User-initiated mode change from the chip or Settings. Triggers the

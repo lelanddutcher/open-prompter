@@ -12,29 +12,40 @@
 //  - **Audio meter HUD** (left edge): an 8-segment vertical bar fed
 //    by `VoiceTracker.audioLevel`, plus the last few recognized words
 //    and a RESET button.
-//  - **Reading-box indicator** (full width): a tinted band between
-//    two draggable horizontal edges (TOP + BOT). The velocity
-//    controller treats the band as a deadzone — matched word inside
-//    → no scroll correction; above top → slow/reverse; below bottom
-//    → speed up. Two zones to dial in feel (position + tolerance).
+//  - **READ / FEATHER indicator** (right edge): a sharp READ line at
+//    the top where matched (just-spoken) words are aimed to land,
+//    plus a softly fading FEATHER teardrop below it whose vertical
+//    extent maps to the velocity controller's smoothness:
+//      • Tight (READ ≈ FEATHER) → snappy, in-lockstep follow.
+//      • Wide → smoother momentum, easier on the eyes.
+//    Pre-2.0.2 the bottom edge was unwired in scroll math; the
+//    teardrop visualizes that the gap is what the user is dialing.
 //
 
 import SwiftUI
 
 struct VoiceTrackingOverlayLayer: View {
     let tracker: VoiceTracker
-    @Binding var boxTopFraction: Double
-    @Binding var boxBottomFraction: Double
+    @Binding var readFraction: Double
+    @Binding var featherFraction: Double
+    /// 2.0.8: when the eyeball / focus button hides the lower chrome,
+    /// dim the READ/FEATHER overlay to 20% opacity instead of hiding
+    /// it entirely. Founder feedback: "I should still be able to drag
+    /// them as I go without bringing the UI back." Hit-testing stays
+    /// on so dragging works in dimmed state too.
+    var focusDimmed: Bool = false
 
     var body: some View {
         // The audio-meter HUD moved into `PrompterControlsView` as a
         // horizontal strip (see VoiceTrackingHUDStrip). This overlay
-        // now only paints the reading-box indicator on the prompter.
-        VoiceReadingBoxIndicatorView(
+        // now only paints the READ / FEATHER indicator on the prompter.
+        VoiceReadFeatherIndicatorView(
             isActive: tracker.isActive,
-            topFraction: $boxTopFraction,
-            bottomFraction: $boxBottomFraction
+            readFraction: $readFraction,
+            featherFraction: $featherFraction
         )
+        .opacity(focusDimmed ? 0.2 : 1.0)
+        .animation(.easeInOut(duration: Theme.focusAnim), value: focusDimmed)
         .allowsHitTesting(tracker.isActive)
     }
 }
@@ -69,18 +80,23 @@ struct VoiceTrackingChrome: ViewModifier {
     }
 
     let tracker: VoiceTracker
-    @Binding var boxTopFraction: Double
-    @Binding var boxBottomFraction: Double
+    @Binding var readFraction: Double
+    @Binding var featherFraction: Double
     let onCursorChange: () -> Void
     let layoutKey: LayoutKey
+    /// 2.0.8: when the prompter is in focus mode (eyeball pressed),
+    /// dim the READ/FEATHER overlay to 20% so the user can still drag
+    /// to adjust without un-focusing the chrome.
+    var focusDimmed: Bool = false
 
     func body(content: Content) -> some View {
         content
             .overlay {
                 VoiceTrackingOverlayLayer(
                     tracker: tracker,
-                    boxTopFraction: $boxTopFraction,
-                    boxBottomFraction: $boxBottomFraction
+                    readFraction: $readFraction,
+                    featherFraction: $featherFraction,
+                    focusDimmed: focusDimmed
                 )
             }
             .onChange(of: tracker.lastMatch?.cursorIndex) { _, _ in
@@ -153,18 +169,34 @@ struct VoiceTrackingHUDStrip: View {
     }
 }
 
-// MARK: - Reading-box indicator
+// MARK: - READ / FEATHER indicator
 
-/// Two-handle band (top edge + bottom edge) marking where matched
-/// words should land on screen. The velocity controller treats
-/// the band as a deadzone — matched word inside the band → no
-/// scroll correction; above the top → slow down; below the bottom
-/// → speed up. Two zones to dial in feel (position + tolerance)
-/// instead of a single line.
-private struct VoiceReadingBoxIndicatorView: View {
+/// 2.0.2 redesign of the voice-tracking band.
+///
+/// The previous "TOP + BOT" model was misleading: only the top edge
+/// affected scroll math, the bottom was visual-only. The founder's
+/// intuition that "spread the band for smoother glide" had no wiring,
+/// so the user was tuning a knob that did nothing. This view replaces
+/// that with two semantically-named handles:
+///
+///   • **READ** — the line where matched (just-spoken) words land.
+///     Same role the old TOP cursor had; same storage key.
+///   • **FEATHER** — the bottom of a tapered teardrop whose vertical
+///     extent drives the velocity controller's smoothness. Tighter
+///     gap → snappier P-controller (cursor stays in lockstep with
+///     recognized words). Wider gap → smoother momentum, glides
+///     toward target.
+///
+/// Visual: a sharp horizontal READ line on the right side of the
+/// prompter, a vertical green gradient teardrop fanning slightly out
+/// underneath it, ending in a softer FEATHER line. The tapering
+/// teardrop is the user-facing metaphor: tighter teardrop = tighter
+/// follow. Width-wise the indicator is intentionally narrow (right
+/// 28% of viewport) so it doesn't intrude into reading area.
+private struct VoiceReadFeatherIndicatorView: View {
     let isActive: Bool
-    @Binding var topFraction: Double
-    @Binding var bottomFraction: Double
+    @Binding var readFraction: Double
+    @Binding var featherFraction: Double
 
     var body: some View {
         if isActive {
@@ -176,39 +208,88 @@ private struct VoiceReadingBoxIndicatorView: View {
     }
 
     private func content(geo: GeometryProxy) -> some View {
-        let topY = geo.size.height * CGFloat(topFraction)
-        let bottomY = geo.size.height * CGFloat(bottomFraction)
+        let readY = geo.size.height * CGFloat(readFraction)
+        let featherY = geo.size.height * CGFloat(featherFraction)
+        // Right-edge column the indicator lives in. Left-padding
+        // 72% of width = right 28% — narrower than the pre-2.0.2
+        // band (45%), per founder direction "shorten the green bar
+        // that juts into the frame."
+        let leftPad = geo.size.width * 0.72
+        let rightPad: CGFloat = 16
+        let columnWidth = max(0, geo.size.width - leftPad - rightPad)
         return ZStack(alignment: .topLeading) {
             Color.clear
-            // Tinted band between top + bottom — visualizes the
-            // deadzone for the velocity controller.
+            // The teardrop gradient — narrow at the READ line,
+            // flaring outward and fading away at FEATHER. A path
+            // shape so the geometry IS the metaphor: bigger drop =
+            // more smoothing.
+            FeatherTeardropShape(narrowFraction: 0.10)
+                .fill(
+                    LinearGradient(
+                        stops: [
+                            .init(color: Theme.green.opacity(0.32), location: 0.0),
+                            .init(color: Theme.green.opacity(0.10), location: 0.55),
+                            .init(color: Theme.green.opacity(0.0), location: 1.0),
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .frame(width: columnWidth, height: max(0, featherY - readY))
+                .offset(x: leftPad, y: readY)
+                .allowsHitTesting(false)
+            // READ line — bright, sharp. The actual scroll target.
             Rectangle()
-                .fill(Theme.green.opacity(0.07))
-                .frame(height: max(0, bottomY - topY))
-                .padding(.leading, geo.size.width * 0.55)
-                .padding(.trailing, 16)
-                .offset(y: topY)
-            // Edge lines — top + bottom.
+                .fill(Theme.green.opacity(0.85))
+                .frame(height: 1.5)
+                .padding(.leading, leftPad)
+                .padding(.trailing, rightPad + 56)
+                .offset(y: readY)
+                .allowsHitTesting(false)
+            // FEATHER line — soft, dotted-feel via low opacity.
+            // Visually marks where smoothing fades to nothing.
             Rectangle()
-                .fill(Theme.green.opacity(0.35))
+                .fill(Theme.green.opacity(0.20))
                 .frame(height: 1)
-                .padding(.leading, geo.size.width * 0.55)
-                .padding(.trailing, 60)
-                .offset(y: topY)
-            Rectangle()
-                .fill(Theme.green.opacity(0.35))
-                .frame(height: 1)
-                .padding(.leading, geo.size.width * 0.55)
-                .padding(.trailing, 60)
-                .offset(y: bottomY)
-            // Handles for each edge.
-            handle(label: "TOP", geo: geo, y: topY, isTop: true)
-            handle(label: "BOT", geo: geo, y: bottomY, isTop: false)
+                .padding(.leading, leftPad + columnWidth * 0.10)
+                .padding(.trailing, rightPad + 56)
+                .offset(y: featherY)
+                .allowsHitTesting(false)
+            // Handles — labeled READ + FEATHER. Same drag gesture
+            // contract as the old TOP/BOT, same min-spacing clamp.
+            handle(
+                label: "READ",
+                geo: geo,
+                y: readY,
+                isRead: true,
+                emphasis: .strong
+            )
+            handle(
+                label: "FEATHER",
+                geo: geo,
+                y: featherY,
+                isRead: false,
+                emphasis: .soft
+            )
         }
     }
 
-    private func handle(label: String, geo: GeometryProxy, y: CGFloat, isTop: Bool) -> some View {
-        HStack(spacing: 3) {
+    /// Two visual emphases for the handles — READ is the load-
+    /// bearing line (bright + opaque), FEATHER is the smoothness
+    /// dial (softer outline so the user reads it as adjustable but
+    /// secondary).
+    private enum HandleEmphasis { case strong, soft }
+
+    private func handle(
+        label: String,
+        geo: GeometryProxy,
+        y: CGFloat,
+        isRead: Bool,
+        emphasis: HandleEmphasis
+    ) -> some View {
+        let foreground = emphasis == .strong ? Theme.green : Theme.green.opacity(0.7)
+        let stroke = emphasis == .strong ? Theme.green.opacity(0.55) : Theme.green.opacity(0.30)
+        return HStack(spacing: 3) {
             Image(systemName: "chevron.up.chevron.down")
                 .font(.system(size: 9, weight: .bold))
             Text(label)
@@ -218,23 +299,72 @@ private struct VoiceReadingBoxIndicatorView: View {
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
         .background(Theme.surface, in: Capsule())
-        .overlay(Capsule().stroke(Theme.green.opacity(0.5), lineWidth: 1))
-        .foregroundStyle(Theme.green)
-        .offset(x: geo.size.width - 64, y: y - 12)
+        .overlay(Capsule().stroke(stroke, lineWidth: 1))
+        .foregroundStyle(foreground)
+        .offset(x: geo.size.width - 76, y: y - 12)
         .gesture(
             DragGesture()
                 .onChanged { value in
                     let height = geo.size.height
                     let raw = max(20, min(height - 20, value.location.y))
                     let newFrac = Double(raw / height)
-                    if isTop {
-                        // Top can't go below bottom - 0.05 of viewport.
-                        topFraction = min(newFrac, bottomFraction - 0.05)
+                    if isRead {
+                        // 2.0.4: READ drags push FEATHER along to
+                        // preserve their previous spacing. Pre-2.0.4
+                        // the symmetric clamp pinned READ behind
+                        // FEATHER — if both were stacked at the top,
+                        // the user couldn't move READ down without
+                        // first moving FEATHER, which read as a
+                        // holdover from the BOT cursor era.
+                        let previousGap = max(0.05, featherFraction - readFraction)
+                        readFraction = max(0.0, min(newFrac, 1.0 - 0.05))
+                        // If FEATHER is now within minimum spacing of
+                        // the new READ position, push it forward.
+                        if featherFraction < readFraction + 0.05 {
+                            featherFraction = min(1.0, readFraction + previousGap)
+                        }
                     } else {
-                        // Bottom can't go above top + 0.05.
-                        bottomFraction = max(newFrac, topFraction + 0.05)
+                        // FEATHER drag stays simple — clamp to at
+                        // least 0.05 below READ. We don't push READ
+                        // backward (that would be confusing — the user
+                        // touched FEATHER, not READ).
+                        featherFraction = max(newFrac, readFraction + 0.05)
                     }
                 }
         )
+    }
+}
+
+/// Teardrop / parabola shape opening downward. `narrowFraction`
+/// controls how tight the top of the drop is — a small value makes
+/// the READ line read as a precise point that fans outward toward
+/// the FEATHER line. Implemented as two quadratic curves so the
+/// silhouette feels organic rather than geometric.
+private struct FeatherTeardropShape: Shape {
+    /// Width at the READ end as a fraction of the column width.
+    /// 0.10 = 10% of column width at the top, full width at the
+    /// bottom — visually communicates "tight at READ, loose at
+    /// FEATHER."
+    var narrowFraction: CGFloat = 0.10
+
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let topInset = rect.width * (1 - narrowFraction) / 2
+        let topLeft = CGPoint(x: rect.minX + topInset, y: rect.minY)
+        let topRight = CGPoint(x: rect.maxX - topInset, y: rect.minY)
+        let botLeft = CGPoint(x: rect.minX, y: rect.maxY)
+        let botRight = CGPoint(x: rect.maxX, y: rect.maxY)
+        // Control points 60% down — flares early, then settles
+        // toward the wider base. Result reads as a teardrop /
+        // hyperbola, not a simple wedge.
+        let cpLeft = CGPoint(x: rect.minX + topInset * 0.35, y: rect.minY + rect.height * 0.60)
+        let cpRight = CGPoint(x: rect.maxX - topInset * 0.35, y: rect.minY + rect.height * 0.60)
+        p.move(to: topLeft)
+        p.addLine(to: topRight)
+        p.addQuadCurve(to: botRight, control: cpRight)
+        p.addLine(to: botLeft)
+        p.addQuadCurve(to: topLeft, control: cpLeft)
+        p.closeSubpath()
+        return p
     }
 }

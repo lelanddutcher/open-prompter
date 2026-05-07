@@ -109,7 +109,7 @@ final class ScriptAlignerTests: XCTestCase {
         let aligner = ScriptAligner(tokens: ScriptAligner.tokenize("hello world"))
         XCTAssertEqual(aligner.config.lookBack, 10)
         XCTAssertEqual(aligner.config.lookAhead, 50)
-        XCTAssertEqual(aligner.config.matchThreshold, 0.65, accuracy: 0.001)
+        XCTAssertEqual(aligner.config.matchThreshold, 0.55, accuracy: 0.001)
     }
 
     func testInitWithCustomConfig() {
@@ -224,21 +224,27 @@ final class ScriptAlignerTests: XCTestCase {
     // MARK: - Backward retake (forward bias)
 
     func testBackwardRepeatRejected() {
-        // Cursor at 10. User says words that match position 2. The
-        // perfect match at distance 8 has locality-attenuated score
-        // 1.0 / (1 + 0.1*8) = 0.555. Backward threshold is
-        // 0.65 + 0.15 = 0.80. 0.555 < 0.80, so reject — forward bias
-        // protects against accidental jump-back.
+        // 2.0.7: with matchThreshold lowered to 0.55, the prior
+        // distance-8 case is no longer rejected (it's a clean match
+        // and the user explicitly asked for looser matching). Bumped
+        // the test scenario to distance 14 to keep validating the
+        // forward-bias guard at far backward retakes.
+        //
+        // Cursor at 16. Recognized buffer matches position 2. Perfect
+        // match at distance 14: locality-attenuated score
+        //   1.1 × (1/(1+0.02*14)) = 1.1 × 0.781 ≈ 0.860
+        // Backward subtracts forwardBias 0.35:
+        //   effective = 0.510 < threshold 0.55 → reject.
         let words = (0..<20).map { "wordx\($0)" }
         let aligner = ScriptAligner(tokens: ScriptAligner.tokenize(
             words.joined(separator: " ")
         ))
         let r = aligner.align(
             recognizedBuffer: ["wordx2", "wordx3", "wordx4"],
-            cursorIndex: 10
+            cursorIndex: 16
         )
         XCTAssertFalse(r.matched, "forward bias must reject far-backward retake")
-        XCTAssertEqual(r.cursorIndex, 10, "cursor must hold on rejected match")
+        XCTAssertEqual(r.cursorIndex, 16, "cursor must hold on rejected match")
     }
 
     func testBackwardRepeatNearbyAccepted() {

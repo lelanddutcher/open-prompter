@@ -81,24 +81,62 @@ final class AutoScroller {
     /// regardless of how far behind the cursor is.
     ///
     /// - `target`: scroll offset the user "should" be at, derived from
-    ///   the matched-word position and the reading-line fraction.
+    ///   the matched-word position and the READ-line fraction.
     /// - `dt`: time since last tick. Framerate-independent.
-    /// - `gain`: P-controller gain (default 0.6). Higher = more
-    ///   aggressive catching up; lower = lazier.
-    /// - `velocityAlpha`: fraction of velocity adjustment applied per
-    ///   tick. Lower = smoother (slower acceleration), higher = more
-    ///   responsive.
+    /// - `featherFraction`: the gap between the READ cursor (top) and
+    ///   the FEATHER cursor (bottom) on screen, in [0, 1] of viewport
+    ///   height. Drives the (gain, velocityAlpha) pair on a single
+    ///   axis the user can dial in their UI:
+    ///     • Small feather (cursors close together) → snappy controller,
+    ///       cursor catches up fast, feels in-sync.
+    ///     • Wide feather (cursors spread apart) → looser controller,
+    ///       smoother momentum, cursor glides toward target.
+    ///   Pre-2.0.2 the `voiceBoxBottomFraction` did nothing in the
+    ///   scroll math; the user-visible "spread cursors apart for
+    ///   smoother glide" intuition went unsatisfied. This parameter
+    ///   wires the BOT (now FEATHER) cursor into actual behavior.
     /// - `maxVelocity`: hard ceiling on scroll velocity in pt/sec.
     func voiceTrackingTick(
         target: CGFloat,
         dt: TimeInterval,
         maxOffset: CGFloat,
-        gain: CGFloat = 0.6,
-        velocityAlpha: CGFloat = 0.05,
+        featherFraction: CGFloat = 0.13,
         maxVelocity: CGFloat = 200
     ) {
         let clampedTarget = min(max(0, target), maxOffset)
         let distance = clampedTarget - offset
+
+        // 2.0.4 snap zone: at the minimum legal feather (~0.05 — the
+        // drag-handle clamp's floor), bypass the lerp entirely and
+        // place scroll at target. The user explicitly asked for
+        // "near-instant" follow when READ + FEATHER are stacked, and
+        // the velocity-controlled path can't deliver sub-100ms catch-
+        // up no matter how hard we crank gain. Threshold is the
+        // clamp floor + a small epsilon so this fires when the user
+        // is clearly at "tight" but doesn't trigger on accidental
+        // wobble during a drag.
+        if featherFraction <= 0.06 {
+            offset = clampedTarget
+            voiceVelocity = 0
+            if offset >= maxOffset { didReachEnd = true }
+            return
+        }
+
+        // Map feather fraction → (gain, velocityAlpha). The clamp
+        // mirrors the drag-handle clamps in VoiceTrackingOverlayLayer
+        // (READ and FEATHER can't be closer than 0.05 or further
+        // than ~0.5 apart). Out-of-range inputs are clamped, not
+        // rejected, so legacy stored prefs from 2.0.1 stay valid.
+        let f = max(0.05, min(0.5, featherFraction))
+        let normalized = (f - 0.05) / (0.5 - 0.05) // 0..1
+        // Snappy at low feather (gain ~0.9, velocityAlpha ~0.15) and
+        // smooth at high feather (gain ~0.4, velocityAlpha ~0.02). The
+        // ranges were picked empirically to match the prior default
+        // (gain 0.6, velocityAlpha 0.05) at roughly featherFraction
+        // 0.20 — so users who never touch the cursors get the same
+        // feel they had before this refactor.
+        let gain: CGFloat = 0.9 - normalized * 0.5
+        let velocityAlpha: CGFloat = 0.15 - normalized * 0.13
 
         // P-controller: velocity proportional to distance, clamped.
         let desiredVelocity = max(-maxVelocity, min(maxVelocity, distance * gain))

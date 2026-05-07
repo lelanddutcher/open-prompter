@@ -49,7 +49,14 @@ public struct AlignerConfig: Sendable {
     /// Tokens to scan after the current cursor (for paragraph skips).
     public var lookAhead: Int = 50
     /// Minimum effective score required to accept a match.
-    public var matchThreshold: Double = 0.65
+    /// 2.0.7: lowered from 0.65 → 0.55. Pre-2.0.7 the user reported
+    /// needing ~10+ words spoken before the cursor would advance —
+    /// the conservative threshold required near-perfect long-phrase
+    /// matches before letting the cursor move. With visible-range
+    /// constraint + locality bias already preventing far teleports,
+    /// 0.55 lets 2-3 word clean phrases through without giving up
+    /// the safety net. Improvised slight-mismatches now match too.
+    public var matchThreshold: Double = 0.55
     /// Locality penalty coefficient. Larger → stronger preference for
     /// matches near the cursor. Set to 0 internally when widening.
     public var locality: Double = 0.02

@@ -43,21 +43,29 @@ struct TeleprompterView: View {
     /// for Feature 8's engagement signal. `nil` when paused.
     @State private var playSessionStartedAt: Date? = nil
 
-    /// Reading-box top edge — fraction of viewport height. Matched
-    /// (just-spoken) words land at this edge. Default 0.05 puts the
+    /// READ line — fraction of viewport height where the matched
+    /// (just-spoken) word is meant to land. Default 0.05 puts the
     /// matched word right at the top of the screen for selfie-cam
-    /// eye contact.
+    /// eye contact. Drives the scroll target via `target =
+    /// matchedContentY - readY`.
+    /// (Storage key kept as `boxTopFraction` so 2.0.x users with
+    /// existing values don't silently lose them on upgrade.)
     @AppStorage("pref.voice.boxTopFraction")
-    private var voiceBoxTopFraction: Double = 0.05
+    private var voiceReadFraction: Double = 0.05
 
-    /// Reading-box bottom edge — visual reference for where the user's
-    /// eyes are when reading the upcoming word. Default 0.18 ≈ 100pt
-    /// below the top edge on an 800pt viewport, roughly one or two
-    /// lines of text. The bottom edge has no scroll-math role (only
-    /// the top edge drives the lerp target); it's purely a visual
-    /// guide for the reading band.
+    /// FEATHER line — fraction of viewport height where the velocity
+    /// controller transitions from "snappy catch-up" to "smooth
+    /// glide". The DISTANCE between READ and FEATHER (`feather =
+    /// voiceFeatherFraction - voiceReadFraction`) drives the
+    /// controller's gain + velocityAlpha. Tighter spacing → snappier
+    /// recognition follow; wider → smoother momentum that feels like
+    /// a continuous scroll instead of word-by-word lurches.
+    /// Pre-2.0.2 this value was unused in scroll math; the founder's
+    /// intuition that "spread the band for smoother glide" finally
+    /// has a wiring after this rename + refactor.
+    /// (Storage key kept as `boxBottomFraction` for upgrade safety.)
     @AppStorage("pref.voice.boxBottomFraction")
-    private var voiceBoxBottomFraction: Double = 0.18
+    private var voiceFeatherFraction: Double = 0.18
 
     /// Mirror of `PipTile.hidden` published via `PipHiddenPreferenceKey`.
     /// Cosmetic only — `PipTile` now owns its own `CameraPreview` so the
@@ -399,6 +407,14 @@ struct TeleprompterView: View {
             return src.handle(press)
         }
         .task { await vm.load() }
+        // 2.0.6: bootstrap the camera session on prompter open so a
+        // fresh launch with `cameraStyle = .pip` shows a live preview
+        // immediately. The OpenPrompterApp-level bootstrap can race
+        // the user opening a script (permissions take time, the user
+        // may navigate fast). `bootstrapSessionForLaunchStyle` is
+        // idempotent — guards on `!isSessionRunning` so a repeat call
+        // when the session is already up is a no-op.
+        .task { await appState.cameraStore.bootstrapSessionForLaunchStyle() }
         .task(id: useVolumeButtons) {
             // Toggle the volume source whenever the opt-in changes. The
             // task identity restarts this when the @AppStorage value flips.
@@ -620,14 +636,18 @@ struct TeleprompterView: View {
         .modifier(
             VoiceTrackingChrome(
                 tracker: appState.voiceTracker,
-                boxTopFraction: $voiceBoxTopFraction,
-                boxBottomFraction: $voiceBoxBottomFraction,
+                readFraction: $voiceReadFraction,
+                featherFraction: $voiceFeatherFraction,
                 onCursorChange: handleVoiceCursorChange,
                 layoutKey: VoiceTrackingChrome.LayoutKey(
                     fontSize: vm.fontSize,
                     contentHeight: vm.contentHeight,
                     viewportHeight: vm.viewportHeight
-                )
+                ),
+                // Focus mode: chrome hides, READ/FEATHER lines dim to
+                // 20% so the user can still see + drag them without
+                // exiting focus.
+                focusDimmed: vm.focus
             )
         )
     }
@@ -637,8 +657,28 @@ struct TeleprompterView: View {
         GeometryReader { geo in
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .center, spacing: vm.fontSize * 0.45) {
-                    ForEach(Array(vm.parsed.blocks.enumerated()), id: \.offset) { _, block in
+                    ForEach(Array(vm.parsed.blocks.enumerated()), id: \.offset) { idx, block in
                         blockView(for: block)
+                            // 2.0.6: publish each rendered block's
+                            // frame inside the `scriptContent` named
+                            // coordinate space so voice tracking can
+                            // resolve matched-token pixel positions
+                            // from real geometry. PreferenceKey reduce
+                            // is dictionary-merge so multiple blocks
+                            // composing keeps each frame intact.
+                            .background(
+                                GeometryReader { blockGeo in
+                                    Color.clear.preference(
+                                        key: BlockFramesPreferenceKey.self,
+                                        value: [
+                                            idx: BlockFrame(
+                                                minY: blockGeo.frame(in: .named("scriptContent")).minY,
+                                                height: blockGeo.size.height
+                                            )
+                                        ]
+                                    )
+                                }
+                            )
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -647,6 +687,10 @@ struct TeleprompterView: View {
                 // Bottom padding lets the last line scroll up past the middle.
                 .padding(.top, geo.size.height * 0.5)
                 .padding(.bottom, geo.size.height * 0.8)
+                .coordinateSpace(name: "scriptContent")
+                .onPreferenceChange(BlockFramesPreferenceKey.self) { frames in
+                    vm.blockFrames = frames
+                }
                 .background(
                     GeometryReader { inner in
                         Color.clear
@@ -1162,7 +1206,18 @@ struct TeleprompterView: View {
             appState.userFacingError = "Open a script first."
             return
         }
-        tracker.loadScript(body)
+        // 2.0.6: load via the block-aware path so the tracker can
+        // expose `cursorBlockLocation` for accurate matched-word
+        // positioning. The view captures rendered block frames via
+        // `BlockFramesPreferenceKey`; tracker provides
+        // (blockIndex, withinBlockFraction); together that's the
+        // exact pixel position even with mixed font sizes /
+        // headings, replacing the linear-by-char approximation that
+        // landed words below READ pre-2.0.6.
+        let blockEntries = vm.parsed.blocks.enumerated().map { (index, block) in
+            (blockIndex: index, text: block.text)
+        }
+        tracker.loadScript(blocks: blockEntries)
         // Reset scroll state so this activation starts clean —
         // without this, a leftover `voiceTargetOffset` from a prior
         // session would drag the scroll back to that old position
@@ -1194,16 +1249,26 @@ struct TeleprompterView: View {
         let session = appState.recordingSession
         // Snapshot visible-range so the very first match is constrained
         // to what's on screen, not the whole script.
+        let topPad = vm.viewportHeight * 0.5
+        let bottomPad = vm.viewportHeight * 0.8
+        let bodyHeight = max(0, vm.contentHeight - topPad - bottomPad)
         tracker.updateVisibleTokenRange(
             scrollOffset: vm.scroller.offset,
             viewportHeight: vm.viewportHeight,
-            contentHeight: vm.contentHeight
+            contentHeight: vm.contentHeight,
+            bodyTopPad: topPad,
+            bodyHeight: bodyHeight
         )
         Task {
+            // 2.0.4: voice tracking owns its own AVAudioEngine input
+            // tap; this call is now a no-op when camera is off (its
+            // own guard skips when there's no camera audio output to
+            // attach). Kept so a SIMULTANEOUS recording flow gets the
+            // shared mic path through the recorder's writer.
             await session.ensureAudioCaptureRunning()
             if !tracker.start() {
                 appState.userFacingError =
-                    "Couldn't start voice tracking. Check that the camera is on so audio is available."
+                    "Couldn't start voice tracking. Try again in a moment."
             }
         }
     }
@@ -1237,16 +1302,55 @@ struct TeleprompterView: View {
         // Refresh the visible-range with current geometry FIRST. The
         // aligner uses it on the next match. Without this, a font-
         // size change would race the next match with stale geometry.
+        let topPadHandle = vm.viewportHeight * 0.5
+        let bottomPadHandle = vm.viewportHeight * 0.8
+        let bodyHeightHandle = max(0, vm.contentHeight - topPadHandle - bottomPadHandle)
         appState.voiceTracker.updateVisibleTokenRange(
             scrollOffset: vm.scroller.offset,
             viewportHeight: vm.viewportHeight,
-            contentHeight: vm.contentHeight
+            contentHeight: vm.contentHeight,
+            bodyTopPad: topPadHandle,
+            bodyHeight: bodyHeightHandle
         )
-        guard let fraction = appState.voiceTracker.cursorScriptFraction else { return }
-        let cursorContentY = CGFloat(fraction) * vm.contentHeight
-        let topY = vm.viewportHeight * CGFloat(voiceBoxTopFraction)
-        // Always aim for matched word at TOP edge.
-        let target = cursorContentY - topY
+        // 2.0.6: prefer the per-block frame path when available — it's
+        // pixel-accurate. The captured `vm.blockFrames` give us each
+        // rendered block's actual minY + height, and
+        // `cursorBlockLocation` tells us which block + how far through
+        // it the matched token sits. Multiplying within-block fraction
+        // by the real block height (rather than estimating from char
+        // count over total bodyHeight) eliminates the systematic
+        // "matched word lands below READ" error on scripts with mixed
+        // block sizes (headings + body).
+        //
+        // 2.0.7 baseline offset: SwiftUI Text frames start at the
+        // ascender top, but the visual CENTER of a rendered line sits
+        // about half a line-height below frame.minY. Pre-2.0.7, the
+        // linear-within-block math placed matched-word position at
+        // (block.minY + small fraction × height) — which on the first
+        // line of a block predicts ~ascender top and visually lands
+        // the actual letter form ~half-a-line BELOW where READ wants
+        // it. User's "always 5% below READ" symptom was that exact
+        // gap. Adding a fontSize×0.5 nudge centers the prediction on
+        // the line's visual midpoint where the eye actually reads.
+        let cursorContentY: CGFloat
+        if let location = appState.voiceTracker.cursorBlockLocation,
+           let frame = vm.blockFrames[location.blockIndex] {
+            let baselineNudge = CGFloat(vm.fontSize) * 0.5
+            cursorContentY = frame.minY + CGFloat(location.fraction) * frame.height + baselineNudge
+        } else if let fraction = appState.voiceTracker.cursorScriptFraction {
+            // Linear-by-char fallback for the legacy `loadScript(_:)`
+            // path (tests, mostly) — accounts for top/bottom padding
+            // but doesn't know about per-block heights.
+            let topPad = vm.viewportHeight * 0.5
+            let bottomPad = vm.viewportHeight * 0.8
+            let bodyHeight = max(0, vm.contentHeight - topPad - bottomPad)
+            cursorContentY = topPad + CGFloat(fraction) * bodyHeight
+        } else {
+            return
+        }
+        let readY = vm.viewportHeight * CGFloat(voiceReadFraction)
+        // Always aim for matched word at the READ line.
+        let target = cursorContentY - readY
         vm.voiceTargetOffset = max(0, target)
     }
 
@@ -1265,10 +1369,15 @@ struct TeleprompterView: View {
             // Keep the aligner's visible-range constraint in sync with
             // current scroll geometry so a generic word can't match an
             // offscreen instance. Cheap O(n) walk over tokens.
+            let topPadTick = vm.viewportHeight * 0.5
+            let bottomPadTick = vm.viewportHeight * 0.8
+            let bodyHeightTick = max(0, vm.contentHeight - topPadTick - bottomPadTick)
             appState.voiceTracker.updateVisibleTokenRange(
                 scrollOffset: vm.scroller.offset,
                 viewportHeight: vm.viewportHeight,
-                contentHeight: vm.contentHeight
+                contentHeight: vm.contentHeight,
+                bodyTopPad: topPadTick,
+                bodyHeight: bodyHeightTick
             )
             // Silence detection: if no successful match in the last
             // 1.5s, halt momentum so a paused user can scroll back to
@@ -1302,10 +1411,16 @@ struct TeleprompterView: View {
                 // size. Floor of 150 to avoid pathologically slow
                 // catch-up at tiny fonts.
                 let maxVel: CGFloat = max(150, CGFloat(vm.fontSize) * 6)
+                // FEATHER distance drives the controller's responsiveness:
+                // tighter feather → snappier P-gain + higher velocityAlpha
+                // (cursor stays in lockstep with recognized words);
+                // wider feather → smoother momentum.
+                let feather = CGFloat(voiceFeatherFraction - voiceReadFraction)
                 vm.scroller.voiceTrackingTick(
                     target: target,
                     dt: dt,
                     maxOffset: vm.maxScrollOffset,
+                    featherFraction: feather,
                     maxVelocity: maxVel
                 )
             }

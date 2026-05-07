@@ -134,6 +134,28 @@ final class VoiceTracker {
     private let suppressDeviceWork: Bool
     private var aligner: ScriptAligner?
     private var cursor: Int = 0
+
+    /// 2.0.6: parallel array of `aligner.tokens.count` length where
+    /// `tokenToBlock[i]` is the index of the rendered ScriptBlock that
+    /// produced token `i`. Empty when loaded via the String-based
+    /// `loadScript(_:)` (legacy) — the per-block position math falls
+    /// back to the linear-by-char model in that case. Populated by
+    /// `loadScript(blocks:)` (the path TeleprompterView uses) so the
+    /// view can resolve the matched token's PIXEL position from the
+    /// real block frame instead of estimating from char fraction.
+    private var tokenToBlock: [Int] = []
+
+    /// 2.0.6: per-block aggregate stats used by `cursorBlockLocation`.
+    /// `tokenIndexInBlock` maps token index → its position within the
+    /// block's own token list. `tokensPerBlock` maps blockIndex →
+    /// total tokens belonging to that block. Together these let us
+    /// expose the matched token's WITHIN-BLOCK fraction, which the
+    /// view then multiplies by the block's actual rendered height to
+    /// get a precise pixel position. Linear-within-block is still an
+    /// approximation but it's bounded by one block (typically a few
+    /// lines), where character distribution IS roughly uniform.
+    private var tokenIndexInBlock: [Int] = []
+    private var tokensPerBlock: [Int: Int] = [:]
     /// Last time a successful alignment landed. Reset on `loadScript`.
     /// Public-readable so the view layer can detect silence and halt
     /// scroll momentum (the per-frame ticker freezes the lerp target
@@ -146,6 +168,18 @@ final class VoiceTracker {
     /// the camera audio queue can call it without a main-actor hop.
     private nonisolated(unsafe) var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+
+    /// 2.0.4: VoiceTracker now grabs the microphone directly via
+    /// `AVAudioEngine` instead of forwarding from the camera's
+    /// `AVCaptureAudioDataOutput`. Old architecture required the user
+    /// to enable PiP/camera before voice tracking could receive any
+    /// audio at all (the comment at the top of this file documented
+    /// the dependency). Founder feedback: voice tracking should grab
+    /// the mic itself when activated — and should show the orange
+    /// "mic in use" indicator in the dynamic island, which only fires
+    /// when the audio engine is actively tapping the input. This
+    /// removes the cross-feature ordering trap entirely.
+    private var audioEngine: AVAudioEngine?
 
     /// Throttle gate for audio-level publishing — only post one update
     /// every ~50ms to avoid drowning the MainActor in hops at 50 buf/s.
@@ -167,16 +201,95 @@ final class VoiceTracker {
     // MARK: - Script
 
     /// Tokenize the supplied script and reset rolling state. Must be
-    /// called before `start()`.
+    /// called before `start()`. Legacy String path — leaves the
+    /// per-block position-resolution map empty, so callers using this
+    /// variant fall back to linear-by-char position estimates (less
+    /// accurate on scripts with mixed font sizes / headings).
     func loadScript(_ text: String) {
         let tokens = ScriptAligner.tokenize(text)
         self.aligner = ScriptAligner(tokens: tokens)
+        self.tokenToBlock = []
+        self.tokenIndexInBlock = []
+        self.tokensPerBlock = [:]
         self.cursor = 0
         self.lastMatch = nil
         self.lastRecognizedWords = []
         self.lastTranscription = ""
         self.lastMatchTime = Date()
         self.visibleTokenRange = nil
+    }
+
+    /// 2.0.6 block-aware load. Each tuple `(blockIndex, text)` has its
+    /// own tokenization run; the resulting tokens get tagged with the
+    /// block they came from so `cursorBlockLocation` can return a
+    /// (blockIndex, withinBlockFraction) pair the view layer maps to
+    /// PIXEL positions via real captured block frames. Use this from
+    /// the prompter; the linear-by-char fallback in `loadScript(_:)`
+    /// is for tests / legacy callers only.
+    ///
+    /// `charOffset` on emitted tokens is global across the joined
+    /// script (block texts joined by `\n\n`) so existing aligner
+    /// behaviour is preserved — `charOffset` is only consumed for
+    /// `cursorScriptFraction` and `updateVisibleTokenRange`'s
+    /// fallback path, both of which want a script-wide ordering.
+    func loadScript(blocks: [(blockIndex: Int, text: String)]) {
+        var combinedTokens: [ScriptToken] = []
+        var tokToBlock: [Int] = []
+        var tokIdxInBlock: [Int] = []
+        var perBlockCount: [Int: Int] = [:]
+        var globalCharBase = 0
+        for entry in blocks {
+            let blockTokens = ScriptAligner.tokenize(entry.text)
+            for (within, tok) in blockTokens.enumerated() {
+                combinedTokens.append(ScriptToken(
+                    normalized: tok.normalized,
+                    phonetic: tok.phonetic,
+                    originalIndex: combinedTokens.count,
+                    charOffset: globalCharBase + tok.charOffset
+                ))
+                tokToBlock.append(entry.blockIndex)
+                tokIdxInBlock.append(within)
+            }
+            perBlockCount[entry.blockIndex] = blockTokens.count
+            // Match the joined-with-`\n\n` semantics so charOffsets are
+            // consistent with what the renderer would see.
+            globalCharBase += entry.text.count + 2
+        }
+        self.aligner = ScriptAligner(tokens: combinedTokens)
+        self.tokenToBlock = tokToBlock
+        self.tokenIndexInBlock = tokIdxInBlock
+        self.tokensPerBlock = perBlockCount
+        self.cursor = 0
+        self.lastMatch = nil
+        self.lastRecognizedWords = []
+        self.lastTranscription = ""
+        self.lastMatchTime = Date()
+        self.visibleTokenRange = nil
+    }
+
+    /// 2.0.6: matched token's location for accurate pixel positioning.
+    /// Returns `(blockIndex, withinBlockFraction)` — the block the
+    /// token came from, and how far through that block (0..1) the
+    /// token sits. Returns `nil` when the legacy `loadScript(_:)`
+    /// path was used, when no match has landed, or when the cursor
+    /// somehow indexes outside the tokenToBlock map (defensive).
+    var cursorBlockLocation: (blockIndex: Int, fraction: Double)? {
+        guard cursor > 0,
+              !tokenToBlock.isEmpty,
+              !tokenIndexInBlock.isEmpty else { return nil }
+        let idx = min(cursor - 1, tokenToBlock.count - 1)
+        guard idx >= 0 else { return nil }
+        let blockIndex = tokenToBlock[idx]
+        let withinIdx = tokenIndexInBlock[idx]
+        let blockTokenCount = tokensPerBlock[blockIndex] ?? 1
+        // Fraction = (token index within block + 0.5) / total in block.
+        // The +0.5 centers the prediction on the token rather than on
+        // its leading edge, so the fraction never quite hits 0 (which
+        // would put the token at the literal top of the block frame
+        // when we want it slightly below the block's leading edge).
+        let denom = max(1, blockTokenCount)
+        let fraction = (Double(withinIdx) + 0.5) / Double(denom)
+        return (blockIndex, fraction)
     }
 
     // MARK: - Authorization
@@ -271,15 +384,97 @@ final class VoiceTracker {
                 }
                 // The recognizer task ends on `isFinal` or error. Tear
                 // down so the next start() builds a fresh request.
-                if errorSnapshot != nil || resultSnapshot?.isFinal == true {
+                //
+                // 2.0.6 fix: SFSpeechRecognizer (especially with
+                // requiresOnDeviceRecognition) ends naturally after
+                // ~30-60 seconds with `isFinal == true`. Pre-2.0.6 we
+                // tore down WITHOUT setting isActive=false, so voice
+                // tracking thought it was running but had no
+                // recognition machinery — voice tracking "fell off
+                // rapidly" exactly as the user reported. Now: on a
+                // natural isFinal end, restart so tracking continues
+                // seamlessly. Only a hard error sets isActive=false.
+                if errorSnapshot != nil {
                     self.tearDownRecognition()
-                    if errorSnapshot != nil { self.isActive = false }
+                    self.isActive = false
+                } else if resultSnapshot?.isFinal == true {
+                    self.tearDownRecognition()
+                    if self.isActive {
+                        // Re-arm. start() rebuilds the request, the
+                        // engine, and the recognition task.
+                        self.isActive = false   // start() guards on !isActive
+                        _ = self.start()
+                    }
                 }
             }
         }
         self.recognitionTask = task
 
+        // 2.0.4: stand up our own AVAudioEngine input tap so voice
+        // tracking captures the mic directly, no camera dependency.
+        // The tap forwards PCM buffers into the recognition request
+        // (and posts an audio-level reading for the HUD meter, same
+        // throttle as the old camera-buffer path).
+        if !startAudioEngineTap(request: request) {
+            // Engine setup failed — tear the request down so a retry
+            // is clean.
+            tearDownRecognition()
+            return false
+        }
+
         isActive = true
+        return true
+    }
+
+    /// Build + start an AVAudioEngine input tap that pumps PCM buffers
+    /// into `request`. Returns false if the engine refused to start
+    /// (no input available, audio session in a conflicting category,
+    /// etc.) so the caller can roll back the recognition request.
+    ///
+    /// Audio session note: the engine works inside the
+    /// `.playAndRecord` / `.videoRecording` category set by
+    /// `RecordingSession.configureAudioSession`. We don't reconfigure
+    /// the session here — recording and voice tracking can both
+    /// observe the mic in that category, and changing it underneath a
+    /// running camera capture would interrupt video audio.
+    private func startAudioEngineTap(
+        request: SFSpeechAudioBufferRecognitionRequest
+    ) -> Bool {
+        // 2.0.5 ordering fix: configure the audio session for record
+        // BEFORE reading the input node's outputFormat. Pre-2.0.5
+        // we read the format first; on a fresh launch with camera
+        // OFF (no prior session activation), the input bus has no
+        // format yet (sampleRate == 0), the early-return tripped,
+        // and voice tracking silently failed. Activating the
+        // session first ensures the input bus advertises a valid
+        // format. Idempotent if RecordingSession already activated
+        // for video recording.
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(
+                .playAndRecord,
+                mode: .videoRecording,
+                options: [.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker]
+            )
+            try session.setActive(true, options: [])
+        } catch {
+            // Best-effort — engine may still start on the system
+            // route. If it doesn't, `engine.start()` below throws.
+        }
+        let engine = AVAudioEngine()
+        let inputNode = engine.inputNode
+        let format = inputNode.outputFormat(forBus: 0)
+        guard format.sampleRate > 0 else { return false }
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak request] buffer, _ in
+            request?.append(buffer)
+        }
+        do {
+            try engine.start()
+        } catch {
+            inputNode.removeTap(onBus: 0)
+            return false
+        }
+        self.audioEngine = engine
         return true
     }
 
@@ -386,6 +581,15 @@ final class VoiceTracker {
         recognitionRequest = nil
         recognitionTask = nil
         recognizer = nil
+        // 2.0.4: stop the audio-engine tap that voice tracking owns.
+        // The mic privacy LED in the dynamic island goes off the
+        // moment the engine stops — that's the signal the user is
+        // looking for ("not currently using your mic").
+        if let engine = audioEngine {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            audioEngine = nil
+        }
     }
 
     // MARK: - Audio
@@ -513,10 +717,26 @@ final class VoiceTracker {
     /// height change. The visible-range constraint then applies on the
     /// NEXT `ingestRecognitionResult` callback. Margin lets words just
     /// off-screen still match — default 2 tokens above and below.
+    ///
+    /// 2.0.4 padding fix: pre-2.0.4 this function divided the PADDED
+    /// `contentHeight` (which includes ~50% viewport top-padding +
+    /// ~80% viewport bottom-padding so the script can scroll into
+    /// view from mid-screen) by `totalChars`. The resulting
+    /// `pxPerChar` was systematically too high, and `scrollOffset /
+    /// pxPerChar` mapped to character offsets *past* the actually-
+    /// visible window. At large fonts (where bodyHeight dominates
+    /// contentHeight) the misalignment was modest; at default font
+    /// (~70pt) the visible range started ~60-100 chars beyond where
+    /// the user was reading, so the aligner refused to match the
+    /// words on screen and tracking appeared broken. Now the caller
+    /// passes `bodyTopPad` and `bodyHeight` explicitly so the math
+    /// can be in body-relative coordinates.
     func updateVisibleTokenRange(
         scrollOffset: CGFloat,
         viewportHeight: CGFloat,
         contentHeight: CGFloat,
+        bodyTopPad: CGFloat = 0,
+        bodyHeight: CGFloat = 0,
         margin: Int = 2
     ) {
         guard let aligner = aligner,
@@ -525,14 +745,35 @@ final class VoiceTracker {
             visibleTokenRange = nil
             return
         }
+        // Effective body region. If the caller didn't pass body-
+        // relative info, fall back to treating the whole contentHeight
+        // as body (legacy behavior, slightly inaccurate but won't
+        // crash — preserves backward compatibility for any caller
+        // that doesn't migrate at the same time).
+        let effectiveBodyHeight: CGFloat
+        let topPad: CGFloat
+        if bodyHeight > 0 {
+            effectiveBodyHeight = bodyHeight
+            topPad = bodyTopPad
+        } else {
+            effectiveBodyHeight = contentHeight
+            topPad = 0
+        }
+
         let totalChars = max(1, last.charOffset + last.normalized.count)
-        let pxPerChar = contentHeight / CGFloat(totalChars)
+        let pxPerChar = effectiveBodyHeight / CGFloat(totalChars)
         guard pxPerChar > 0 else {
             visibleTokenRange = nil
             return
         }
-        let topCharOffset = Int(scrollOffset / pxPerChar)
-        let bottomCharOffset = Int((scrollOffset + viewportHeight) / pxPerChar)
+
+        // Convert pixel viewport span → body-relative span. When the
+        // user has scrolled so that the viewport top is still inside
+        // the top padding (early script), `topPosOnBody` clamps to 0.
+        let topPosOnBody = max(0, scrollOffset - topPad)
+        let bottomPosOnBody = max(0, scrollOffset + viewportHeight - topPad)
+        let topCharOffset = Int(topPosOnBody / pxPerChar)
+        let bottomCharOffset = Int(bottomPosOnBody / pxPerChar)
 
         // Linear scan — tokens are sorted by charOffset so this is
         // O(n) once. For typical scripts (<5000 tokens) trivially fast.
@@ -547,8 +788,33 @@ final class VoiceTracker {
                 break
             }
         }
-        let lo = max(0, startIdx - margin)
-        let hi = min(aligner.tokens.count, endIdx + margin)
+        let initialLo = max(0, startIdx - margin)
+        let initialHi = min(aligner.tokens.count, endIdx + margin)
+
+        // 2.0.5: at very large fonts the visible body covers only
+        // 5-10 tokens. If the recognizer's first match doesn't
+        // happen to land inside that window, the cursor never
+        // advances and the user sees voice tracking "do nothing."
+        // Below a minimum range size, expand symmetrically around
+        // the current cursor to give the aligner enough candidate
+        // tokens to find a real match. The cursor's locality bias
+        // still prevents distant teleportation; this just relaxes
+        // the cap when the window is too tight to contain a typical
+        // recognizer hypothesis.
+        let minRangeSize = 12
+        let lo: Int
+        let hi: Int
+        if initialHi - initialLo < minRangeSize {
+            let center = cursor > 0
+                ? min(cursor - 1, aligner.tokens.count - 1)
+                : (initialLo + initialHi) / 2
+            let half = minRangeSize / 2 + margin
+            lo = max(0, center - half)
+            hi = min(aligner.tokens.count, center + half)
+        } else {
+            lo = initialLo
+            hi = initialHi
+        }
         visibleTokenRange = lo < hi ? lo..<hi : nil
     }
 

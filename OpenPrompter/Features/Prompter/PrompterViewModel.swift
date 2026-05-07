@@ -11,6 +11,30 @@ import Foundation
 import Observation
 import SwiftUI
 
+/// 2.0.6: a rendered block's vertical extent in scroll-content
+/// coordinates. `minY` is the block's leading edge (top of the
+/// block's frame); `height` is the block's full vertical span. The
+/// VStack-arranged blocks use absolute Y values inside the
+/// `scriptContent` named coordinate space published by
+/// `TeleprompterView`. Voice-tracking math derives a matched word's
+/// pixel position as `minY + withinBlockFraction * height`.
+struct BlockFrame: Equatable {
+    let minY: CGFloat
+    let height: CGFloat
+}
+
+/// 2.0.6: SwiftUI PreferenceKey that aggregates per-block frames
+/// into a `[blockIndex: BlockFrame]` map. Each `blockView` publishes
+/// its own single-entry dictionary; the reducer merges them. Read
+/// via `.onPreferenceChange(BlockFramesPreferenceKey.self)` on the
+/// container that owns the named coordinate space.
+struct BlockFramesPreferenceKey: PreferenceKey {
+    static var defaultValue: [Int: BlockFrame] = [:]
+    static func reduce(value: inout [Int: BlockFrame], nextValue: () -> [Int: BlockFrame]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
 @Observable
 @MainActor
 final class PrompterViewModel {
@@ -56,6 +80,15 @@ final class PrompterViewModel {
     let scroller = AutoScroller()
     var contentHeight: CGFloat = 0
     var viewportHeight: CGFloat = 0
+
+    /// 2.0.6: per-block rendered geometry, captured from each rendered
+    /// `blockView` via `BlockFramePreferenceKey`. Keys are 0-based
+    /// block indices matching `parsed.blocks.enumerated().offset`.
+    /// Voice-tracking math reads this to compute the matched word's
+    /// PIXEL position from real geometry instead of from the linear
+    /// char-fraction estimate that systematically undershot for
+    /// scripts with mixed font sizes (headings + body).
+    var blockFrames: [Int: BlockFrame] = [:]
 
     /// Voice-tracking scroll target. Set on each successful alignment
     /// match; the per-frame ticker in `TeleprompterView` lerps the

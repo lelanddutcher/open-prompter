@@ -347,7 +347,6 @@ final class RecordingSession {
     /// just discards them with an early return.
     func ensureAudioCaptureRunning() async {
         guard !suppressDeviceWork else { return }
-        guard persistentAudioRouter == nil else { return }
         guard let cameraSessionQueue = cameraSessionQueue,
               let audioOut = cameraStore?.preAttachedAudioOutput else {
             return
@@ -356,7 +355,20 @@ final class RecordingSession {
         // path to actually deliver buffers. Re-running this is cheap
         // and safe — it's also called at start of every recording.
         configureAudioSession()
-        let router = SampleBufferRouter(session: self)
+        // 2.0.2: removed the `guard persistentAudioRouter == nil`
+        // early-return that gated this whole function. If the camera
+        // session ever reconfigured between voice activations (style
+        // toggle, aspect change, backgrounding cycle), the new
+        // `_audioDataOutput` would have NO delegate while the old
+        // router pointed at the stale output — voice tracking
+        // received nothing despite "running." The user's repro:
+        // fresh install → flaky → force-close × N → works fits this
+        // shape if the first launch's session never properly bound.
+        // Setting the delegate on the current audioOut on every call
+        // is idempotent (Apple documents `setSampleBufferDelegate`
+        // as safe to call repeatedly) and reuses the existing
+        // router if there is one, so no extra allocation.
+        let router = persistentAudioRouter ?? SampleBufferRouter(session: self)
         let recordQ = recordingQueue
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             cameraSessionQueue.async {

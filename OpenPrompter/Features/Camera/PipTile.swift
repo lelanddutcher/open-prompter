@@ -92,6 +92,16 @@ struct PipTile: View {
     /// the prompter from Library should give the user their tile back.
     @State private var hidden: Bool = false
 
+    /// 2.0.8: opacity multiplier applied during drag when the tile is
+    /// approaching the bottom-chrome "drop to hide" zone. Goes from
+    /// 1.0 (outside zone) → 0.25 (centered on chrome) so the user gets
+    /// continuous visual feedback that releasing here will hide the
+    /// tile. Reset to 1.0 on release. Founder report: previously the
+    /// drag-to-hide was a brittle flick gesture (predictedEnd > 70%
+    /// viewport), and dragging slowly into the bottom chrome wouldn't
+    /// reliably trigger — workaround was a double-tap to resize.
+    @State private var dragHideOpacity: CGFloat = 1.0
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion: Bool
 
     /// Reserved bottom strip (in points) for the chrome controls when
@@ -232,6 +242,12 @@ struct PipTile: View {
         .frame(width: dims.width, height: dims.height)
         .contentShape(Rectangle())
         .shadow(color: promoted ? .clear : .black.opacity(0.35), radius: 8, x: 0, y: 4)
+        // 2.0.8: drag-into-hide zone fades the tile — see `dragHideOpacity`
+        // state + `Self.dragHideOpacity(...)` for the threshold math.
+        // 1.0 outside the zone, ramps down to 0.25 as the tile center
+        // approaches chrome top; gives the user "this will hide" feedback.
+        .opacity(promoted ? 1.0 : Double(dragHideOpacity))
+        .animation(.easeOut(duration: 0.08), value: dragHideOpacity)
         .position(center)
         // Gestures — disabled when promoted (only the minimize button
         // is interactive in full-screen mode).
@@ -242,7 +258,21 @@ struct PipTile: View {
         .gesture(
             DragGesture()
                 .onChanged { value in
-                    if !promoted { dragOffset = value.translation }
+                    if !promoted {
+                        dragOffset = value.translation
+                        // 2.0.8: live opacity feedback as the tile
+                        // enters the "drop here to hide" zone at the
+                        // bottom of the viewport. Computed from the
+                        // tile's current center against the chrome
+                        // reserve threshold.
+                        dragHideOpacity = Self.dragHideOpacity(
+                            translation: value.translation,
+                            resolved: resolvedCenter(in: viewport, dims: size.dimensions, safeArea: safeArea),
+                            tileSize: size.dimensions,
+                            viewportHeight: viewport.height,
+                            chromeReserve: chromeVisible ? bottomChromeReserve : 0
+                        )
+                    }
                 }
                 .onEnded { value in
                     if !promoted {
@@ -252,6 +282,7 @@ struct PipTile: View {
                             dims: size.dimensions,
                             safeArea: safeArea
                         )
+                        dragHideOpacity = 1.0
                     }
                 }
         )
@@ -314,6 +345,36 @@ struct PipTile: View {
         )
     }
 
+    /// 2.0.8: opacity for drag-into-hide visual feedback. Returns
+    /// 1.0 when the tile is well clear of the bottom-chrome hide zone
+    /// and ramps down to ~0.25 when the tile center has crossed into
+    /// the chrome reserve (where releasing the drag will hide). Pure
+    /// helper, easy to unit test.
+    static func dragHideOpacity(
+        translation: CGSize,
+        resolved: CGPoint,
+        tileSize: CGSize,
+        viewportHeight: CGFloat,
+        chromeReserve: CGFloat
+    ) -> CGFloat {
+        let halfH = tileSize.height / 2
+        let currentY = resolved.y + translation.height
+        // Hide-zone top: where the chrome reserve begins, accounting
+        // for tile half-height so we start fading as the tile's
+        // bottom edge enters the chrome rather than waiting for its
+        // center to cross.
+        let hideZoneTopY = viewportHeight - chromeReserve - halfH
+        // Begin fading 80pt above the hide zone for a smooth ramp;
+        // founder feedback: "show it starting to fade out" — needs
+        // visible warning, not a binary jump at the threshold.
+        let fadeStartY = hideZoneTopY - 80
+        if currentY <= fadeStartY { return 1.0 }
+        if currentY >= hideZoneTopY { return 0.25 }
+        // Linear ramp 1.0 → 0.25 across the 80pt fade-in band.
+        let progress = (currentY - fadeStartY) / max(1, hideZoneTopY - fadeStartY)
+        return 1.0 - progress * 0.75
+    }
+
     /// Clamp a tile-center point to a rectangle that keeps the entire tile
     /// inside the viewport, above the bottom-chrome reserve, and below the
     /// top safe-area inset. Pure — no `self`, no captures, easy to test.
@@ -359,18 +420,33 @@ struct PipTile: View {
             y: resolved.y + value.translation.height
         )
 
-        // If the user flicked downward strongly, treat that as the
-        // "swipe down to hide" gesture. Threshold is intentionally
-        // aggressive to avoid stealing fast scroll attempts that happen to
-        // start on the tile: predicted end ≥ 70% of viewport height, AND
-        // actual translation ≥ 200pt (so the user clearly intended to
-        // throw the tile and didn't just accidentally swipe), AND the
-        // motion is more vertical than horizontal.
+        // 2.0.8 hide-zone drop: if the user releases the tile inside
+        // the bottom-chrome reserve area, hide it. This was previously
+        // ONLY a flick gesture (predictedEnd > 70% viewport), which
+        // missed the common "drag slowly down into the bottom UI"
+        // intent. Now: dragging into the chrome zone fades the tile
+        // (see `dragHideOpacity` in onChanged), and releasing while
+        // any part of the tile overlaps the chrome reserve hides it.
+        let chromeReserve = chromeVisible ? bottomChromeReserve : 0
+        let halfH = dims.height / 2
+        let hideZoneTopY = viewport.height - chromeReserve - halfH
+        if releasePoint.y > hideZoneTopY {
+            dragOffset = .zero
+            hideTile()
+            return
+        }
+
+        // Velocity flick fallback — kept so a fast swipe down still
+        // hides even from above the chrome zone (the "throw it away"
+        // gesture). Tightened to also require the release point be in
+        // the lower 60% of viewport so a fast scroll on a tile parked
+        // near the top doesn't accidentally hide.
         let predicted = value.predictedEndTranslation
         let actual = value.translation
         if predicted.height > viewport.height * 0.7,
            actual.height > 200,
-           predicted.height > abs(predicted.width) {
+           predicted.height > abs(predicted.width),
+           releasePoint.y > viewport.height * 0.4 {
             dragOffset = .zero
             hideTile()
             return
