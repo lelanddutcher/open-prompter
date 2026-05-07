@@ -270,6 +270,10 @@ final class CameraTests: XCTestCase {
     }
 
     func testStorePersistsStyleChange() async {
+        // 2.0.1 changed the registration-domain default from "off" to "pip"
+        // so this test pre-seeds the legacy "off" value before init to keep
+        // exercising the original off-path semantics.
+        UserDefaults.standard.set("off", forKey: PrefKey.cameraStyle.rawValue)
         let store = CameraStore(suppressDeviceWork: true)
 
         // Seeding starts from .off
@@ -316,6 +320,10 @@ final class CameraTests: XCTestCase {
     }
 
     func testStoreDeniedPathReturnsToOff() async {
+        // 2.0.1 default flip: pre-seed "off" so setStyle(.pip) actually
+        // exercises the off→pip permission-denial branch (was implicit
+        // when the registration default was "off").
+        UserDefaults.standard.set("off", forKey: PrefKey.cameraStyle.rawValue)
         // With suppressDeviceWork true, requestAccessIfNeeded returns false
         // for an undetermined status — simulating the denial branch.
         let store = CameraStore(suppressDeviceWork: true)
@@ -636,6 +644,9 @@ final class CameraTests: XCTestCase {
     /// `.authorized`, drive `.pip → .behind`, assert both the style flip
     /// and the session-running state.
     func testStorePipToBehindFlipsStyleAndKeepsSessionRunning() async {
+        // 2.0.1: pre-seed "off" so setStyle(.pip) is a real transition,
+        // not a no-op short-circuit on the new "pip" default.
+        UserDefaults.standard.set("off", forKey: PrefKey.cameraStyle.rawValue)
         let store = CameraStore(suppressDeviceWork: true)
         // Pre-seed authorization so the suppress-device-work request path
         // returns true rather than falling through to the .notDetermined
@@ -677,6 +688,8 @@ final class CameraTests: XCTestCase {
     /// deliberate sequence behind → pip → behind ALL stick — none of them
     /// should silently revert during the config-only flip.
     func testStoreNonOffToNonOffStyleSticksThroughTransition() async {
+        // 2.0.1: pre-seed "off" — see testStorePipToBehindFlips… for why.
+        UserDefaults.standard.set("off", forKey: PrefKey.cameraStyle.rawValue)
         let store = CameraStore(suppressDeviceWork: true)
         store.prepareTestAuthorization(.authorized)
 
@@ -700,8 +713,8 @@ final class CameraTests: XCTestCase {
     // MARK: - Pref defaults match spec
 
     func testPrefDefaultsMatchSpec() {
-        XCTAssertEqual(PrefKey.cameraStyle.defaultValue as? String, "off",
-                       "First-run default must be off (privacy-respecting).")
+        XCTAssertEqual(PrefKey.cameraStyle.defaultValue as? String, "pip",
+                       "2.0.1 hotfix: default flipped from \"off\" to \"pip\" so the in-app camera is discoverable on first prompter open. PermissionPrimer asks for camera authorization at launch so the PiP tile has a session waiting.")
         XCTAssertEqual(PrefKey.cameraPipSize.defaultValue as? String, "medium")
         XCTAssertEqual(PrefKey.cameraPipPositionX.defaultValue as? Double, 0.5,
                        "Default X is horizontally centered.")

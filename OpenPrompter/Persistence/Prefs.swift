@@ -46,8 +46,10 @@ enum PrefKey: String, CaseIterable {
     /// User's chosen camera composition mode. Stored as a string so the
     /// JSON shape stays stable if we add a new mode (e.g. floating preview)
     /// without invalidating sibling devices' iCloud KVS payloads.
-    /// First-run default: `"off"` — privacy-respecting, no surprise camera
-    /// permission prompt on first prompter open after the v2 update.
+    /// 2.5.0 default: `"pip"` — feature is on by default so the in-app
+    /// camera is discoverable from the first prompter open. The startup
+    /// `PermissionPrimer` requests camera authorization at launch so the
+    /// PiP tile has a session to attach to without a mid-read prompt.
     case cameraStyle = "pref.camera.style"
     /// Last-used PiP tile size. Persisted between launches.
     case cameraPipSize = "pref.camera.pipSize"
@@ -165,24 +167,18 @@ enum PrefKey: String, CaseIterable {
         case .remoteEnabled: return true
         case .useVolumeButtons: return false
         case .labsBluetoothRemote:
-            // In DEBUG builds we default Labs flags to ON so internal builds
-            // exercise the in-progress feature. Release builds default OFF
-            // so end users only see Labs entries they've explicitly enabled.
-            #if DEBUG
+            // 2.5.0 hotfix: graduated from Labs. Defaults ON in both DEBUG
+            // and Release. Existing users who already toggled the flag keep
+            // their stored value; the registration-domain bump only affects
+            // users who never opened Settings → Labs (the majority).
             return true
-            #else
-            return false
-            #endif
-        case .cameraStyle:           return "off"
+        case .cameraStyle:           return "pip"
         case .cameraPipSize:         return "medium"
         case .cameraPipPositionX:    return 0.5
         case .cameraPipPositionY:    return 0.22
         case .labsCameraStyle:
-            #if DEBUG
+            // 2.5.0 hotfix: graduated. See `labsBluetoothRemote` above.
             return true
-            #else
-            return false
-            #endif
         case .coachMarkCameraStyleShown: return false
         case .recordingQuality:        return "high"
         case .recordingFramerate:      return "fps30"
@@ -197,11 +193,8 @@ enum PrefKey: String, CaseIterable {
         case .recordingIndicator:      return "both"
         case .recordingSaveToScriptFolder: return false
         case .labsRecording:
-            #if DEBUG
+            // 2.5.0 hotfix: graduated. See `labsBluetoothRemote` above.
             return true
-            #else
-            return false
-            #endif
         case .recordingPhotosPermissionAsked: return false
         // The registration-domain default is "ratio9x16" — fresh installs
         // start vertical / social-share. Existing users with a recording

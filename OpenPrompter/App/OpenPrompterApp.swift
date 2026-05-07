@@ -57,6 +57,12 @@ struct OpenPrompterApp: App {
                 .environment(appState)
                 .preferredColorScheme(preferredScheme)
                 .onAppear { UbiquitousPrefsMirror.start() }
+                // 2.5.0: prime Camera + Microphone + Speech Recognition at
+                // launch. `.task` runs once when the scene mounts, on the
+                // main actor — exactly what `PermissionPrimer` expects.
+                // Already-answered permissions are skipped silently so this
+                // is cheap on warm launches.
+                .task { await PermissionPrimer.requestAllIfNeeded() }
         }
         .modelContainer(modelContainer)
     }
