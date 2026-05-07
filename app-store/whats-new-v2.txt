@@ -1,0 +1,11 @@
+V2 — record through the script.
+
+— The front camera lives inside the app now. A picture-in-picture tile floats over the script while you read; tap it to expand to full-screen, tap to collapse. No second device, no screen-record hack.
+— Hit record. The take saves back to the same folder as the script, so iCloud delivers it to your Mac next to the .md file.
+— Open Gate recording on iPhone 17: full 1:1 sensor at 3840 × 3840. Record once, crop a 9:16 / 1:1 / 16:9 from the same take.
+— Voice tracking (BETA): on-device speech recognition advances the page when you actually say the words. No thumb on screen.
+— Bluetooth remote: pair any keyboard or media remote and bind buttons to play, mirror, restart. Volume buttons opt-in.
+— Mirror — horizontal AND vertical, independently — for beam-splitter rigs.
+— Live Activity in the Dynamic Island and lock screen so record-state is visible from anywhere.
+
+Still: no account, no subscription, no tracking, no network calls. MIT on GitHub.
