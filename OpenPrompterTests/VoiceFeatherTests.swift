@@ -124,4 +124,52 @@ final class VoiceFeatherTests: XCTestCase {
             "At default feather the controller must converge on the target within 10s of simulated time."
         )
     }
+
+    // MARK: - 2.0.9 momentum: wide feather closes the gap
+
+    /// Pre-2.0.9 the wide-feather P-controller settled into a
+    /// steady-state lag — `distance × gain = targetRate`, so the
+    /// scroll never actually reached the target while the user kept
+    /// reading. Founder feedback: "even when feather is extremely far
+    /// apart it will never get the spoken word up to the read line."
+    /// 2.0.9 added a momentum term (target's own velocity) that turns
+    /// the controller into PI-style: position term still closes the
+    /// gap exponentially, but momentum keeps the scroll moving at the
+    /// user's reading pace as a baseline. With BOTH active, the
+    /// remaining error decays toward zero instead of equilibrating at
+    /// a non-zero lag.
+    ///
+    /// This test simulates a user reading at ~50 pt/sec for 4 seconds.
+    /// At wide feather (0.5) the scroll should END within 25pt of
+    /// target. Pre-2.0.9 it would equilibrate around 125pt behind.
+    @MainActor
+    func test_wideFeather_catchesUpToMovingTarget() {
+        let scroller = AutoScroller()
+        let dt: TimeInterval = 1.0 / 60.0
+        let userReadingRate: CGFloat = 50 // pt/sec — typical reading
+        let frames = 60 * 4 // 4s of simulation
+
+        // Drive a target that advances at userReadingRate every frame,
+        // simulating the user's voice continuously matching new tokens.
+        // The match cadence isn't perfectly per-frame in production —
+        // the recognizer fires every 100-500ms — but for the controller
+        // math the time-averaged rate is what matters.
+        for i in 0..<frames {
+            let target = CGFloat(i + 1) * userReadingRate * CGFloat(dt)
+            scroller.voiceTrackingTick(
+                target: target,
+                dt: dt,
+                maxOffset: 5000,
+                featherFraction: 0.5,         // widest legal — most momentum
+                maxVelocity: 1000             // generous so the cap doesn't lie
+            )
+        }
+        let finalTarget = CGFloat(frames) * userReadingRate * CGFloat(dt)
+        let lag = finalTarget - scroller.offset
+        XCTAssertLessThan(
+            lag,
+            25,
+            "At wide feather + steady reading pace, the momentum term must close the gap to within 25pt. Pre-2.0.9 the pure-P controller equilibrated around 125pt behind. Lag=\(lag)pt, target=\(finalTarget), offset=\(scroller.offset)."
+        )
+    }
 }

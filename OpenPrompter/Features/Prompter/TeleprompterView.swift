@@ -318,7 +318,22 @@ struct TeleprompterView: View {
         }
         .ignoresSafeArea(.keyboard)
         .contentShape(Rectangle())
-        .onTapGesture { if !cameraPromoted { vm.togglePlay() } }
+        .onTapGesture {
+            // 2.0.10: voice tracking and play/pause are mutually
+            // exclusive scroll drivers. If the user taps to toggle
+            // play while voice tracking is active, surface a brief
+            // red flash on the play/pause pill instead of silently
+            // doing nothing — gives the user a "you can't do both"
+            // signal without a modal interruption. The flash is
+            // a 0.4s opacity/tint pulse on the play button (see
+            // PrompterControlsView for the consumer of `vm.playTapConflict`).
+            if cameraPromoted { return }
+            if appState.voiceTracker.isActive {
+                vm.flashPlayTapConflict()
+            } else {
+                vm.togglePlay()
+            }
+        }
         // Manual scrub-back / scrub-forward via finger drag while paused.
         // The ScrollView underneath has `scrollDisabled(true)` always, so
         // this DragGesture is the only path that actually moves the

@@ -102,6 +102,14 @@ final class PrompterViewModel {
     /// `AutoScroller.voiceTrackingTick`. `nil` resets on activation.
     var lastVoiceTickAt: Date?
 
+    /// 2.0.10: brief flag set when the user taps the prompter to toggle
+    /// play/pause WHILE voice tracking is active. The two scroll
+    /// drivers are mutually exclusive, so instead of silently no-oping,
+    /// the play/pause button flashes red for ~0.4s as a visual "you
+    /// can't do both" indicator. View layer reads this and applies a
+    /// short tint animation. Auto-resets after the flash window.
+    var playTapConflict: Bool = false
+
     /// Scroll offset captured at the moment the user pressed play on the
     /// current take. Used by `jumpToStartOfTake()` (Feature 7's novel
     /// `jumpToStart` remote action) to return the scroll position to the
@@ -240,6 +248,19 @@ final class PrompterViewModel {
             playStartScrollOffset = scroller.offset
         }
         Haptics.tap()
+    }
+
+    /// 2.0.10: trigger the play-tap-conflict flash. Set the flag,
+    /// schedule a reset 0.4s later. View layer animates the button
+    /// tint in response. Soft haptic instead of the regular tap so the
+    /// user feels a different texture for "blocked" vs "succeeded."
+    func flashPlayTapConflict() {
+        playTapConflict = true
+        Haptics.alert()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            self?.playTapConflict = false
+        }
     }
 
     /// Cycles through all four mirror states so a single tap on the in-

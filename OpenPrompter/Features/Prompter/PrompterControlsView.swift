@@ -48,13 +48,32 @@ struct PrompterControlsView: View {
                     }
                     .frame(height: buttonHeight)
                     .frame(maxWidth: .infinity)
-                    .background(vm.isPlaying ? Theme.green : Theme.surface)
-                    .foregroundStyle(vm.isPlaying ? Color(red: 0.03, green: 0.09, blue: 0.05) : Theme.fg)
+                    // 2.0.10: when the user taps the prompter to toggle
+                    // play while voice tracking is active, the VM sets
+                    // playTapConflict for ~0.4s. Flash the button red
+                    // (background + border) in that window so the user
+                    // sees the conflict instead of silently no-oping.
+                    .background(
+                        vm.playTapConflict
+                            ? Color(red: 0.78, green: 0.20, blue: 0.20)
+                            : (vm.isPlaying ? Theme.green : Theme.surface)
+                    )
+                    .foregroundStyle(
+                        vm.playTapConflict
+                            ? Color.white
+                            : (vm.isPlaying ? Color(red: 0.03, green: 0.09, blue: 0.05) : Theme.fg)
+                    )
                     .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: corner, style: .continuous)
-                            .stroke(vm.isPlaying ? Theme.green : Theme.border, lineWidth: 1)
+                            .stroke(
+                                vm.playTapConflict
+                                    ? Color(red: 1.0, green: 0.30, blue: 0.30)
+                                    : (vm.isPlaying ? Theme.green : Theme.border),
+                                lineWidth: vm.playTapConflict ? 1.5 : 1
+                            )
                     )
+                    .animation(.easeInOut(duration: 0.12), value: vm.playTapConflict)
                 }
 
                 Button(action: onVoiceTap) {

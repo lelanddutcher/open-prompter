@@ -28,6 +28,25 @@ final class AutoScroller {
     /// across ticks so the velocity low-pass smoothing carries over.
     private var voiceVelocity: CGFloat = 0
 
+    /// 2.0.9: tracking the target's OWN velocity (reading pace) so
+    /// wide-feather mode can carry momentum instead of settling into
+    /// a steady-state lag behind the user. Updated only when the
+    /// target actually changes (a new match arrived) — frame-by-frame
+    /// updates with unchanged target would decay the estimate to zero.
+    /// `nil` until first update so we don't compute a bogus delta on
+    /// the very first match.
+    ///
+    /// Time tracking uses the `dt` accumulator (`voiceTimeAccumulator`)
+    /// rather than `ProcessInfo.systemUptime` so simulated-time tests
+    /// produce matching velocity estimates — an earlier draft that
+    /// read wall-clock time computed targetVelocity from real elapsed
+    /// while the controller integrated offset against simulated `dt`,
+    /// and the two diverged dramatically in unit tests.
+    private var lastTargetForVelocity: CGFloat?
+    private var lastTargetTimeForVelocity: TimeInterval = 0
+    private var targetVelocity: CGFloat = 0
+    private var voiceTimeAccumulator: TimeInterval = 0
+
     func reset() {
         lastTick = nil
         offset = 0
@@ -118,15 +137,58 @@ final class AutoScroller {
         if featherFraction <= 0.06 {
             offset = clampedTarget
             voiceVelocity = 0
+            // Reset momentum tracking too — next time the user widens
+            // feather we want a fresh estimate, not a stale one from
+            // before the snap.
+            lastTargetForVelocity = nil
+            lastTargetTimeForVelocity = 0
+            targetVelocity = 0
+            voiceTimeAccumulator = 0
             if offset >= maxOffset { didReachEnd = true }
             return
         }
 
-        // Map feather fraction → (gain, velocityAlpha). The clamp
-        // mirrors the drag-handle clamps in VoiceTrackingOverlayLayer
-        // (READ and FEATHER can't be closer than 0.05 or further
-        // than ~0.5 apart). Out-of-range inputs are clamped, not
-        // rejected, so legacy stored prefs from 2.0.1 stay valid.
+        // 2.0.9: track the target's own velocity (the user's reading
+        // pace in pt/sec) ONLY when it actually changes. This is what
+        // turns the controller from pure P → effectively PI, letting
+        // wide-feather mode catch up to READ instead of sitting in a
+        // steady-state lag. Pre-2.0.9 wide feather settled into
+        // `distance × gain = targetRate`, i.e. permanent lag of
+        // `targetRate / gain` ≈ 125pt at typical reading speed.
+        // Founder feedback: "even when feather is extremely far apart
+        // it will never get the spoken word up to the read line — it
+        // doesn't carry any continuous speed to do so."
+        voiceTimeAccumulator += dt
+        let now = voiceTimeAccumulator
+        if let lastT = lastTargetForVelocity {
+            let delta = clampedTarget - lastT
+            // Only sample when the target moved (a new match arrived
+            // and shifted it). Per-frame ticks with unchanged target
+            // would decay the estimate to zero against `delta = 0`.
+            if abs(delta) > 0.5 {
+                let elapsed = now - lastTargetTimeForVelocity
+                if elapsed > 0.001 {
+                    let estimate = delta / CGFloat(elapsed)
+                    // Smooth the estimate — match cadence is irregular
+                    // (recognizer fires every 100-500ms), raw deltas
+                    // are noisy. 0.4 alpha trades responsiveness for
+                    // stability.
+                    targetVelocity = targetVelocity * 0.6 + estimate * 0.4
+                }
+                lastTargetForVelocity = clampedTarget
+                lastTargetTimeForVelocity = now
+            }
+        } else {
+            lastTargetForVelocity = clampedTarget
+            lastTargetTimeForVelocity = now
+        }
+
+        // Map feather fraction → (gain, velocityAlpha, momentumWeight).
+        // The clamp mirrors the drag-handle clamps in
+        // VoiceTrackingOverlayLayer (READ and FEATHER can't be closer
+        // than 0.05 or further than ~0.5 apart). Out-of-range inputs
+        // are clamped, not rejected, so legacy stored prefs from 2.0.1
+        // stay valid.
         let f = max(0.05, min(0.5, featherFraction))
         let normalized = (f - 0.05) / (0.5 - 0.05) // 0..1
         // Snappy at low feather (gain ~0.9, velocityAlpha ~0.15) and
@@ -137,30 +199,80 @@ final class AutoScroller {
         // feel they had before this refactor.
         let gain: CGFloat = 0.9 - normalized * 0.5
         let velocityAlpha: CGFloat = 0.15 - normalized * 0.13
+        // Momentum weight: 0 at tight feather (pure P-controller),
+        // 1 at wide feather (full reading-pace baseline + position
+        // correction). The blend is what gives "wider feather =
+        // momentum sensation" the founder asked for.
+        let momentumWeight = normalized
 
-        // P-controller: velocity proportional to distance, clamped.
-        let desiredVelocity = max(-maxVelocity, min(maxVelocity, distance * gain))
+        // 2.0.10 momentum decay: slowly bleed `targetVelocity` so a
+        // mid-sentence pause doesn't keep the prompter rolling forever
+        // (silence-halt at 1.5s from TeleprompterView is the hard
+        // backstop, but a soft decay before that prevents overshoot
+        // when the user takes a breath). Half-life ~0.7s = per-second
+        // factor 0.371. At dt=1/60 that's ~0.984 per frame.
+        let perSecondDecay: CGFloat = 0.371
+        let frameDecay = pow(perSecondDecay, CGFloat(dt))
+        targetVelocity *= frameDecay
 
-        // Low-pass on velocity to smooth acceleration.
+        // 2.0.10 architecture change: split the velocity into TWO
+        // components and integrate them independently.
+        //
+        //   • `momentumComponent` is applied DIRECTLY to offset every
+        //     frame — no lerp. This is the "carry the prompter at the
+        //     reading pace" piece, and pre-2.0.10 it went through the
+        //     same low-pass as the position term. Result: voiceVel had
+        //     to ramp from 0 to ~targetVel over ~1s every time the
+        //     scroll briefly settled, which felt like "comes to a stop
+        //     and slowly restarts." Now the momentum responds frame-1.
+        //
+        //   • `voiceVelocity` is JUST the smoothed position correction
+        //     (`distance × gain` low-passed). This piece needs the
+        //     smoothing — without it the controller would jitter on
+        //     small distance noise.
+        //
+        // Combined offset advance per frame:
+        //   offset += (momentumComponent + voiceVelocity) × dt
+        //
+        // Cap the combined velocity so a runaway momentum + correction
+        // sum can't exceed maxVelocity.
+        let momentumComponent = targetVelocity * momentumWeight
+        let pVelocity = distance * gain
         voiceVelocity = voiceVelocity * (1 - velocityAlpha)
-                      + desiredVelocity * velocityAlpha
+                      + pVelocity * velocityAlpha
+        let combinedVel = max(-maxVelocity, min(maxVelocity, momentumComponent + voiceVelocity))
 
         // Integrate position.
-        let proposed = offset + voiceVelocity * CGFloat(dt)
+        let proposed = offset + combinedVel * CGFloat(dt)
         offset = min(maxOffset, max(0, proposed))
 
-        // Settle when we're effectively at target AND moving slowly so
-        // the controller doesn't jitter forever near the asymptote.
-        if abs(distance) < 0.5 && abs(voiceVelocity) < 2 {
+        // Settle when we're effectively at target AND nothing's pulling
+        // us forward. Crucially: only settle when momentum is also
+        // negligible — otherwise a wide-feather coast would zero out
+        // mid-glide and need to ramp back from 0 on the next match.
+        // Pre-2.0.10 this was the "stop and restart" feel between
+        // matches that the user reported as the prompter "coming to a
+        // complete stop very quickly."
+        if abs(distance) < 0.5
+            && abs(voiceVelocity) < 2
+            && abs(momentumComponent) < 2 {
             offset = clampedTarget
             voiceVelocity = 0
+            targetVelocity = 0
         }
         if offset >= maxOffset { didReachEnd = true }
     }
 
     /// Reset voice-tracking velocity state. Call when voice tracking
-    /// stops so a future activation starts from a known zero.
+    /// stops so a future activation starts from a known zero. Also
+    /// clears the 2.0.9 momentum-tracking estimate so silence-halt
+    /// doesn't leave a stale targetVelocity that would resume scrolling
+    /// at the previous reading pace before any new matches arrive.
     func resetVoiceVelocity() {
         voiceVelocity = 0
+        lastTargetForVelocity = nil
+        lastTargetTimeForVelocity = 0
+        targetVelocity = 0
+        voiceTimeAccumulator = 0
     }
 }
