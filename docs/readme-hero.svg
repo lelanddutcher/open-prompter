@@ -1,0 +1,457 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 380 740" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Open Prompter — animated demo">
+  <!--
+    Animated README hero. 1:1 port of the website PhoneHero — same
+    340×700 frame, same 320×680 screen, same chrome positions as
+    openprompter-web/src/components/LandingV1.jsx + landing-v1.css.
+
+    All animation runs from CSS @keyframes inside this file — GitHub
+    renders inline-CSS-animated SVGs without sanitizing the animations.
+    No JS, no external assets.
+
+    Animated layers:
+      • Script body scrolls vertically (~14s loop, content duplicated)
+      • PiP camera tile shows a mini OPFace (eye sweep 3.0s + blink 4.5s)
+      • REC pill dot pulses (1.4s)
+      • Audio-meter bars in the listening indicator (each bar phase-shifted)
+
+    Static layers (matching the live PhoneHero at default state):
+      • Phone frame + screen + Dynamic Island + status dot + back chevron
+      • READ / FEATHER reading band on the right 58% of the screen
+      • Bottom panel: edit, synced, pip, REC, mirror pills
+      • RESET button + listening caption + PLAY/TRACK CTA row
+      • SPEED + FONT sliders with knobs, focus + jump-to-start icons
+  -->
+
+  <defs>
+    <style><![CDATA[
+      /* OPFace eye sweep — direct port from OPFace.jsx tick():
+         phase 0..0.7 sweeps left → right, 0.7..0.78 snaps back,
+         0.78..1.0 holds. Eye offset = phase × 45px so 0.85 → 38.25px. */
+      @keyframes opEyeSweep {
+        0%   { transform: translateX(-38.25px); }
+        70%  { transform: translateX( 38.25px); }
+        78%  { transform: translateX(-38.25px); }
+        100% { transform: translateX(-38.25px); }
+      }
+      /* Blink: ~4% of the 4.5s period closed. */
+      @keyframes opEyeBlink {
+        0%, 93%  { transform: scaleY(1); }
+        96%      { transform: scaleY(0.05); }
+        100%     { transform: scaleY(1); }
+      }
+      /* Script scroll — translate up by exactly one copy's vertical
+         span so copy 2 lands where copy 1 was at the loop point.
+         Span = 624px, chosen to exceed the visible script area
+         (~460px between the top-fade and bottom-panel gradient) so
+         no line of script appears twice in the viewport during
+         steady-state scrolling. */
+      @keyframes scriptScroll {
+        0%   { transform: translateY(0); }
+        100% { transform: translateY(-624px); }
+      }
+      /* REC dot pulse — matches the website's rec-pulse keyframe. */
+      @keyframes recPulse {
+        0%, 100% { opacity: 1; }
+        50%      { opacity: 0.4; }
+      }
+      /* Listening audio-meter bars. Each bar gets its own keyframe
+         so adjacent bars don't move in lockstep — reads as a meter,
+         not a synced oscillator. */
+      @keyframes barA { 0%, 100% { transform: scaleY(0.35); } 50% { transform: scaleY(0.95); } }
+      @keyframes barB { 0%, 100% { transform: scaleY(0.60); } 50% { transform: scaleY(0.30); } }
+      @keyframes barC { 0%, 100% { transform: scaleY(0.85); } 50% { transform: scaleY(0.45); } }
+      @keyframes barD { 0%, 100% { transform: scaleY(0.45); } 50% { transform: scaleY(0.80); } }
+      @keyframes barE { 0%, 100% { transform: scaleY(0.70); } 50% { transform: scaleY(0.25); } }
+      @keyframes barF { 0%, 100% { transform: scaleY(0.30); } 50% { transform: scaleY(0.90); } }
+      @keyframes barG { 0%, 100% { transform: scaleY(0.55); } 50% { transform: scaleY(0.85); } }
+      @keyframes barH { 0%, 100% { transform: scaleY(0.40); } 50% { transform: scaleY(0.70); } }
+
+      .pip-eyes        { animation: opEyeSweep 3s linear infinite; }
+      .pip-eyes-blink  { animation: opEyeBlink 4.5s ease-in-out infinite; transform-origin: center; transform-box: fill-box; }
+      .script-roll     { animation: scriptScroll 14s linear infinite; }
+      .rec-dot         { animation: recPulse 1.4s ease-in-out infinite; }
+
+      .bar1 { animation: barA 1.1s ease-in-out infinite; transform-origin: bottom; transform-box: fill-box; }
+      .bar2 { animation: barB 1.05s ease-in-out infinite; transform-origin: bottom; transform-box: fill-box; }
+      .bar3 { animation: barC 1.2s ease-in-out infinite; transform-origin: bottom; transform-box: fill-box; }
+      .bar4 { animation: barD 1.0s ease-in-out infinite; transform-origin: bottom; transform-box: fill-box; }
+      .bar5 { animation: barE 1.15s ease-in-out infinite; transform-origin: bottom; transform-box: fill-box; }
+      .bar6 { animation: barF 1.08s ease-in-out infinite; transform-origin: bottom; transform-box: fill-box; }
+      .bar7 { animation: barG 1.18s ease-in-out infinite; transform-origin: bottom; transform-box: fill-box; }
+      .bar8 { animation: barH 1.03s ease-in-out infinite; transform-origin: bottom; transform-box: fill-box; }
+
+      .script-line     { font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif; fill: #FFFFFF; font-weight: 500; }
+      .chrome-mono     { font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace; }
+      .caption-path    { font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace; fill: #6F6F68; }
+    ]]></style>
+
+    <!-- Clip the script so it can't bleed outside the screen. -->
+    <clipPath id="screen-clip">
+      <rect x="30" y="40" width="320" height="680" rx="44"/>
+    </clipPath>
+
+    <!-- Bottom-panel gradient: solid black at bottom, fading transparent
+         55% up to where the audio meter sits. Mirrors the website's
+         `linear-gradient(to top, #000 18%, rgba(0,0,0,0.92) 55%, rgba(0,0,0,0.6) 80%, transparent)`. -->
+    <linearGradient id="panel-gradient" x1="0" x2="0" y1="1" y2="0">
+      <stop offset="0"    stop-color="#000000" stop-opacity="1"/>
+      <stop offset="0.18" stop-color="#000000" stop-opacity="1"/>
+      <stop offset="0.55" stop-color="#000000" stop-opacity="0.92"/>
+      <stop offset="0.80" stop-color="#000000" stop-opacity="0.60"/>
+      <stop offset="1"    stop-color="#000000" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Reading band gradient — transparent on the left, fading to a
+         green tint on the right (matches the CSS gradient on .op-band). -->
+    <linearGradient id="band-gradient" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0"   stop-color="#3FEE7A" stop-opacity="0"/>
+      <stop offset="0.3" stop-color="#3FEE7A" stop-opacity="0.10"/>
+      <stop offset="1"   stop-color="#3FEE7A" stop-opacity="0.10"/>
+    </linearGradient>
+
+    <!-- Top fade above the script — soft fade from the top edge so
+         lines emerge gracefully rather than popping in at the notch
+         line. (Matches website .prompter-top gradient.) -->
+    <linearGradient id="top-fade" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0"   stop-color="#0A0A0B" stop-opacity="1"/>
+      <stop offset="0.6" stop-color="#0A0A0B" stop-opacity="1"/>
+      <stop offset="1"   stop-color="#0A0A0B" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Backdrop -->
+  <rect width="380" height="740" fill="#07070A"/>
+
+  <!-- ============================================================
+       PHONE FRAME — 340 × 700, border-radius 52, 10px padding ring
+       ============================================================ -->
+
+  <!-- Outer phone body (the metal rim). Two-layer shadow for depth. -->
+  <rect x="20" y="30" width="340" height="700" rx="52" fill="#0B0B0D"
+        stroke="#2A2A30" stroke-width="1"/>
+
+  <!-- Screen background — fills the inner 320×680 area, 44px corners -->
+  <rect x="30" y="40" width="320" height="680" rx="44" fill="#0A0A0B"/>
+
+  <!-- Dynamic Island (notch) — 110 × 28 pill, 18px down from frame top -->
+  <rect x="135" y="48" width="110" height="28" rx="14" fill="#000"/>
+
+  <!-- Status dot — small green dot offset 34px right of frame center,
+       y = 30 + 26 + 4 = 60 (top: 26 from frame, radius 4). -->
+  <circle cx="224" cy="62" r="4" fill="#3FEE7A"/>
+
+  <!-- ============================================================
+       BACK CHEVRON — 28×28 circle top-left of screen
+       ============================================================ -->
+  <g transform="translate(58, 110)">
+    <circle r="14" fill="#FFFFFF" fill-opacity="0.08"/>
+    <path d="M 4 -7 L -4 0 L 4 7" fill="none" stroke="#F4F4F2"
+          stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <!-- ============================================================
+       SCROLLING SCRIPT — clipped to the screen rectangle. Content
+       duplicated so the loop is seamless. Text styled to match the
+       website: Inter 500, white, centered, line-height 1.18,
+       letter-spacing -0.015em.
+       ============================================================ -->
+  <g clip-path="url(#screen-clip)">
+    <!-- Script content. Each copy is 17 visual rows covering the full
+         SAMPLE_LINES array from LandingV1.jsx (Welcome back…
+         …It's called Open Prompter). Total per-copy height = 624px.
+         Copy 2 starts at y=624 so the translate(-624) at the loop
+         end places copy 2 exactly where copy 1 began at t=0 →
+         seamless. Span > viewport so no line appears twice. -->
+    <g class="script-roll" transform="translate(0, 200)">
+      <!-- Copy 1 -->
+      <text x="190" y="0"   text-anchor="middle" class="script-line" font-size="20">Welcome back. Quick</text>
+      <text x="190" y="26"  text-anchor="middle" class="script-line" font-size="20">one today.</text>
+      <text x="190" y="78"  text-anchor="middle" class="script-line" font-size="20">I've been writing scripts</text>
+      <text x="190" y="104" text-anchor="middle" class="script-line" font-size="20">in Obsidian for</text>
+      <text x="190" y="130" text-anchor="middle" class="script-line" font-size="20">three years.</text>
+      <text x="190" y="182" text-anchor="middle" class="script-line" font-size="20">And paying ten dollars</text>
+      <text x="190" y="208" text-anchor="middle" class="script-line" font-size="20">a month for a</text>
+      <text x="190" y="234" text-anchor="middle" class="script-line" font-size="20">teleprompter that</text>
+      <text x="190" y="260" text-anchor="middle" class="script-line" font-size="20">can't read them.</text>
+      <text x="190" y="312" text-anchor="middle" class="script-line" font-size="20">So I built one that can.</text>
+      <text x="190" y="364" text-anchor="middle" class="script-line" font-size="20">It watches a folder.</text>
+      <text x="190" y="416" text-anchor="middle" class="script-line" font-size="20">You write on your Mac.</text>
+      <text x="190" y="442" text-anchor="middle" class="script-line" font-size="20">The phone catches up.</text>
+      <text x="190" y="494" text-anchor="middle" class="script-line" font-size="20">No paste. No import.</text>
+      <text x="190" y="520" text-anchor="middle" class="script-line" font-size="20">No account.</text>
+      <text x="190" y="572" text-anchor="middle" class="script-line" font-size="20">It's free. It's MIT.</text>
+      <text x="190" y="598" text-anchor="middle" class="script-line" font-size="20">It's called Open Prompter.</text>
+      <!-- Copy 2 — exact duplicate starting at the loop offset (624) -->
+      <text x="190" y="624" text-anchor="middle" class="script-line" font-size="20">Welcome back. Quick</text>
+      <text x="190" y="650" text-anchor="middle" class="script-line" font-size="20">one today.</text>
+      <text x="190" y="702" text-anchor="middle" class="script-line" font-size="20">I've been writing scripts</text>
+      <text x="190" y="728" text-anchor="middle" class="script-line" font-size="20">in Obsidian for</text>
+      <text x="190" y="754" text-anchor="middle" class="script-line" font-size="20">three years.</text>
+      <text x="190" y="806" text-anchor="middle" class="script-line" font-size="20">And paying ten dollars</text>
+      <text x="190" y="832" text-anchor="middle" class="script-line" font-size="20">a month for a</text>
+      <text x="190" y="858" text-anchor="middle" class="script-line" font-size="20">teleprompter that</text>
+      <text x="190" y="884" text-anchor="middle" class="script-line" font-size="20">can't read them.</text>
+      <text x="190" y="936" text-anchor="middle" class="script-line" font-size="20">So I built one that can.</text>
+      <text x="190" y="988" text-anchor="middle" class="script-line" font-size="20">It watches a folder.</text>
+      <text x="190" y="1040" text-anchor="middle" class="script-line" font-size="20">You write on your Mac.</text>
+      <text x="190" y="1066" text-anchor="middle" class="script-line" font-size="20">The phone catches up.</text>
+      <text x="190" y="1118" text-anchor="middle" class="script-line" font-size="20">No paste. No import.</text>
+      <text x="190" y="1144" text-anchor="middle" class="script-line" font-size="20">No account.</text>
+      <text x="190" y="1196" text-anchor="middle" class="script-line" font-size="20">It's free. It's MIT.</text>
+      <text x="190" y="1222" text-anchor="middle" class="script-line" font-size="20">It's called Open Prompter.</text>
+    </g>
+  </g>
+
+  <!-- Top fade band — pulls the topmost script line into a soft
+       reveal as it scrolls past the back-button row. Clipped to the
+       screen's rounded shape so the rect doesn't overhang the top
+       corners of the device. -->
+  <rect x="30" y="40" width="320" height="80"
+        fill="url(#top-fade)"
+        clip-path="url(#screen-clip)"
+        pointer-events="none"/>
+
+  <!-- ============================================================
+       READING BAND (READ + FEATHER)
+       Right 58% of the screen, default vertical position 28-42%
+       so it sits clearly above the bottom panel. Top edge has READ
+       pill anchored to the right; bottom edge has FEATHER pill.
+       ============================================================ -->
+  <g>
+    <!-- Tinted band rectangle -->
+    <rect x="164" y="230" width="186" height="96"
+          fill="url(#band-gradient)"
+          stroke="#3FEE7A" stroke-opacity="0.5"
+          stroke-width="1"
+          style="stroke-dasharray: 186 0, 0 96"/>
+
+    <!-- READ pill — anchored to top-right of band -->
+    <g transform="translate(326, 222)">
+      <rect x="-32" y="-7" width="32" height="14" rx="7"
+            fill="#081E10" fill-opacity="0.92"
+            stroke="#3FEE7A" stroke-opacity="0.6"/>
+      <!-- chevron up + up -->
+      <path d="M -25 1 l 3 -3 l 3 3 M -25 -3 l 3 -3 l 3 3"
+            fill="none" stroke="#3FEE7A" stroke-width="1.4"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="-13" y="3" class="chrome-mono" font-size="6.5"
+            font-weight="600" fill="#3FEE7A" letter-spacing="0.06em">READ</text>
+    </g>
+
+    <!-- FEATHER pill — anchored to bottom-right of band -->
+    <g transform="translate(326, 334)">
+      <rect x="-44" y="-7" width="44" height="14" rx="7"
+            fill="#081E10" fill-opacity="0.92"
+            stroke="#3FEE7A" stroke-opacity="0.6"/>
+      <!-- chevron down + down -->
+      <path d="M -37 -1 l 3 3 l 3 -3 M -37 3 l 3 3 l 3 -3"
+            fill="none" stroke="#3FEE7A" stroke-width="1.4"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="-19" y="3" class="chrome-mono" font-size="6.5"
+            font-weight="600" fill="#3FEE7A" letter-spacing="0.06em">FEATHER</text>
+    </g>
+  </g>
+
+  <!-- ============================================================
+       PIP CAMERA TILE — 80 × 110, left: 16 from screen-left,
+       bottom: 290 from screen-bottom. Inside is the mini OPFace
+       with eyes that sweep + blink in sync with the brand wordmark.
+       ============================================================ -->
+  <g transform="translate(46, 320)">
+    <!-- Tile body -->
+    <rect x="0" y="0" width="80" height="110" rx="12"
+          fill="#080C08" fill-opacity="0.85"/>
+    <!-- Inner rim -->
+    <rect x="0" y="0" width="80" height="110" rx="12"
+          fill="none" stroke="#FFFFFF" stroke-opacity="0.06"/>
+
+    <!-- Mini OPFace — 702×603 viewBox scaled to ~60px wide, centered.
+         Brackets pure white; eyes accent green. -->
+    <g transform="translate(7, 30) scale(0.094)">
+      <path fill="#F4F4F2"
+        d="M0,63v495c0,19.88,16.12,36,36,36h63v-63h0c-19.88,0-36-16.12-36-36V99c0-19.88,16.12-36,36-36h0V0h-63C16.12,0,0,16.12,0,36v27Z"/>
+      <path fill="#F4F4F2"
+        d="M702,72v498.23c0,18.1-14.67,32.77-32.77,32.77h-63c-1.78,0-3.23-1.45-3.23-3.23v-56.54c0-1.78,1.45-3.23,3.23-3.23h0c18.1,0,32.77-14.67,32.77-32.77V104.77c0-18.1-14.67-32.77-32.77-32.77h0c-1.78,0-3.23-1.45-3.23-3.23V12.23c0-1.78,1.45-3.23,3.23-3.23h63c18.1,0,32.77,14.67,32.77,32.77v30.23Z"/>
+      <!-- Animated eyes -->
+      <g class="pip-eyes">
+        <g class="pip-eyes-blink">
+          <ellipse cx="210" cy="305" rx="72" ry="82" fill="none" stroke="#3FEE7A" stroke-width="44"/>
+          <ellipse cx="410" cy="305" rx="72" ry="82" fill="none" stroke="#3FEE7A" stroke-width="44"/>
+          <!-- "p" descender next to right eye -->
+          <rect x="316" y="305" width="44" height="190" fill="#3FEE7A" rx="2"/>
+        </g>
+      </g>
+    </g>
+  </g>
+
+  <!-- ============================================================
+       BOTTOM PANEL — gradient backdrop + all controls
+       ============================================================ -->
+
+  <!-- Gradient backdrop — solid black bottom fading transparent up.
+       Clipped to the screen's rounded-corner shape so the gradient
+       follows the 44px corner radius at the bottom of the screen
+       instead of overhanging in sharp rectangles. -->
+  <rect x="30" y="466" width="320" height="254"
+        fill="url(#panel-gradient)"
+        clip-path="url(#screen-clip)"/>
+
+  <!-- Upper toolbar pills: pencil · synced · pip · rec · mirror.
+       Total pill width 214 (22+4+58+4+36+4+44+4+38). Usable bottom-
+       panel area is 296px (320 screen - 12px L/R padding). Centered
+       at start x = 42 + (296-214)/2 = 83. -->
+  <g transform="translate(83, 524)" class="chrome-mono">
+    <!-- pencil icon pill — verbatim path from LandingV1.jsx scaled
+         into the 22×20 pill. 0.5× scale takes the 24-unit source down
+         to 12px and is centered with the inner 5,4 offset. -->
+    <g transform="translate(0, 0)">
+      <rect width="22" height="20" rx="10" fill="#FFFFFF" fill-opacity="0.06"
+            stroke="#FFFFFF" stroke-opacity="0.08"/>
+      <g transform="translate(5, 4) scale(0.5)">
+        <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25z"
+              fill="none" stroke="#F4F4F2" stroke-width="2"
+              vector-effect="non-scaling-stroke"/>
+        <path d="M14.06 6.19l3.75 3.75"
+              fill="none" stroke="#F4F4F2" stroke-width="2"
+              vector-effect="non-scaling-stroke"/>
+      </g>
+    </g>
+
+    <!-- synced pill (with green dot) -->
+    <g transform="translate(26, 0)">
+      <rect width="58" height="20" rx="10" fill="#FFFFFF" fill-opacity="0.06"
+            stroke="#FFFFFF" stroke-opacity="0.08"/>
+      <circle cx="8" cy="10" r="3" fill="#3FEE7A"/>
+      <text x="14" y="13" font-size="8.5" fill="#F4F4F2" letter-spacing="0.04em">synced</text>
+    </g>
+
+    <!-- pip pill (active, green tint) -->
+    <g transform="translate(88, 0)">
+      <rect width="36" height="20" rx="10" fill="#3FEE7A" fill-opacity="0.18"
+            stroke="#3FEE7A" stroke-opacity="0.5"/>
+      <rect x="5" y="6" width="9" height="7" rx="1.2" fill="none"
+            stroke="#3FEE7A" stroke-width="1.1"/>
+      <rect x="9" y="9" width="4" height="3" rx="0.6" fill="#3FEE7A"/>
+      <text x="17" y="13" font-size="8.5" fill="#3FEE7A" letter-spacing="0.04em">pip</text>
+    </g>
+
+    <!-- REC pill — red ring + pulsing dot + timer -->
+    <g transform="translate(128, 0)">
+      <rect width="44" height="20" rx="10" fill="#FFFFFF" fill-opacity="0.06"/>
+      <rect x="-1.5" y="-1.5" width="47" height="23" rx="11.5"
+            fill="none" stroke="#FF3B4A" stroke-width="1.4"/>
+      <circle class="rec-dot" cx="7" cy="10" r="3.5" fill="#FF3B4A"/>
+      <text x="13" y="13" font-size="8.5" fill="#FF6B77" letter-spacing="0.04em">0:42</text>
+    </g>
+
+    <!-- mirror pill -->
+    <g transform="translate(176, 0)">
+      <rect width="38" height="20" rx="10" fill="#FFFFFF" fill-opacity="0.06"
+            stroke="#FFFFFF" stroke-opacity="0.08"/>
+      <text x="19" y="13" font-size="8.5" fill="#F4F4F2" text-anchor="middle" letter-spacing="0.04em">mirror</text>
+    </g>
+
+    <!-- RESET button — green text, right-aligned below toolbar -->
+    <g transform="translate(228, 28)">
+      <path d="M 0 0 v 5 M -2.5 2.5 L 0 0 L 2.5 2.5" fill="none"
+            stroke="#3FEE7A" stroke-width="1.4"
+            stroke-linecap="round" stroke-linejoin="round"
+            transform="translate(2, 1)"/>
+      <text x="7" y="6" font-size="7.5" fill="#3FEE7A" letter-spacing="0.10em">RESET</text>
+    </g>
+  </g>
+
+  <!-- Listening caption — audio bars + "listening…" text -->
+  <g transform="translate(46, 575)" class="chrome-mono">
+    <!-- 8 animated bars -->
+    <g transform="translate(0, 0)">
+      <rect class="bar1" x="0"  y="0" width="2" height="12" fill="#3FEE7A" rx="1"/>
+      <rect class="bar2" x="4"  y="0" width="2" height="12" fill="#3FEE7A" rx="1"/>
+      <rect class="bar3" x="8"  y="0" width="2" height="12" fill="#3FEE7A" rx="1"/>
+      <rect class="bar4" x="12" y="0" width="2" height="12" fill="#3FEE7A" rx="1"/>
+      <rect class="bar5" x="16" y="0" width="2" height="12" fill="#3FEE7A" rx="1"/>
+      <rect class="bar6" x="20" y="0" width="2" height="12" fill="#3FEE7A" rx="1"/>
+      <rect class="bar7" x="24" y="0" width="2" height="12" fill="#3FEE7A" rx="1"/>
+      <rect class="bar8" x="28" y="0" width="2" height="12" fill="#3FEE7A" rx="1"/>
+    </g>
+    <text x="36" y="10" font-size="10" fill="#3FEE7A" letter-spacing="0.02em">listening…</text>
+  </g>
+
+  <!-- PLAY + TRACK CTA row -->
+  <g transform="translate(42, 600)" class="chrome-mono">
+    <!-- PLAY -->
+    <g transform="translate(0, 0)">
+      <rect width="142" height="36" rx="12"
+            fill="#FFFFFF" fill-opacity="0.06"
+            stroke="#FFFFFF" stroke-opacity="0.08"/>
+      <polygon points="56,11 56,25 68,18" fill="#F4F4F2"/>
+      <text x="84" y="22.5" font-size="10" fill="#F4F4F2" letter-spacing="0.10em" font-weight="600">PLAY</text>
+    </g>
+
+    <!-- TRACK (active green) -->
+    <g transform="translate(150, 0)">
+      <rect width="144" height="36" rx="12" fill="#3FEE7A"/>
+      <!-- waveform glyph -->
+      <g transform="translate(54, 18)" stroke="#082612" stroke-width="1.6" stroke-linecap="round">
+        <line x1="-12" y1="0" x2="-10" y2="0"/>
+        <line x1="-7"  y1="0" x2="-5"  y2="0"/>
+        <line x1="-2"  y1="-4" x2="-2" y2="4"/>
+        <line x1="3"   y1="-2" x2="3"  y2="2"/>
+        <line x1="8"   y1="0" x2="10"  y2="0"/>
+      </g>
+      <text x="92" y="22.5" font-size="10" fill="#082612" letter-spacing="0.10em" font-weight="700">TRACK</text>
+    </g>
+  </g>
+
+  <!-- SPEED slider row -->
+  <g transform="translate(42, 646)" class="chrome-mono">
+    <rect width="294" height="28" rx="12"
+          fill="#FFFFFF" fill-opacity="0.04"
+          stroke="#FFFFFF" stroke-opacity="0.06"/>
+    <text x="12" y="18" font-size="8" fill="#B5B5B0" letter-spacing="0.08em" font-weight="600">SPEED <tspan fill="#F4F4F2" dx="2">48</tspan></text>
+    <!-- track -->
+    <rect x="74" y="13" width="208" height="3" rx="1.5" fill="#FFFFFF" fill-opacity="0.10"/>
+    <!-- fill (22% — 5..200 range, 48 → 22%) -->
+    <rect x="74" y="13" width="46" height="3" rx="1.5" fill="#3FEE7A"/>
+    <!-- knob -->
+    <circle cx="120" cy="14" r="7" fill="#FFFFFF"/>
+    <circle cx="120" cy="14" r="7" fill="none" stroke="#000" stroke-opacity="0.4" stroke-width="0.5"/>
+  </g>
+
+  <!-- FONT slider row + focus eye + jump-to-start arrow -->
+  <g transform="translate(42, 680)" class="chrome-mono">
+    <rect width="220" height="28" rx="12"
+          fill="#FFFFFF" fill-opacity="0.04"
+          stroke="#FFFFFF" stroke-opacity="0.06"/>
+    <text x="12" y="18" font-size="8" fill="#B5B5B0" letter-spacing="0.08em" font-weight="600">FONT <tspan fill="#F4F4F2" dx="2">36</tspan></text>
+    <!-- track -->
+    <rect x="68" y="13" width="140" height="3" rx="1.5" fill="#FFFFFF" fill-opacity="0.10"/>
+    <!-- fill (28% — 22..72 range, 36 → 28%) -->
+    <rect x="68" y="13" width="39" height="3" rx="1.5" fill="#3FEE7A"/>
+    <!-- knob -->
+    <circle cx="107" cy="14" r="7" fill="#FFFFFF"/>
+    <circle cx="107" cy="14" r="7" fill="none" stroke="#000" stroke-opacity="0.4" stroke-width="0.5"/>
+
+    <!-- Focus mode (eye) icon button -->
+    <g transform="translate(228, 0)">
+      <rect width="28" height="28" rx="8"
+            fill="#FFFFFF" fill-opacity="0.06"
+            stroke="#FFFFFF" stroke-opacity="0.08"/>
+      <path d="M 6 14 C 9 8, 19 8, 22 14 C 19 20, 9 20, 6 14 Z" fill="none"
+            stroke="#F4F4F2" stroke-width="1.4"/>
+      <circle cx="14" cy="14" r="2.5" fill="none" stroke="#F4F4F2" stroke-width="1.4"/>
+    </g>
+
+    <!-- Jump-to-start (up arrow) icon button -->
+    <g transform="translate(262, 0)">
+      <rect width="28" height="28" rx="8"
+            fill="#FFFFFF" fill-opacity="0.06"
+            stroke="#FFFFFF" stroke-opacity="0.08"/>
+      <path d="M 14 21 V 8 M 8 14 L 14 8 L 20 14" fill="none"
+            stroke="#F4F4F2" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </g>
+
+</svg>
