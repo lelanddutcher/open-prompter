@@ -108,11 +108,6 @@ set your development team in signing, then run on a simulator or device.
 - `OSAllocatedUnfairLock<WriterState>` guards cross-thread writer state in `RecordingSession` (one lock around a 12-property struct, not 12 individual `nonisolated(unsafe)` fields)
 - `SwiftData` (with CloudKit off) for the recents cache, `@AppStorage` + `NSUbiquitousKeyValueStore` for preferences, `ActivityKit` for the recording Live Activity, `MediaPlayer` + key-event handlers for the unified Bluetooth remote bus
 
-## design language
-
-the visual system lives in [`design-language.md`](./design-language.md). it covers the color tokens (prompter black, open green, mirror red), the type scale (JetBrains Mono for chrome, Inter for body), the shape language, and the rules for how the terminal / markdown motifs get used.
-
-the animated brand mark is specified in [`logo-animation.md`](./logo-animation.md) — two brackets with eyes inside that sweep and blink like a reader. the reference implementation is in [`OpenPrompter/UI/OpenPrompterLogo.swift`](./OpenPrompter/UI/OpenPrompterLogo.swift).
 
 ## contributing
 
