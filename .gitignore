@@ -48,5 +48,18 @@ open prompter.ai
 Bluetooth Remote Research.md
 Xcode Scaffold.md
 
+# Internal design / planning / research / dogfood docs — kept local, not public.
+V2 Design *.md
+V3 Design *.md
+Roadmap V*.md
+V3 Sprint.md
+V3 Feature Ideas.md
+Remote Input Audit.md
+BLE-M5 Capture.md
+design-language.md
+logo-animation.md
+.voice-tracking-loop.md
+claude design zip export/
+
 # Local-only audio recordings used for voice-tracking dogfood; not shipped.
 script read audio/
