@@ -54,6 +54,8 @@ open prompter is the whole feature set, free, MIT-licensed forever. it reads the
 
 tap the pencil in the top bar to open the file. changes save back through the system file coordinator — iCloud syncs them to your mac the same way it syncs any other file. no proprietary container, no "import to edit" round-trip.
 
+use on device inteligence to format your script.
+
 ## on-device format
 
 paste a messy transcript or a wall of notes and let **Format** reshape it into clean teleprompter markdown — paragraph breaks, headings, readable line lengths — entirely on-device with Apple's Foundation Models. nothing uploaded, no account. (iOS 26 on an Apple-Intelligence-capable iPhone; the button hides itself where the model can't run.)
