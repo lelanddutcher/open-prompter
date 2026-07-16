@@ -31,9 +31,8 @@ struct PrompterTopBarView: View {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 13, weight: .bold))
                     .frame(width: 36, height: 32)
-                    .background(Theme.surface, in: Capsule())
                     .foregroundStyle(Theme.fg)
-                    .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+                    .glassSurface(in: Capsule())
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
             }

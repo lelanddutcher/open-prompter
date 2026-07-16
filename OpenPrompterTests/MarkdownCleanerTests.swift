@@ -149,6 +149,141 @@ final class MarkdownCleanerTests: XCTestCase {
         XCTAssertTrue(parsed.bodyText.contains("after the code"))
     }
 
+    // MARK: - Stage-direction / camera-cue display formatting (V3 item 4)
+
+    func testStripsInlineBracketCueAndSmoothsFlow() {
+        let raw = "Welcome back. [Cut to: close-up] Today we talk about lenses."
+        let parsed = MarkdownCleaner.clean(text: raw, rules: .aggressive)
+        XCTAssertFalse(parsed.bodyText.contains("["))
+        XCTAssertFalse(parsed.bodyText.lowercased().contains("cut to"))
+        XCTAssertTrue(parsed.bodyText.contains("Welcome back."))
+        XCTAssertTrue(parsed.bodyText.contains("Today we talk about lenses."))
+        // Flow smooths: no double space left where the cue was removed.
+        XCTAssertFalse(parsed.bodyText.contains("  "),
+                       "Removing a mid-sentence cue must collapse the gap")
+        XCTAssertTrue(parsed.bodyText.contains("Welcome back. Today"),
+                      "Surrounding flow should read continuously")
+    }
+
+    func testStripsParentheticalBeat() {
+        let raw = "I paused. (beat) Then I continued."
+        let parsed = MarkdownCleaner.clean(text: raw, rules: .aggressive)
+        XCTAssertFalse(parsed.bodyText.contains("(beat)"))
+        XCTAssertTrue(parsed.bodyText.contains("I paused."))
+        XCTAssertTrue(parsed.bodyText.contains("Then I continued."))
+        XCTAssertFalse(parsed.bodyText.contains("  "))
+    }
+
+    func testStripsInlineAllCapsShotDirection() {
+        let raw = "We open on the host. WIDE SHOT of the studio. Then closer."
+        let parsed = MarkdownCleaner.clean(text: raw, rules: .aggressive)
+        XCTAssertFalse(parsed.bodyText.contains("WIDE SHOT"))
+        XCTAssertTrue(parsed.bodyText.contains("We open on the host."))
+        XCTAssertTrue(parsed.bodyText.contains("Then closer."))
+    }
+
+    func testDropsWholeLineStageDirectionBlocks() {
+        let raw = """
+        First spoken paragraph.
+
+        CUT TO: the anchor desk
+
+        Second spoken paragraph.
+
+        (beat)
+
+        [B-roll: the rig on a tripod]
+
+        Third spoken paragraph.
+        """
+        let parsed = MarkdownCleaner.clean(text: raw, rules: .aggressive)
+        XCTAssertTrue(parsed.bodyText.contains("First spoken paragraph."))
+        XCTAssertTrue(parsed.bodyText.contains("Second spoken paragraph."))
+        XCTAssertTrue(parsed.bodyText.contains("Third spoken paragraph."))
+        XCTAssertFalse(parsed.bodyText.lowercased().contains("anchor desk"))
+        XCTAssertFalse(parsed.bodyText.contains("(beat)"))
+        XCTAssertFalse(parsed.bodyText.lowercased().contains("b-roll"))
+        XCTAssertFalse(parsed.bodyText.contains("["))
+    }
+
+    func testStageDirectionStrippingPreservesOrdinaryParentheticalsAndCaps() {
+        let raw = "The price (about $30) is fair. I said NO to upsells."
+        let parsed = MarkdownCleaner.clean(text: raw, rules: .aggressive)
+        XCTAssertTrue(parsed.bodyText.contains("(about $30)"),
+                      "Ordinary parenthetical asides must survive")
+        XCTAssertTrue(parsed.bodyText.contains("NO"),
+                      "Emphatic caps must survive")
+    }
+
+    func testGentleModeKeepsStageDirectionsVisible() {
+        let raw = "Welcome. [Cut to: desk] (beat) I continue. WIDE SHOT here."
+        let parsed = MarkdownCleaner.clean(text: raw, rules: .gentle)
+        XCTAssertTrue(parsed.bodyText.contains("[Cut to: desk]"),
+                      "Gentle mode keeps bracket cues visible on camera")
+        XCTAssertTrue(parsed.bodyText.contains("(beat)"),
+                      "Gentle mode keeps parentheticals visible")
+        XCTAssertTrue(parsed.bodyText.contains("WIDE SHOT"),
+                      "Gentle mode keeps ALL-CAPS shot directions visible")
+    }
+
+    func testAggressiveKeepingStageDirectionsKeepsBroadCuesButStripsLegacy() {
+        // With aggressive stripping ON but the stage-direction toggle OFF, the
+        // legacy `[B-roll: …]` bracket still strips (it's in `visualDirection`),
+        // but `(beat)` and ALL-CAPS shot directions survive.
+        let raw = "Intro. [B-roll: the rig] (beat) middle. WIDE SHOT here. Outro."
+        let parsed = MarkdownCleaner.clean(
+            text: raw,
+            rules: .aggressiveKeepingStageDirections
+        )
+        XCTAssertFalse(parsed.bodyText.lowercased().contains("b-roll"),
+                       "Legacy visual-direction bracket still strips")
+        XCTAssertTrue(parsed.bodyText.contains("(beat)"),
+                      "Broadened parenthetical cue survives when the toggle is off")
+        XCTAssertTrue(parsed.bodyText.contains("WIDE SHOT"),
+                      "Broadened caps cue survives when the toggle is off")
+    }
+
+    // MARK: - Source-untouched (display-time-only contract)
+
+    func testSourceStringUntouchedByStageDirectionStripping() {
+        // The cleaner must NEVER mutate the caller's source string. It emits a
+        // separate render copy (`ParsedScript`). This pins the display-time-
+        // only contract for the stage-direction feature.
+        let original = """
+        Welcome back. [Cut to: close-up] (beat) Today we talk about lenses.
+
+        CUT TO: the anchor desk
+
+        WIDE SHOT of the studio. That is all.
+        """
+        let snapshot = original
+        _ = MarkdownCleaner.clean(text: original, rules: .aggressive)
+        XCTAssertEqual(
+            original, snapshot,
+            "clean() must not mutate the source string — display-time only"
+        )
+        // The cues are all still present in the untouched source.
+        XCTAssertTrue(original.contains("[Cut to: close-up]"))
+        XCTAssertTrue(original.contains("(beat)"))
+        XCTAssertTrue(original.contains("CUT TO: the anchor desk"))
+        XCTAssertTrue(original.contains("WIDE SHOT of the studio."))
+    }
+
+    func testPlainProjectionStaysConsistentAfterCueRemoval() {
+        // Voice tracking / word count / edit-teleport all read `bodyText`. The
+        // per-block plain projection and the styled runs must agree, so the
+        // flattened body has no stray markers after cue removal.
+        let raw = "Line **one** here. [Cut to: desk] Line *two* there."
+        let parsed = MarkdownCleaner.clean(text: raw, rules: .aggressive)
+        XCTAssertFalse(parsed.bodyText.contains("["))
+        XCTAssertFalse(parsed.bodyText.contains("*"),
+                       "Emphasis markers are never in the plain projection")
+        XCTAssertTrue(parsed.bodyText.contains("Line one here."))
+        XCTAssertTrue(parsed.bodyText.contains("Line two there."))
+        // Word count reflects only spoken words (cue words are gone).
+        XCTAssertFalse(parsed.bodyText.lowercased().contains("cut to"))
+    }
+
     // MARK: - Wikilinks helper (direct)
 
     func testStripWikilinksDirectly() {

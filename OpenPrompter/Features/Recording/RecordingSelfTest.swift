@@ -119,6 +119,13 @@ struct CaptureContext: Codable {
     /// `utsname.machine` identifier (e.g. `"iPhone18,2"` for iPhone 17
     /// Pro Max). Drives device-class lookups in `OrientationPolicy`.
     let deviceModelIdentifier: String
+    /// How `OrientationPolicy.DeviceGenerationHint.from(modelIdentifier:)`
+    /// bucketed `deviceModelIdentifier` (e.g. `"squareFrontSensor"` for
+    /// iPhone 17, `"wideFrontSensor"` for iPhone 13 Pro / GitHub #2). Recorded
+    /// so a #2-style report tells us BOTH the raw model AND how our classifier
+    /// bucketed it — one round-trip confirms the preview policy picked the
+    /// right row for that device. See V3 Design 06 §2.2.
+    let deviceGenerationHint: String
     /// Marketing model name (e.g. `"iPhone"`).
     let deviceModelName: String
     /// `UIDevice.systemVersion` (e.g. `"26.0.1"`).
@@ -137,6 +144,14 @@ struct CaptureContext: Codable {
     /// `pickerAspectRaw` when the user picked an aspect the device doesn't
     /// declare and we fell back). Nil if no dynamic aspect was applied.
     let appliedDynamicAspectRaw: String?
+    /// The `PhysicalHold` captured at REC tap for this recording (V3 §07).
+    /// Read live at self-test time from the current interface orientation as
+    /// a best-effort proxy (like the other CaptureContext fields — the
+    /// sidecar-at-record-time caveat in the struct's doc comment applies).
+    /// Lets a landscape self-test JSON declare which (shape × hold) cell it
+    /// pins during the handedness-constant roundtrips (§5).
+    /// `"portrait"` | `"landscapeLeft"` | `"landscapeRight"`.
+    let capturedHold: String
 }
 
 /// Per-aspect expectation vs. actual file dims/transform. Computed from
@@ -357,12 +372,18 @@ enum RecordingSelfTest {
         // encoded dims (the record-time truth — by the time the file was
         // written, the dynamic-aspect reshape had landed).
         let pickerAspect = RecordingAspect(rawValue: context.pickerAspectRaw) ?? .default
+        // V3 §07: the expected transform now depends on the captured hold too
+        // — otherwise a landscape file would falsely fail the transform-match
+        // assertion against a portrait-only expectation. `capturedHold` is a
+        // best-effort read at self-test time (see CaptureContext doc comment).
+        let capturedHold = OrientationPolicy.PhysicalHold(rawValue: context.capturedHold) ?? .portrait
         let bufferShape = OrientationPolicy.BufferShape.from(
             width: videoWidth,
             height: videoHeight
         ) ?? .landscape
         let expectedTransform = OrientationPolicy.writerTransform(
             for: pickerAspect,
+            hold: capturedHold,
             bufferShape: bufferShape
         )
         let expectedTransformArray: [Double] = [
@@ -372,6 +393,7 @@ enum RecordingSelfTest {
         let transformMatches = transformsAreClose(preferredTransform, expectedTransformArray, tolerance: 0.01)
         let expectedAspectRatio = expectedPlaybackAspectRatio(
             for: pickerAspect,
+            hold: capturedHold,
             bufferShape: bufferShape,
             bufferWidth: videoWidth,
             bufferHeight: videoHeight
@@ -416,9 +438,18 @@ enum RecordingSelfTest {
             passed: !audioTracks.isEmpty,
             detail: "tracks = \(audioTracks.count) (0 means mic was unavailable)"
         ))
+        // V3 §07: the expected playback orientation is now hold-dependent —
+        // held upright plays portrait-or-square, held sideways plays
+        // landscape-or-square. Assert against the captured hold so a landscape
+        // self-test doesn't emit a false red flag.
+        let wantsPortraitForHold = OrientationPolicy.wantsPortraitPlayback(for: capturedHold)
+        let orientationOK = playbackW > 0 && playbackH > 0 &&
+            (wantsPortraitForHold ? playbackH >= playbackW : playbackW >= playbackH)
         assertions.append(.init(
-            name: "playback orientation is portrait or square",
-            passed: playbackH >= playbackW && playbackH > 0,
+            name: wantsPortraitForHold
+                ? "playback orientation is portrait or square (hold=\(context.capturedHold))"
+                : "playback orientation is landscape or square (hold=\(context.capturedHold))",
+            passed: orientationOK,
             detail: "encoded \(videoWidth)×\(videoHeight) + transform \(preferredTransform) → playback \(playbackW)×\(playbackH)"
         ))
         assertions.append(.init(
@@ -686,38 +717,27 @@ enum RecordingSelfTest {
             supportedRaw = allDeclared.sorted()
         }
 
+        let modelIdentifier = OrientationPolicy.currentDeviceModelIdentifier
         return CaptureContext(
             pickerAspectRaw: aspectRaw,
             pickerAspectName: aspect.displayName,
             mirrorHorizontal: Prefs.hMirrorDefault,
             mirrorVertical: Prefs.vMirrorDefault,
-            deviceModelIdentifier: deviceModelIdentifier(),
+            deviceModelIdentifier: modelIdentifier,
+            deviceGenerationHint: OrientationPolicy.DeviceGenerationHint
+                .from(modelIdentifier: modelIdentifier).rawValue,
             deviceModelName: UIDevice.current.model,
             iosVersion: UIDevice.current.systemVersion,
             recordingQuality: Prefs.recordingQuality,
             recordingFramerate: Prefs.recordingFramerate,
             supportedDynamicAspectsRaw: supportedRaw,
-            appliedDynamicAspectRaw: nil  // Filled in by analyze() if a
-                                          // running camera store is available
-                                          // — but at self-test time the session
-                                          // may already be torn down. Best-
-                                          // effort.
+            appliedDynamicAspectRaw: nil,  // Filled in by analyze() if a
+                                           // running camera store is available
+                                           // — but at self-test time the session
+                                           // may already be torn down. Best-
+                                           // effort.
+            capturedHold: OrientationPolicy.currentPhysicalHold().rawValue  // V3 §07
         )
-    }
-
-    /// Read the device's hardware identifier (e.g. `"iPhone18,2"` for
-    /// iPhone 17 Pro Max) via `utsname`. `UIDevice.current.model` only
-    /// returns the marketing class (`"iPhone"`); we want the specific
-    /// hardware revision so `OrientationPolicy` can branch by sensor
-    /// generation if needed.
-    private static func deviceModelIdentifier() -> String {
-        var systemInfo = utsname()
-        uname(&systemInfo)
-        let mirror = Mirror(reflecting: systemInfo.machine)
-        return mirror.children.compactMap { element -> String? in
-            guard let value = element.value as? Int8, value != 0 else { return nil }
-            return String(UnicodeScalar(UInt8(bitPattern: value)))
-        }.joined()
     }
 
     nonisolated private static func isPortraitTransform(_ t: [Double]) -> Bool {
@@ -761,20 +781,24 @@ enum RecordingSelfTest {
     }
 
     /// Predict the playback aspect ratio (W/H) for a given (RecordingAspect,
-    /// BufferShape, bufferDims) tuple. Buffer-shape aware: for openGate the
-    /// expected playback depends on whether iOS produced a square buffer
-    /// (ratio1x1 declared) or a landscape buffer (ratio4x3 fallback). For
-    /// portrait-intent aspects we always return W/H of the rotated playback,
-    /// computed from the actual buffer dims so the prediction stays accurate
-    /// across hardware classes.
+    /// PhysicalHold, BufferShape, bufferDims) tuple. Buffer-shape aware: for
+    /// openGate the expected playback depends on whether iOS produced a square
+    /// buffer (ratio1x1 declared) or a landscape buffer (ratio4x3 fallback).
+    ///
+    /// V3 §07: portrait-vs-landscape playback intent is now the HOLD, not the
+    /// shape — held upright = portrait playback, held sideways = landscape.
+    /// `aspect` is retained for signature symmetry / future per-shape
+    /// prediction refinements; the intent branch reads `hold`.
     nonisolated static func expectedPlaybackAspectRatio(
         for aspect: RecordingAspect,
+        hold: OrientationPolicy.PhysicalHold,
         bufferShape: OrientationPolicy.BufferShape,
         bufferWidth: Int,
         bufferHeight: Int
     ) -> Double {
+        _ = aspect  // kept for API symmetry / future per-shape overrides
         guard bufferWidth > 0, bufferHeight > 0 else { return 0 }
-        let wantsPortrait = OrientationPolicy.wantsPortraitPlayback(for: aspect)
+        let wantsPortrait = OrientationPolicy.wantsPortraitPlayback(for: hold)
 
         // Compute playback dims by composing buffer with the policy's
         // transform: a portrait-intent + landscape buffer rotates → playback

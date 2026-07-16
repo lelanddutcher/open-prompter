@@ -27,14 +27,14 @@ struct LiveChip: View {
                 .frame(width: 6, height: 6)
                 .shadow(color: dotColor.opacity(0.85), radius: pulse ? 4 : 2)
             Text(label)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .tracking(0.5)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .tracking(0.4)
                 .foregroundStyle(Theme.muted)
+                .lineLimit(1)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(Theme.surface, in: Capsule())
-        .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .glassSurface(in: Capsule())
     }
 
     private var dotColor: Color {

@@ -30,12 +30,14 @@ open prompter is the whole feature set, free, MIT-licensed forever. it reads the
 
 ## the reading experience
 
-- **voice tracking** — on-device speech recognition follows what you actually said, so the page advances when you do. nothing leaves the phone, ever. comes with a draggable reading-band indicator (TOP/BOT handles) so the matched word lands exactly where you want, plus velocity-controlled scroll that smoothly accelerates and decelerates with your pace, and silence detection that pauses the scroll if you stop talking for ~1.5s so you can scroll back to re-read.
+- **voice tracking** — on-device speech recognition follows what you actually said, so the page advances when you do. nothing leaves the phone, ever. it primes the recognizer with a **script-biased vocabulary** built from your own words, so names and jargon match reliably; a draggable reading-band indicator (READ/FEATHER handles) lands the matched word exactly where you want; velocity-controlled scroll with momentum accelerates and decelerates with your pace; and silence detection settles the scroll if you stop talking for ~1s so you can scroll back to re-read.
 - **horizontal AND vertical mirror**, independently, for beam-splitter teleprompter rigs.
 - **six legibility-tuned fonts** built in: Atkinson Hyperlegible (default), Lexend, System Sans, Verdana, New York (Serif), and the brand monospace.
 - **adjustable scroll speed** (5–200 px/s) and font size (16–160 pt) so dense scripts AND eye-line reads both work.
 - **focus mode** dims the chrome for clean recording — a single eye button brings it back.
-- **full-bleed prompter** with vertical or horizontal rotation. no UI chrome fighting your eye-line.
+- **left-edge reading-progress bar** — a slim green marker shows how far you are through the script at a glance, like a page scrollbar.
+- **automatic landscape ↔ portrait** — hold the phone whichever way you're shooting and the prompter *and* the recording follow. the aspect picker sets shape; your grip sets orientation.
+- **full-bleed prompter** — no UI chrome fighting your eye-line. on iOS 26 the controls render in Liquid Glass.
 
 ## camera and recording
 
@@ -44,6 +46,7 @@ open prompter is the whole feature set, free, MIT-licensed forever. it reads the
 - **open gate on iPhone 17** captures the full 1:1 front sensor at 3840 × 3840. perform your script once, crop a 9:16 / 1:1 / 16:9 from the same take in your editor. no reshoot for every platform. (older iPhones record at the maximum frame their sensor exposes — the square-headroom re-crop trick is iPhone 17-only.)
 - **save next to the script** — toggle in Settings → Recording. when on, the .mov writes to the same folder as the .md so iCloud delivers the take to your mac next to the script. no Photos library hunt, no AirDrop dance.
 - **standard or high-bitrate HEVC**, sized for quality + efficiency. true 24p frame rate or 30p or 60p (if you're feeling wild).
+- **editor-ready markers** — tap the mark button while recording, or let script cues (`[MARK]` / headings) drop them automatically. they embed in the .mov as QuickTime chapters *and* an Adobe XMP marker track, so they import as **native markers in Premiere Pro**.
 - per-take stabilization, mic source picker, recovery banner if a take got force-quit mid-write.
 - **tally-light border + Live Activity in the dynamic island** while recording, so the record state is visible from anywhere.
 
@@ -51,16 +54,20 @@ open prompter is the whole feature set, free, MIT-licensed forever. it reads the
 
 tap the pencil in the top bar to open the file. changes save back through the system file coordinator — iCloud syncs them to your mac the same way it syncs any other file. no proprietary container, no "import to edit" round-trip.
 
+## on-device format
+
+paste a messy transcript or a wall of notes and let **Format** reshape it into clean teleprompter markdown — paragraph breaks, headings, readable line lengths — entirely on-device with Apple's Foundation Models. nothing uploaded, no account. (iOS 26 on an Apple-Intelligence-capable iPhone; the button hides itself where the model can't run.)
+
 ## bluetooth remote
 
-pair any Bluetooth keyboard or media remote and bind buttons to play, pause, mirror, jump-to-start, and other prompter actions. the hardware-vendor zoo (Logitech R400, AirTurn, Apple keyboards, generic media keys) is supported through one unified event bus. volume-button capture is opt-in (Settings → Remote) so the volume rocker still works as a volume rocker by default.
+pair any Bluetooth keyboard, media remote, or presentation clicker and bind buttons to play, pause, mirror, jump-to-start, and other prompter actions. a **"learn your remote" wizard** maps each button by having you press it. keyboards, media / consumer-control keys, and mouse-class remotes (D-pad clickers that present as a pointer) all flow through one unified event bus. volume-button capture is opt-in (Settings → Remote) so the volume rocker still works as a volume rocker by default.
 
 ## what it parses
 
 real markdown:
 
 - headings render as headings, bullets as bullets, numbered lists as numbered lists
-- front matter, callouts (`> [!ai-generated]`), footnotes, tables, and visual-direction brackets (`[B-roll: ...]`) stripped automatically
+- front matter, callouts (`> [!ai-generated]`), footnotes, tables, visual-direction brackets (`[B-roll: ...]`), and stage directions (`(pause)`, all-caps action cues) stripped automatically
 - aggressive stripping is on by default; turn it off in settings if you want to see cues on screen
 
 ## what you WON'T find here
@@ -106,7 +113,11 @@ set your development team in signing, then run on a simulator or device.
 - `AVCaptureSession` with pre-attached `AVCaptureVideoDataOutput` + `AVCaptureAudioDataOutput`; `AVAssetWriter` is built lazily on the first sample buffer for clean orientation, with an `OrientationPolicy` table mapping `(aspect, bufferShape)` → writer transform — see [`CLAUDE.md`](./CLAUDE.md) for the iPhone 17 + iOS 26 quirk write-up
 - `SFSpeechRecognizer` (on-device) drives voice tracking; a custom `ScriptAligner` does word-level Levenshtein + double-metaphone phonetic folding + locality-biased matching so common words don't teleport you to the end of the script
 - `OSAllocatedUnfairLock<WriterState>` guards cross-thread writer state in `RecordingSession` (one lock around a 12-property struct, not 12 individual `nonisolated(unsafe)` fields)
-- `SwiftData` (with CloudKit off) for the recents cache, `@AppStorage` + `NSUbiquitousKeyValueStore` for preferences, `ActivityKit` for the recording Live Activity, `MediaPlayer` + key-event handlers for the unified Bluetooth remote bus
+- `SwiftData` (with CloudKit off) for the recents cache, `@AppStorage` + `NSUbiquitousKeyValueStore` for preferences, `ActivityKit` for the recording Live Activity
+- `GameController` (`GCKeyboard` / `GCMouse`) + `MediaPlayer` remote-command + hardware key-event handlers feed one unified remote event bus, fronted by a "learn your remote" binding wizard
+- on-device `FoundationModels` (`SystemLanguageModel`) powers **Format** on iOS 26 — availability-gated so the feature hides itself on older OSes / ineligible devices and never blocks the iOS 17 floor
+- markers write as a QuickTime `.text` chapter track plus an Adobe XMP `xmpDM:Tracks` packet injected into `moov/udta`, so Premiere Pro reads them as native markers
+- Liquid Glass controls on iOS 26 (`glassEffect`), with a material + hairline fallback on iOS 17–25
 
 
 ## contributing

@@ -7,7 +7,13 @@
 //
 //  - `pip`     small portrait tile + full-frame text. Marquee mode.
 //  - `behind`  full-frame camera, prompter text scrolls over a scrim.
-//  - `off`     no camera session at all. Privacy-respecting first-run default.
+//  - `off`     no camera session at all. Privacy-respecting first-run default
+//              (`Prefs.cameraStyle` registers `"off"`). The camera is OPT-IN:
+//              a `.pip` default would auto-mount a PiP tile whose preview
+//              layer paints black before frames flow (the "black box" bug).
+//              First-run users enable it via the coach-mark "enable camera"
+//              button, which routes through `CameraStore.setStyle(.pip)`.
+//              Do NOT flip the registered default back to `"pip"`.
 //
 //  Stored as a string in `Prefs.cameraStyle` so the JSON shape stays stable
 //  even if we add a fourth mode (e.g. picture-in-picture-out for floating

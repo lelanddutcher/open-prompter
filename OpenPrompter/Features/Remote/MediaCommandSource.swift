@@ -23,11 +23,27 @@
 
 import Foundation
 import MediaPlayer
+import os
+
+#if DEBUG
+/// Shared `[Remote-Capture]` channel (see VolumeEventSource for rationale).
+fileprivate let remoteCaptureLog = Logger(
+    subsystem: "app.openprompter.remote",
+    category: "Remote-Capture"
+)
+#endif
 
 @MainActor
 final class MediaCommandSource: RemoteEventSource {
     private let bus: RemoteEventBus
     private let store: RemoteBindingStore
+
+    /// Optional tap invoked with the resolved media `RemoteKey` for every
+    /// incoming command, BEFORE the binding lookup — the Labs "learn my
+    /// remote" capture tool subscribes so unmapped media buttons still
+    /// surface. `nil` in the normal prompter path. `@MainActor` throughout.
+    private let onCapture: (@MainActor (RemoteKey) -> Void)?
+
     private var registered: Bool = false
 
     /// Token-style references to the handlers so `stop()` can remove the
@@ -39,9 +55,14 @@ final class MediaCommandSource: RemoteEventSource {
     private var nextHandler: Any?
     private var prevHandler: Any?
 
-    init(bus: RemoteEventBus, store: RemoteBindingStore) {
+    init(
+        bus: RemoteEventBus,
+        store: RemoteBindingStore,
+        onCapture: (@MainActor (RemoteKey) -> Void)? = nil
+    ) {
         self.bus = bus
         self.store = store
+        self.onCapture = onCapture
     }
 
     func start() {
@@ -111,6 +132,10 @@ final class MediaCommandSource: RemoteEventSource {
     }
 
     private func publish(for key: RemoteKey) {
+        #if DEBUG
+        remoteCaptureLog.info("media.publish key=\(key.id, privacy: .public) → onCapture hook=\(self.onCapture != nil, privacy: .public)")
+        #endif
+        onCapture?(key)
         guard let event = store.event(for: key) else { return }
         bus.publish(event)
     }

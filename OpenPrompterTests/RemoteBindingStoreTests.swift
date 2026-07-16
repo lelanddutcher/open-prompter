@@ -24,15 +24,30 @@ final class RemoteBindingStoreTests: XCTestCase {
     }
 
     func testDefaultsLoadedOnFirstUse() {
+        // Remote-nav pass (audit fix 4 / R3): a d-pad NAVIGATES by default.
+        // Up/Down step one line, Left/Right jump by section, Page keys are
+        // the coarse half-screen leap. Speed control moved to j/k so it stays
+        // reachable after the arrows were repurposed.
         let store = RemoteBindingStore(defaults: makeDefaults())
         XCTAssertEqual(store.event(for: .space), .playPause)
         XCTAssertEqual(store.event(for: .return), .playPause)
-        XCTAssertEqual(store.event(for: .arrowUp), .speedUp)
-        XCTAssertEqual(store.event(for: .arrowDown), .speedDown)
-        XCTAssertEqual(store.event(for: .arrowLeft), .jumpBackward)
-        XCTAssertEqual(store.event(for: .arrowRight), .jumpForward)
-        XCTAssertEqual(store.event(for: .pageUp), .prevSection)
-        XCTAssertEqual(store.event(for: .pageDown), .nextSection)
+        XCTAssertEqual(store.event(for: .arrowUp), .lineUp)
+        XCTAssertEqual(store.event(for: .arrowDown), .lineDown)
+        XCTAssertEqual(store.event(for: .arrowLeft), .prevSection)
+        XCTAssertEqual(store.event(for: .arrowRight), .nextSection)
+        XCTAssertEqual(store.event(for: .pageUp), .jumpBackward)
+        XCTAssertEqual(store.event(for: .pageDown), .jumpForward)
+        XCTAssertEqual(store.event(for: .letter("j")), .speedDown)
+        XCTAssertEqual(store.event(for: .letter("k")), .speedUp)
+    }
+
+    func testPointerButtonDefaults() {
+        // The founder's BLE-M5 D-pad center / aux shutter are digitizer taps
+        // → mouse clicks. Primary tap plays/pauses; aux jumps to take start.
+        let store = RemoteBindingStore(defaults: makeDefaults())
+        XCTAssertEqual(store.event(for: .mouseClick), .playPause)
+        XCTAssertEqual(store.event(for: .mouseRightClick), .jumpToStart)
+        XCTAssertEqual(store.event(for: .mouseMiddleClick), .mirrorToggle)
     }
 
     func testNovelJumpToStartBindingDefault() {
@@ -82,7 +97,7 @@ final class RemoteBindingStoreTests: XCTestCase {
         store.resetToDefaults()
         // Defaults are back.
         XCTAssertEqual(store.event(for: .space), .playPause)
-        XCTAssertEqual(store.event(for: .arrowUp), .speedUp)
+        XCTAssertEqual(store.event(for: .arrowUp), .lineUp)
         // Letter("x") was never a default — should be cleared.
         XCTAssertNil(store.event(for: .letter("x")))
     }
@@ -94,7 +109,8 @@ final class RemoteBindingStoreTests: XCTestCase {
             .pageUp, .pageDown,
             .letter("a"), .letter("b"), .letter("z"),
             .mediaPlayPause, .mediaNextTrack, .mediaPrevTrack,
-            .volumeUp, .volumeDown
+            .volumeUp, .volumeDown,
+            .mouseClick, .mouseRightClick, .mouseMiddleClick
         ]
         for key in cases {
             let id = key.id

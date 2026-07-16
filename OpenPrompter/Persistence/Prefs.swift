@@ -25,6 +25,13 @@ enum PrefKey: String, CaseIterable {
     case vMirrorDefault = "pref.vMirrorDefault"
     case focusDefault = "pref.focusDefault"
     case aggressiveStripping = "pref.aggressiveStripping"
+    /// Stage-direction / camera-cue display stripping (V3 sprint item 4).
+    /// When on (default), the aggressive rules also strip broadened stage
+    /// directions and camera cues — `[Cut to: …]`, `(beat)`, ALL-CAPS shot
+    /// directions like `WIDE SHOT` / `CUT TO:` — from the READING FLOW only
+    /// (never the `.md` on disk). Only meaningful while aggressive stripping
+    /// is on; gentle mode keeps every cue visible on camera regardless.
+    case stripStageDirections = "pref.stripStageDirections"
     case lastFileURL = "pref.lastFileURL"
     case onboardingCompleted = "pref.onboardingCompleted"
     case coachMarkPlayShown = "pref.coachMarkPlayShown"
@@ -46,10 +53,16 @@ enum PrefKey: String, CaseIterable {
     /// User's chosen camera composition mode. Stored as a string so the
     /// JSON shape stays stable if we add a new mode (e.g. floating preview)
     /// without invalidating sibling devices' iCloud KVS payloads.
-    /// 2.5.0 default: `"pip"` — feature is on by default so the in-app
-    /// camera is discoverable from the first prompter open. The startup
-    /// `PermissionPrimer` requests camera authorization at launch so the
-    /// PiP tile has a session to attach to without a mid-read prompt.
+    /// Default: `"off"` — the camera is OPT-IN. A `"pip"` default auto-mounts
+    /// a PiP tile on first launch whose `AVCaptureVideoPreviewLayer` paints
+    /// `.black` before any frames flow, so a fresh install shows a black box
+    /// under the front lens. The first-run coach-mark banner (see
+    /// `TeleprompterView.cameraIntroBanner`) offers an "Enable camera" button
+    /// that flips the style to `.pip` on demand via the permission-gated
+    /// `CameraStore.setStyle(.pip)` path. Do NOT re-flip this to `"pip"`, and
+    /// do NOT add a migration that force-writes `.pip` — users who explicitly
+    /// chose a mode already have a persistent write and are untouched; users
+    /// who never touched the chip correctly fall to `.off`.
     case cameraStyle = "pref.camera.style"
     /// Last-used PiP tile size. Persisted between launches.
     case cameraPipSize = "pref.camera.pipSize"
@@ -108,15 +121,70 @@ enum PrefKey: String, CaseIterable {
     /// We use this to tell whether we've already prompted on this device,
     /// so the chip doesn't fire the system prompt twice in a single take.
     case recordingPhotosPermissionAsked = "pref.recording.photosPermissionAsked"
-    /// Recording aspect ratio. Raw value of `RecordingAspect`. New users
-    /// default to `"ratio9x16"` (vertical, social-share friendly); existing
+    /// Recording aspect SHAPE. Raw value of `RecordingAspect`. New users
+    /// default to `"ratio16x9"` (= `.wide`, the merged 16:9 shape that
+    /// auto-orients to 9:16 vertical when held upright, V3 §07); existing
     /// users who already touched the recording feature are migrated to
-    /// `"openGate"` by `migrateRecordingAspectToOpenGate(in:domain:)` so
-    /// their behaviour doesn't change unexpectedly. Mirrored to iCloud KVS.
+    /// `"openGate"` by `migrateRecordingAspectToOpenGate(in:domain:)`, and a
+    /// persisted legacy `"ratio9x16"` is collapsed to `"ratio16x9"` by
+    /// `migrateVerticalAspectToWideShape(in:domain:)` so their behaviour
+    /// doesn't change unexpectedly. Mirrored to iCloud KVS.
     case recordingAspect = "pref.recording.aspect"
     /// One-shot coach mark for the new aspect-ratio picker. Device-local
     /// (NOT mirrored) per the existing coach-mark pattern.
     case coachMarkRecordingAspectShown = "pref.coachMarkRecordingAspectShown"
+
+    // MARK: - Video markers (V3 headline, H0a manual + H0b script)
+
+    /// Write an in-file TIMED-METADATA marker track (read by Premiere / FCP /
+    /// Resolve). Default ON. Independent of the chapter track below so a user
+    /// / future Settings row can disable either output shape. Mirrored to
+    /// iCloud KVS — a marker preference travels with the user.
+    case recordingMarkerMetadataTrack = "pref.recording.marker.metadataTrack"
+    /// Write an in-file QuickTime CHAPTER track (Photos / QuickTime render
+    /// these as scrubber ticks). Default ON. Independent of the metadata
+    /// track above. Mirrored to iCloud KVS.
+    case recordingMarkerChapterTrack = "pref.recording.marker.chapterTrack"
+
+    // MARK: - On-device Format (V3 item C)
+
+    /// Labs feature flag for on-device Format. DEBUG-on / Release-off until
+    /// it graduates, matching labsRecording / labsCameraStyle. Resolved in
+    /// `defaultValue` via `#if DEBUG`. Device-local (NOT mirrored) — a flag
+    /// that's on for one device shouldn't light up an unprepared sibling.
+    case labsFormat = "labs.format"
+
+    /// User override of the "Format" preset prompt. Empty string => use the
+    /// shipped default (so a later build can improve the default for
+    /// non-editors). Mirrored to iCloud KVS — prompts are small text and
+    /// travel well across the user's devices.
+    case formatPromptFormatOverride = "pref.format.prompt.format"
+
+    /// User override of the "Cleanup" preset prompt. Empty => shipped default.
+    case formatPromptCleanupOverride = "pref.format.prompt.cleanup"
+
+    /// The user's Custom preset prompt. Empty => seeded template.
+    case formatPromptCustom = "pref.format.prompt.custom"
+
+    /// The user's Custom preset display name. Empty => "Custom".
+    case formatCustomName = "pref.format.customName"
+
+    /// One-shot coach mark for the new Format button. Device-local; NOT
+    /// mirrored (matches existing coach-mark pattern).
+    case coachMarkFormatShown = "pref.coachMarkFormatShown"
+
+    // MARK: - SpeechAnalyzer voice biasing (V3 item B, Slice B)
+
+    /// Use the iOS 26 `SpeechAnalyzer` / `SpeechTranscriber` backend instead
+    /// of `SFSpeechRecognizer` when available. Contextual biasing improves
+    /// match accuracy on distinctive script terms (both engines get the same
+    /// `ScriptBiasVocabulary`; the analyzer additionally supports mid-stream
+    /// re-biasing, deferred). Per-device (recognizer models are device-local);
+    /// NOT mirrored to iCloud KVS. Defaults ON in DEBUG, OFF in Release until
+    /// dogfooded on real iOS 26 hardware, per CLAUDE.md "don't promise a fix
+    /// because the simulator is happy". Resolved in `defaultValue` via
+    /// `#if DEBUG`, matching the `labsFormat` pre-graduation shape.
+    case voiceUseSpeechAnalyzer = "pref.voice.useSpeechAnalyzer"
 
     // MARK: - App Store review prompt (Feature 8)
     //
@@ -159,6 +227,7 @@ enum PrefKey: String, CaseIterable {
         case .vMirrorDefault: return false
         case .focusDefault: return false
         case .aggressiveStripping: return true
+        case .stripStageDirections: return true
         case .lastFileURL: return ""
         case .onboardingCompleted: return false
         case .coachMarkPlayShown: return false
@@ -172,7 +241,7 @@ enum PrefKey: String, CaseIterable {
             // their stored value; the registration-domain bump only affects
             // users who never opened Settings → Labs (the majority).
             return true
-        case .cameraStyle:           return "pip"
+        case .cameraStyle:           return "off"
         case .cameraPipSize:         return "medium"
         case .cameraPipPositionX:    return 0.5
         case .cameraPipPositionY:    return 0.22
@@ -196,13 +265,47 @@ enum PrefKey: String, CaseIterable {
             // 2.5.0 hotfix: graduated. See `labsBluetoothRemote` above.
             return true
         case .recordingPhotosPermissionAsked: return false
-        // The registration-domain default is "ratio9x16" — fresh installs
-        // start vertical / social-share. Existing users with a recording
-        // history get migrated to "openGate" by
+        // The registration-domain default is "ratio16x9" (= `.wide`, the
+        // merged 16:9 shape) — fresh installs land on the widescreen shape,
+        // which auto-orients to 9:16 vertical when held upright (the
+        // social-share first impression is preserved, V3 §07). Existing users
+        // with a recording history get migrated to "openGate" by
         // `migrateRecordingAspectToOpenGate(in:domain:)` BEFORE registration
         // happens, so this default only applies to truly new users.
-        case .recordingAspect: return "ratio9x16"
+        case .recordingAspect: return "ratio16x9"
         case .coachMarkRecordingAspectShown: return false
+        // Video markers (V3 headline). BOTH output shapes on by default —
+        // the feature is the founder's explicit ask and both an NLE marker
+        // track and Photos scrubber ticks are wanted out of the box.
+        case .recordingMarkerMetadataTrack: return true
+        case .recordingMarkerChapterTrack: return true
+        // On-device Format (V3 item C). Labs flag defaults ON in DEBUG, OFF
+        // in Release until it graduates — matches the other labs* flags'
+        // pre-graduation shape (they were flipped to true only after the
+        // 2.5.0 graduation; Format is still in-progress).
+        case .labsFormat:
+            #if DEBUG
+            return true
+            #else
+            return false
+            #endif
+        // Empty strings => "use the code default" for the two built-in
+        // prompt overrides and the seeded custom template, so a future
+        // build shipping a better default reaches users who never edited it.
+        case .formatPromptFormatOverride: return ""
+        case .formatPromptCleanupOverride: return ""
+        case .formatPromptCustom: return ""
+        case .formatCustomName: return ""
+        // SpeechAnalyzer voice biasing (V3 item B). DEBUG-on / Release-off
+        // until it graduates from Labs — the analyzer path needs real iOS 26
+        // hardware dogfooding before it ships enabled.
+        case .voiceUseSpeechAnalyzer:
+            #if DEBUG
+            return true
+            #else
+            return false
+            #endif
+        case .coachMarkFormatShown: return false
         case .reviewRecordingsCompleted: return 0
         case .reviewPlaySessionsCompleted: return 0
         case .reviewTotalPlaybackSeconds: return 0.0
@@ -234,10 +337,18 @@ enum Prefs {
         let domain = Bundle.main.bundleIdentifier ?? ""
         migrateLegacyMirrorKey(in: defaults, domain: domain)
         // Aspect-ratio migration runs BEFORE register() seeds the new
-        // "ratio9x16" default — for users who've already touched the
+        // "ratio16x9" (`.wide`) default — for users who've already touched the
         // recording feature we want "openGate" to win, not the registration
         // default.
         migrateRecordingAspectToOpenGate(in: defaults, domain: domain)
+        // V3 §07: collapse a persisted legacy "ratio9x16" onto the merged
+        // 16:9 shape ("ratio16x9" = `.wide`). Runs AFTER the openGate
+        // migration (which only writes for existing users who never set an
+        // aspect) and BEFORE register(). Belt-and-suspenders with
+        // `RecordingAspect.canonicalShape`, which absorbs any legacy value
+        // that slips through (iCloud KVS mirror lag, a downgrade/upgrade
+        // bounce) at read time.
+        migrateVerticalAspectToWideShape(in: defaults, domain: domain)
 
         var initial: [String: Any] = [:]
         for key in PrefKey.allCases {
@@ -299,6 +410,27 @@ enum Prefs {
         store.set("openGate", forKey: aspectKey)
     }
 
+    /// One-shot (V3 §07): a persisted `"ratio9x16"` (the old "9:16 vertical"
+    /// pick) is rewritten to `"ratio16x9"` so it decodes as the merged
+    /// `.wide` shape under auto-orientation. Nobody's expectation regresses —
+    /// an old `.ratio9x16` user held the phone upright and got vertical;
+    /// under auto, upright + `.wide` = 9:16 vertical. `"ratio16x9"` is
+    /// already `.wide`; `"ratio4x3"` / `"ratio1x1"` / `"openGate"` already
+    /// map 1:1. Idempotent: only rewrites the exact legacy vertical string,
+    /// once — after which the guard finds a non-`"ratio9x16"` value and
+    /// short-circuits. Persistent-domain only (registration-domain values
+    /// don't count) so a framework default never triggers a rewrite.
+    ///
+    /// This keeps the stored string tidy and lets an older downgraded build
+    /// read a sensible value; `RecordingAspect.canonicalShape` independently
+    /// absorbs any legacy value that slips through at read time.
+    static func migrateVerticalAspectToWideShape(in store: UserDefaults, domain: String) {
+        let key = PrefKey.recordingAspect.rawValue
+        let persistent = store.persistentDomain(forName: domain) ?? [:]
+        guard (persistent[key] as? String) == "ratio9x16" else { return }
+        store.set("ratio16x9", forKey: key)
+    }
+
     // MARK: - Scalar accessors
 
     static var defaultSpeed: Double {
@@ -358,6 +490,14 @@ enum Prefs {
     static var aggressiveStripping: Bool {
         get { defaults.bool(forKey: PrefKey.aggressiveStripping.rawValue) }
         set { defaults.set(newValue, forKey: PrefKey.aggressiveStripping.rawValue) }
+    }
+
+    /// Stage-direction / camera-cue display stripping (V3 item 4). Selects the
+    /// stage-direction-stripping `.aggressive` rules vs. the plain aggressive
+    /// rules when aggressive stripping is on. Display-time only.
+    static var stripStageDirections: Bool {
+        get { defaults.bool(forKey: PrefKey.stripStageDirections.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.stripStageDirections.rawValue) }
     }
 
     static var lastFileURL: String {
@@ -512,6 +652,21 @@ enum Prefs {
         set { defaults.set(newValue, forKey: PrefKey.recordingSaveToScriptFolder.rawValue) }
     }
 
+    /// Whether to write the in-file timed-metadata marker track (NLE-read).
+    /// Default ON via the registration domain (`defaultValue == true`), so
+    /// `defaults.bool` returns true until the user explicitly turns it off.
+    static var recordingMarkerMetadataTrack: Bool {
+        get { defaults.bool(forKey: PrefKey.recordingMarkerMetadataTrack.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.recordingMarkerMetadataTrack.rawValue) }
+    }
+
+    /// Whether to write the in-file QuickTime chapter track (Photos ticks).
+    /// Default ON via the registration domain.
+    static var recordingMarkerChapterTrack: Bool {
+        get { defaults.bool(forKey: PrefKey.recordingMarkerChapterTrack.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.recordingMarkerChapterTrack.rawValue) }
+    }
+
     static var labsRecording: Bool {
         get { defaults.bool(forKey: PrefKey.labsRecording.rawValue) }
         set { defaults.set(newValue, forKey: PrefKey.labsRecording.rawValue) }
@@ -523,13 +678,14 @@ enum Prefs {
     }
 
     /// Recording aspect ratio raw value. Reads always fall back to
-    /// `"ratio9x16"` (the new-user default) if the stored value is missing
-    /// or unknown — the migration runs at app launch, so production reads
-    /// after `Prefs.register()` have already resolved the existing-user
-    /// case to `"openGate"`. Settings reads through this as a
-    /// `RecordingAspect` enum.
+    /// `"ratio16x9"` (= `.wide`, the new-user default) if the stored value is
+    /// missing or unknown — the migration runs at app launch, so production
+    /// reads after `Prefs.register()` have already resolved the existing-user
+    /// case to `"openGate"` and any legacy `"ratio9x16"` to `"ratio16x9"`.
+    /// Settings reads through this as a `RecordingAspect` enum
+    /// (`.canonicalShape` collapses a stray legacy value). V3 §07.
     static var recordingAspect: String {
-        get { defaults.string(forKey: PrefKey.recordingAspect.rawValue) ?? "ratio9x16" }
+        get { defaults.string(forKey: PrefKey.recordingAspect.rawValue) ?? "ratio16x9" }
         set { defaults.set(newValue, forKey: PrefKey.recordingAspect.rawValue) }
     }
 
@@ -538,6 +694,80 @@ enum Prefs {
     static var coachMarkRecordingAspectShown: Bool {
         get { defaults.bool(forKey: PrefKey.coachMarkRecordingAspectShown.rawValue) }
         set { defaults.set(newValue, forKey: PrefKey.coachMarkRecordingAspectShown.rawValue) }
+    }
+
+    // MARK: - On-device Format (V3 item C)
+
+    static var labsFormat: Bool {
+        get { defaults.bool(forKey: PrefKey.labsFormat.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.labsFormat.rawValue) }
+    }
+
+    /// Use the iOS 26 SpeechAnalyzer backend for voice tracking (V3 item B,
+    /// Slice B). Device-local (NOT mirrored). The default is seeded DEBUG-on
+    /// / Release-off via `PrefKey.voiceUseSpeechAnalyzer.defaultValue`, so a
+    /// plain `defaults.bool` read returns the right per-build default.
+    static var voiceUseSpeechAnalyzer: Bool {
+        get { defaults.bool(forKey: PrefKey.voiceUseSpeechAnalyzer.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.voiceUseSpeechAnalyzer.rawValue) }
+    }
+
+    /// Resolved prompt for the "Format" preset: the user override if
+    /// non-empty, else the shipped default. The setter writes `""` when the
+    /// value equals the current default so we never freeze a stale default
+    /// into storage (a future shipped-default change then reaches this user).
+    static var formatPrompt: String {
+        get {
+            let override = defaults.string(forKey: PrefKey.formatPromptFormatOverride.rawValue) ?? ""
+            return override.isEmpty ? FormatPreset.Defaults.format : override
+        }
+        set {
+            let toStore = (newValue == FormatPreset.Defaults.format) ? "" : newValue
+            defaults.set(toStore, forKey: PrefKey.formatPromptFormatOverride.rawValue)
+        }
+    }
+
+    /// Resolved prompt for the "Cleanup" preset. Same "" == default rule.
+    static var cleanupPrompt: String {
+        get {
+            let override = defaults.string(forKey: PrefKey.formatPromptCleanupOverride.rawValue) ?? ""
+            return override.isEmpty ? FormatPreset.Defaults.cleanup : override
+        }
+        set {
+            let toStore = (newValue == FormatPreset.Defaults.cleanup) ? "" : newValue
+            defaults.set(toStore, forKey: PrefKey.formatPromptCleanupOverride.rawValue)
+        }
+    }
+
+    /// The user's Custom preset prompt. Empty storage resolves to the seeded
+    /// template so the editor always shows a starting point.
+    static var customPrompt: String {
+        get {
+            let stored = defaults.string(forKey: PrefKey.formatPromptCustom.rawValue) ?? ""
+            return stored.isEmpty ? FormatPreset.Defaults.custom : stored
+        }
+        set {
+            let toStore = (newValue == FormatPreset.Defaults.custom) ? "" : newValue
+            defaults.set(toStore, forKey: PrefKey.formatPromptCustom.rawValue)
+        }
+    }
+
+    /// The user's Custom preset display name. Empty resolves to "Custom".
+    static var formatCustomName: String {
+        get {
+            let stored = defaults.string(forKey: PrefKey.formatCustomName.rawValue) ?? ""
+            return stored.isEmpty ? "Custom" : stored
+        }
+        set {
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let toStore = (trimmed.isEmpty || trimmed == "Custom") ? "" : trimmed
+            defaults.set(toStore, forKey: PrefKey.formatCustomName.rawValue)
+        }
+    }
+
+    static var coachMarkFormatShown: Bool {
+        get { defaults.bool(forKey: PrefKey.coachMarkFormatShown.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.coachMarkFormatShown.rawValue) }
     }
 
     // MARK: - App Store review prompt (Feature 8)

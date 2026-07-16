@@ -4,11 +4,14 @@
 //
 //  Covers the user-configurable recording aspect-ratio picker:
 //    - RecordingAspect enum has labels + help-text + Codable round-trip
-//    - Default is `.ratio9x16` (the new-user default)
-//    - Prefs.register() with no prior keys → recordingAspect == "ratio9x16"
+//    - Default is `.wide` (raw "ratio16x9", the new-user default under V3 §07)
+//    - Prefs.register() with no prior keys → recordingAspect == "ratio16x9"
 //    - migrateRecordingAspectToOpenGate(...) flips existing users to
 //      "openGate" without touching brand-new installs OR users who've
 //      already explicitly set the aspect themselves
+//    - migrateVerticalAspectToWideShape(...) collapses a persisted legacy
+//      "ratio9x16" onto the merged 16:9 shape "ratio16x9" (V3 §07)
+//    - canonicalShape collapses the .legacyVertical9x16 alias onto .wide
 //
 //  Test scaffolding mirrors MirrorAxesTests: snapshot+restore the touched
 //  UserDefaults keys on standard, plus an isolated UUID-named suite for
@@ -102,24 +105,78 @@ final class RecordingAspectTests: XCTestCase {
         }
     }
 
-    func testDefaultIs9x16() {
-        XCTAssertEqual(RecordingAspect.default, .ratio9x16,
-                       "New-user default must be 9:16 (vertical).")
+    func testDefaultIsWide() {
+        XCTAssertEqual(RecordingAspect.default, .wide,
+                       "New-user default must be the merged 16:9 (wide) shape.")
+        XCTAssertEqual(RecordingAspect.default.rawValue, "ratio16x9",
+                       "New-user default raw value must reuse \"ratio16x9\".")
+    }
+
+    /// The downgrade-safety alias must collapse onto `.wide` via
+    /// `canonicalShape`, and a persisted legacy raw must still decode.
+    func testLegacyVerticalAliasCanonicalizesToWide() {
+        XCTAssertEqual(RecordingAspect(rawValue: "ratio9x16"), .legacyVertical9x16,
+                       "Persisted legacy \"ratio9x16\" must still decode.")
+        XCTAssertEqual(RecordingAspect.legacyVertical9x16.canonicalShape, .wide,
+                       "The legacy 9:16 alias must canonicalize to .wide.")
+        // Every surfaced shape is its own canonical form.
+        for shape in RecordingAspect.surfacedCases {
+            XCTAssertEqual(shape.canonicalShape, shape)
+        }
+    }
+
+    /// The surfaced picker set is exactly the four shapes — never the alias.
+    func testSurfacedCasesExcludeAlias() {
+        XCTAssertEqual(RecordingAspect.surfacedCases, [.wide, .classic, .square, .openGate])
+        XCTAssertFalse(RecordingAspect.surfacedCases.contains(.legacyVertical9x16))
     }
 
     // MARK: - Prefs default + migration
 
     /// Brand-new install: no prior recording-related keys are written.
-    /// `Prefs.register()` should land on `"ratio9x16"` (the registration-
-    /// domain default). Note this test exercises the global UserDefaults
-    /// — we cleared it in setUp so the registration default applies.
-    func testNewUserDefaultIs9x16() {
+    /// `Prefs.register()` should land on `"ratio16x9"` (= `.wide`, the V3 §07
+    /// registration-domain default). Note this test exercises the global
+    /// UserDefaults — we cleared it in setUp so the registration default
+    /// applies.
+    func testNewUserDefaultIsWide() {
         // Sanity — setUp removed any persisted aspect value from the
         // standard defaults. Registering re-installs the registration-
         // domain default.
         Prefs.register()
-        XCTAssertEqual(Prefs.recordingAspect, "ratio9x16",
-                       "Fresh install should start at \"ratio9x16\".")
+        XCTAssertEqual(Prefs.recordingAspect, "ratio16x9",
+                       "Fresh install should start at \"ratio16x9\" (.wide).")
+    }
+
+    /// V3 §07: a persisted legacy "ratio9x16" is rewritten to "ratio16x9"
+    /// (the merged .wide shape) by the one-shot migration.
+    func testLegacyVerticalMigratesToWideShape() {
+        let (store, domain) = makeIsolatedStore()
+        store.set("ratio9x16", forKey: PrefKey.recordingAspect.rawValue)
+
+        Prefs.migrateVerticalAspectToWideShape(in: store, domain: domain)
+
+        XCTAssertEqual(store.string(forKey: PrefKey.recordingAspect.rawValue),
+                       "ratio16x9",
+                       "Legacy \"ratio9x16\" must migrate to \"ratio16x9\" (.wide).")
+    }
+
+    /// The vertical-shape migration only rewrites the exact legacy string —
+    /// other values (and a fresh install with no value) are untouched, and it
+    /// is idempotent.
+    func testVerticalMigrationLeavesOtherValuesUntouched() {
+        let (store, domain) = makeIsolatedStore()
+        for value in ["ratio16x9", "ratio4x3", "ratio1x1", "openGate"] {
+            store.set(value, forKey: PrefKey.recordingAspect.rawValue)
+            Prefs.migrateVerticalAspectToWideShape(in: store, domain: domain)
+            XCTAssertEqual(store.string(forKey: PrefKey.recordingAspect.rawValue), value,
+                           "\(value) must be left untouched by the vertical migration.")
+        }
+        // No-op for a pristine install (no aspect key).
+        let (fresh, freshDomain) = makeIsolatedStore()
+        Prefs.migrateVerticalAspectToWideShape(in: fresh, domain: freshDomain)
+        let persistent = fresh.persistentDomain(forName: freshDomain) ?? [:]
+        XCTAssertNil(persistent[PrefKey.recordingAspect.rawValue],
+                     "Vertical migration must not write the aspect key for a fresh install.")
     }
 
     /// Existing user: any of `recordingQuality`, `recordingFramerate`, or

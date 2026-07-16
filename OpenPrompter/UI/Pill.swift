@@ -15,13 +15,12 @@ struct Pill: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-            .tracking(0.8)
+            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+            .tracking(0.6)
             .foregroundStyle(alert ? Color.white : Theme.muted)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(alert ? Theme.red : Theme.surface)
-            .clipShape(Capsule())
-            .overlay(Capsule().stroke(alert ? Theme.red : Theme.border, lineWidth: 1))
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .glassSurface(in: Capsule(), tint: alert ? Theme.red : nil)
     }
 }

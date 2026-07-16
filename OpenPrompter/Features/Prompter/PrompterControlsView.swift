@@ -23,7 +23,7 @@ struct PrompterControlsView: View {
 
     private let rowHeight: CGFloat = 40
     private let buttonHeight: CGFloat = 44
-    private let iconButton: CGFloat = 40
+    private let iconButton: CGFloat = 44
     private let corner: CGFloat = 10
 
     var body: some View {
@@ -48,32 +48,24 @@ struct PrompterControlsView: View {
                     }
                     .frame(height: buttonHeight)
                     .frame(maxWidth: .infinity)
-                    // 2.0.10: when the user taps the prompter to toggle
-                    // play while voice tracking is active, the VM sets
-                    // playTapConflict for ~0.4s. Flash the button red
-                    // (background + border) in that window so the user
-                    // sees the conflict instead of silently no-oping.
-                    .background(
-                        vm.playTapConflict
-                            ? Color(red: 0.78, green: 0.20, blue: 0.20)
-                            : (vm.isPlaying ? Theme.green : Theme.surface)
-                    )
+                    // 2.0.10: when the user taps the prompter to toggle play
+                    // while voice tracking is active, the VM sets
+                    // playTapConflict for ~0.4s — flash the glass red in that
+                    // window so the tap isn't a silent no-op. Active PLAY reads
+                    // as green-tinted glass; the pause glyph + label carry state.
                     .foregroundStyle(
                         vm.playTapConflict
                             ? Color.white
                             : (vm.isPlaying ? Color(red: 0.03, green: 0.09, blue: 0.05) : Theme.fg)
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: corner, style: .continuous)
-                            .stroke(
-                                vm.playTapConflict
-                                    ? Color(red: 1.0, green: 0.30, blue: 0.30)
-                                    : (vm.isPlaying ? Theme.green : Theme.border),
-                                lineWidth: vm.playTapConflict ? 1.5 : 1
-                            )
+                    .glassSurface(
+                        in: RoundedRectangle(cornerRadius: corner, style: .continuous),
+                        tint: vm.playTapConflict
+                            ? Color(red: 0.82, green: 0.22, blue: 0.22)
+                            : (vm.isPlaying ? Theme.green : nil)
                     )
                     .animation(.easeInOut(duration: 0.12), value: vm.playTapConflict)
+                    .animation(.easeInOut(duration: 0.12), value: vm.isPlaying)
                 }
 
                 Button(action: onVoiceTap) {
@@ -86,13 +78,12 @@ struct PrompterControlsView: View {
                     }
                     .frame(height: buttonHeight)
                     .frame(maxWidth: .infinity)
-                    .background(voiceTracker.isActive ? Theme.green : Theme.surface)
                     .foregroundStyle(voiceTracker.isActive ? Color(red: 0.03, green: 0.09, blue: 0.05) : Theme.fg)
-                    .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: corner, style: .continuous)
-                            .stroke(voiceTracker.isActive ? Theme.green : Theme.border, lineWidth: 1)
+                    .glassSurface(
+                        in: RoundedRectangle(cornerRadius: corner, style: .continuous),
+                        tint: voiceTracker.isActive ? Theme.green : nil
                     )
+                    .animation(.easeInOut(duration: 0.12), value: voiceTracker.isActive)
                 }
                 .accessibilityLabel(voiceTracker.isActive ? "Stop voice tracking" : "Start voice tracking")
             }
@@ -113,19 +104,21 @@ struct PrompterControlsView: View {
             }
             .padding(.horizontal, 12)
             .frame(height: rowHeight)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: corner, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: corner, style: .continuous)
-                    .stroke(Theme.border, lineWidth: 1)
-            )
+            .glassSurface(in: RoundedRectangle(cornerRadius: corner, style: .continuous), interactive: false)
 
-            // Row 3 — font + focus + jump
-            HStack(spacing: 8) {
+            // Row 3 — font + focus + jump. Spacing (10), label width (80),
+            // and horizontal padding (12) match Row 2 exactly so the SPEED
+            // and FONT sliders start at the same x and line up. The two
+            // trailing icon buttons are plain 44×44 tap targets (HIG minimum,
+            // via `iconButton`) — NO per-button glass, because they sit on
+            // this row's own glass card and glass-over-glass reads muddy
+            // (Apple HIG). contentShape keeps the full 44×44 tappable.
+            HStack(spacing: 10) {
                 Text("FONT \(Int(vm.fontSize))")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .tracking(1.0)
                     .foregroundStyle(Theme.muted)
-                    .frame(width: 72, alignment: .leading)
+                    .frame(width: 80, alignment: .leading)
                 Slider(
                     value: Binding(get: { vm.fontSize }, set: { vm.setFontSize($0) }),
                     in: 16...160,
@@ -135,37 +128,25 @@ struct PrompterControlsView: View {
 
                 Button(action: { vm.toggleFocus() }) {
                     Image(systemName: "eye.slash")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(width: iconButton, height: iconButton)
-                        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Theme.fg)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(Theme.border, lineWidth: 1)
-                        )
+                        .frame(width: iconButton, height: iconButton)
+                        .contentShape(Rectangle())
                 }
                 .accessibilityLabel("Hide controls")
 
                 Button(action: { vm.jumpToStart() }) {
                     Image(systemName: "arrow.uturn.up")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(width: iconButton, height: iconButton)
-                        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Theme.fg)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(Theme.border, lineWidth: 1)
-                        )
+                        .frame(width: iconButton, height: iconButton)
+                        .contentShape(Rectangle())
                 }
                 .accessibilityLabel("Jump to start")
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 12)
             .frame(height: buttonHeight + 4)
-            .background(Theme.surface, in: RoundedRectangle(cornerRadius: corner, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: corner, style: .continuous)
-                    .stroke(Theme.border, lineWidth: 1)
-            )
+            .glassSurface(in: RoundedRectangle(cornerRadius: corner, style: .continuous), interactive: false)
         }
         .padding(.horizontal, 10)
     }

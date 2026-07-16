@@ -51,12 +51,11 @@ struct CameraStyleChip: View {
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
                     .tracking(0.8)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
             .frame(minHeight: Theme.hitMin)
-            .background(Theme.surface, in: Capsule())
             .foregroundStyle(Theme.fg)
-            .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+            .glassSurface(in: Capsule())
             .contentShape(Capsule())
         }
         .accessibilityElement(children: .ignore)

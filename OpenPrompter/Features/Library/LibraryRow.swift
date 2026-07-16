@@ -29,7 +29,8 @@ struct LibraryRow: View {
                 Text(file.displayName)
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Theme.fg)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Text(relativeDate.uppercased())
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))

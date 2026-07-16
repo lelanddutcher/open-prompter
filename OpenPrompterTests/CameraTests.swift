@@ -525,6 +525,80 @@ final class CameraTests: XCTestCase {
         }
     }
 
+    /// Bug 4: a legacy 4:3 front-sensor device (iPhone 16 / 15 / 14 / 13 / SE)
+    /// on iOS 26 that ALSO lists ratio1x1 as a crop option on its LANDSCAPE-
+    /// native format must NOT have openGate pick the square crop. On a 4:3
+    /// sensor the full readout is 4:3 — which the writer orients to a ~3:4
+    /// VERTICAL capture. ratio1x1 is reserved for a genuine square sensor
+    /// (a SQUARE-native format), so the pick here must be 4×3, not 1×1.
+    func testOpenGateOn4x3SensorPrefers4x3NotSquareCrop() {
+        if #available(iOS 26.0, *) {
+            let descriptors: [CameraStore.FormatDescriptor] = [
+                // Legacy 4:3 front sensor: a landscape-native (w > h) format
+                // that lists 1×1 among its dynamic aspects (a center crop,
+                // NOT the full sensor readout).
+                CameraStore.FormatDescriptor(
+                    width: 4032, height: 3024,
+                    frameRateRanges: [(1, 30)],
+                    supportsDynamicAspectRatios: true,
+                    dynamicAspectRatios: [
+                        AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio4x3.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio16x9.rawValue
+                    ]
+                )
+            ]
+            let pick = CameraStore.pickOpenGateFormat(
+                descriptors: descriptors, preferredFPS: 30
+            )
+            XCTAssertEqual(pick?.index, 0,
+                           "The only candidate must be selected.")
+            XCTAssertEqual(pick?.dynamicAspectRaw,
+                           AVCaptureDevice.AspectRatio.ratio4x3.rawValue,
+                           "openGate on a 4:3 sensor must pick the full 4:3 readout (→ vertical), never a 1×1 square crop.")
+        }
+    }
+
+    /// Bug 4 companion: a genuine 1:1 sensor (iPhone 17) exposes a SQUARE-
+    /// native format declaring 1×1. Even when a LARGER landscape 4:3 format
+    /// also declares 1×1 (as a crop), openGate must select the square-native
+    /// one — that's the true full-sensor readout. Guards the square-native
+    /// gate from being loosened back to "any format declaring 1×1".
+    func testOpenGatePrefersSquareNative1x1OverLandscape1x1Crop() {
+        if #available(iOS 26.0, *) {
+            let descriptors: [CameraStore.FormatDescriptor] = [
+                // Larger LANDSCAPE format that also lists 1×1 (a crop).
+                CameraStore.FormatDescriptor(
+                    width: 4032, height: 3024,
+                    frameRateRanges: [(1, 30)],
+                    supportsDynamicAspectRatios: true,
+                    dynamicAspectRatios: [
+                        AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio4x3.rawValue
+                    ]
+                ),
+                // Smaller SQUARE-native format — the genuine 1:1 full readout.
+                CameraStore.FormatDescriptor(
+                    width: 3840, height: 3840,
+                    frameRateRanges: [(1, 30)],
+                    supportsDynamicAspectRatios: true,
+                    dynamicAspectRatios: [
+                        AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
+                        AVCaptureDevice.AspectRatio.ratio4x3.rawValue
+                    ]
+                )
+            ]
+            let pick = CameraStore.pickOpenGateFormat(
+                descriptors: descriptors, preferredFPS: 30
+            )
+            XCTAssertEqual(pick?.index, 1,
+                           "The SQUARE-native 1×1 format is the true full readout.")
+            XCTAssertEqual(pick?.dynamicAspectRaw,
+                           AVCaptureDevice.AspectRatio.ratio1x1.rawValue,
+                           "1×1 must come from a square-native format, not a landscape crop.")
+        }
+    }
+
     /// Older OS / older hardware: no descriptor has dynamic-aspect support.
     /// The algorithm falls through to the largest pixel-area candidate and
     /// returns no aspect override.
@@ -603,22 +677,24 @@ final class CameraTests: XCTestCase {
 
     // MARK: - supportedRecordingAspects (hardware-capability filter)
 
-    /// Pre-iOS-26 baseline: only openGate, 4:3, and 16:9 are returned
-    /// (no dynamic-aspect API available, 9:16 and 1:1 can't be honored).
-    /// Guards against the Settings picker offering aspects that silently
-    /// demote to openGate on older OS.
-    func testSupportedAspectsPreiOS26BaselineIncludes4x3And16x9AndOpenGate() {
+    /// Pre-iOS-26 baseline: only openGate, .classic (4:3), and .wide (16:9)
+    /// are returned (no dynamic-aspect API available, .square can't be
+    /// honored). Guards against the Settings picker offering shapes that
+    /// silently demote to openGate on older OS. V3 §07: .wide is always
+    /// supported so the merged vertical hold isn't gated behind a device
+    /// check.
+    func testSupportedAspectsPreiOS26BaselineIncludesClassicAndWideAndOpenGate() {
         // `supportedRecordingAspects` is documented to always include
-        // openGate, 4:3, and 16:9. We can't gate the device call in a
+        // openGate, .classic, and .wide. We can't gate the device call in a
         // unit test, but we can verify the method returns a non-empty set
         // that includes the guaranteed members.
         let supported = CameraStore.supportedRecordingAspects()
         XCTAssertTrue(supported.contains(.openGate),
                       "openGate must always be in the supported set.")
-        XCTAssertTrue(supported.contains(.ratio4x3),
-                      "4:3 must always be in the supported set.")
-        XCTAssertTrue(supported.contains(.ratio16x9),
-                      "16:9 must always be in the supported set.")
+        XCTAssertTrue(supported.contains(.classic),
+                      ".classic (4:3) must always be in the supported set.")
+        XCTAssertTrue(supported.contains(.wide),
+                      ".wide (16:9) must always be in the supported set.")
     }
 
     /// Every aspect returned by `supportedRecordingAspects` must be a valid
@@ -713,8 +789,8 @@ final class CameraTests: XCTestCase {
     // MARK: - Pref defaults match spec
 
     func testPrefDefaultsMatchSpec() {
-        XCTAssertEqual(PrefKey.cameraStyle.defaultValue as? String, "pip",
-                       "2.0.1 hotfix: default flipped from \"off\" to \"pip\" so the in-app camera is discoverable on first prompter open. PermissionPrimer asks for camera authorization at launch so the PiP tile has a session waiting.")
+        XCTAssertEqual(PrefKey.cameraStyle.defaultValue as? String, "off",
+                       "v3: default is \"off\" — the camera is opt-in via the first-run \"Enable camera\" pop-up, not auto-enabled into a black PiP tile.")
         XCTAssertEqual(PrefKey.cameraPipSize.defaultValue as? String, "medium")
         XCTAssertEqual(PrefKey.cameraPipPositionX.defaultValue as? Double, 0.5,
                        "Default X is horizontally centered.")

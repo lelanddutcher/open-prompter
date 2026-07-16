@@ -48,9 +48,180 @@
 import AVFoundation
 import CoreGraphics
 import Foundation
+import UIKit
 
 /// Sensor-orientation-aware rotation policy.
 enum OrientationPolicy {
+
+    // MARK: - Physical hold (V3 §07 — landscape auto-orientation)
+
+    /// How the phone is physically held for a take, read from the foreground
+    /// scene's INTERFACE orientation at REC tap (see `currentPhysicalHold()`).
+    /// Under auto-orientation, portrait-vs-landscape is a property of the
+    /// hold, NOT of the picker shape (V3 §07). Cases are named after the
+    /// UIKit *interface* orientation values (not device values) so there is
+    /// no cross-namespace confusion inside our code — see the historical
+    /// `UIInterfaceOrientation.landscapeLeft == UIDeviceOrientation.landscapeRight`
+    /// inversion. The only place physical direction matters is the handedness
+    /// constants below, which are pinned empirically against recorded pixels.
+    enum PhysicalHold: String, Sendable, Equatable {
+        /// Phone upright, home-indicator down. This is the ONLY hold that
+        /// composes with identity (`holdRotation(.portrait) == .identity`),
+        /// which is the anti-regression hinge that keeps portrait output
+        /// byte-identical to today's verified pipeline.
+        case portrait
+        /// Rotated so the top of the phone points LEFT (interface orientation).
+        case landscapeLeft
+        /// Rotated so the top of the phone points RIGHT (interface orientation).
+        case landscapeRight
+        // portrait-upside-down is intentionally NOT a recording orientation —
+        // Info.plist doesn't list it and `currentPhysicalHold()` maps it to
+        // `.portrait`. Adding it would create a fourth hold with no verified
+        // transform (V3 §07 §7).
+    }
+
+    /// !!! UNVERIFIED, DEVICE-BLOCKED PLACEHOLDER (V3 Design 07 §5) !!!
+    ///
+    /// EXTRA writer rotation composed ON TOP OF the verified portrait base
+    /// transform when the phone is held landscape-LEFT (interface orientation).
+    /// Handedness (+π/2 vs -π/2) is un-guessable under the selfie data-output
+    /// connection's un-mirroring composed with iOS's per-aspect sensor-pixel
+    /// orientation — the exact interaction that took passes 13a-13g to pin for
+    /// the portrait case, repeatedly defeating first-principles reasoning
+    /// (pass-13f applied a fix to the wrong branch and had to be reverted).
+    /// Pin it via the self-test loop on the iPhone 17, ONE (shape × hold) row
+    /// per roundtrip: hold landscape, record ≥5 s, run the self-test, read
+    /// the PNG — if the head is at the wrong top-of-playback, flip the sign
+    /// of THIS constant. Do NOT touch `base`, the composition order, or the
+    /// avAspectRatio swap. Working hypothesis +π/2; NOT known-good. Do NOT
+    /// present as verified in any shipping copy.
+    static let HOLD_LANDSCAPE_LEFT_UNVERIFIED: CGFloat = .pi / 2
+
+    /// !!! UNVERIFIED, DEVICE-BLOCKED PLACEHOLDER (V3 Design 07 §5) !!!
+    ///
+    /// Landscape-RIGHT is the strict opposite handedness of landscape-LEFT.
+    /// Working hypothesis -π/2; NOT known-good. Same pinning discipline as
+    /// `HOLD_LANDSCAPE_LEFT_UNVERIFIED`. Pinning LEFT for one shape
+    /// effectively pins RIGHT (opposite sign), but the §6 device matrix
+    /// enumerates every cell so we verify rather than assume (the pass-13d
+    /// square-buffer surprise is why we don't assume).
+    static let HOLD_LANDSCAPE_RIGHT_UNVERIFIED: CGFloat = -.pi / 2
+
+    /// EXTRA rotation composed ON TOP OF the verified portrait base transform
+    /// when the phone is held in landscape. Portrait = identity (no change) —
+    /// this is the anti-regression hinge. `x ∘ identity == x`, so the
+    /// portrait-hold composition returns today's verified value verbatim.
+    static func holdRotation(for hold: PhysicalHold) -> CGAffineTransform {
+        switch hold {
+        case .portrait:
+            return .identity                                   // <-- guarantee
+        case .landscapeLeft:
+            return CGAffineTransform(rotationAngle: HOLD_LANDSCAPE_LEFT_UNVERIFIED)
+        case .landscapeRight:
+            return CGAffineTransform(rotationAngle: HOLD_LANDSCAPE_RIGHT_UNVERIFIED)
+        }
+    }
+
+    /// The physical hold for orientation decisions, read from the foreground
+    /// scene's INTERFACE orientation. Main-actor only — read synchronously at
+    /// REC tap (never per-frame, never device-notification-driven mid-take;
+    /// see `RecordingSession.tapREC` and V3 §07 §4).
+    ///
+    /// Interface orientation (not `UIDevice.current.orientation`, not CMMotion)
+    /// is the correct source: it is what the app's UI is *actually displaying
+    /// as*, which is the same signal `AVCaptureVideoPreviewLayer`'s
+    /// auto-rotation keys off — so the recorded file and the live preview
+    /// cannot disagree. The app already resolves the active window scene this
+    /// way for the review prompt (`ReviewPromptController.activeWindowScene()`).
+    @MainActor
+    static func currentPhysicalHold() -> PhysicalHold {
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+        switch scene?.interfaceOrientation {
+        case .landscapeLeft:  return .landscapeLeft
+        case .landscapeRight: return .landscapeRight
+        default:              return .portrait   // portrait + upside-down + unknown
+        }
+    }
+
+    /// !!! UNVERIFIED, DEVICE-BLOCKED PLACEHOLDER (V3 Design 06 / GitHub #2) !!!
+    ///
+    /// Preview `videoRotationAngle` (DEGREES) for the `.wideFrontSensor`
+    /// generation class (iPhone 16 / 15 / 14 / 13 / SE — any 4:3-front-sensor
+    /// device). GitHub #2 reports the iPhone 13 Pro live preview as "rotated
+    /// 90° and locked"; the recorded FILE plays back correct, so this is a
+    /// PREVIEW-only defect and the writer transforms are untouched.
+    ///
+    /// We do NOT own an iPhone 13 Pro, so we CANNOT confirm the correct angle
+    /// here. This constant is the single data row the #2 reporter must confirm
+    /// (see V3 Design 06 §5 — ship the DEBUG angle-cycler, ask the reporter
+    /// which of 0/90/180/270 lands upright, then set this and drop `_UNVERIFIED`).
+    ///
+    /// Working hypothesis = `270`: the selfie preview connection auto-mirrors
+    /// (`automaticallyAdjustsVideoMirroring == true`), which inverts rotation
+    /// handedness, so the mirror-inverted 90° (= 270°) is the most likely
+    /// upright value given a "rotated 90°" report. This is a HYPOTHESIS to
+    /// test with the reporter, NOT a known-good value.
+    ///
+    /// Do NOT present this number as verified anywhere in shipping copy.
+    static let PREVIEW_ANGLE_WIDE_FRONT_UNVERIFIED: CGFloat = 270
+
+    /// Coarse front-camera generation class. The ONLY thing the preview
+    /// rotation policy branches on beyond `(aspect, bufferShape)`. Derived
+    /// from `utsname.machine`, but classified by the property that actually
+    /// matters for orientation — the native FRONT-SENSOR aspect — not by
+    /// marketing name.
+    enum DeviceGenerationHint: String, Sendable, Equatable {
+        /// Front sensor is natively 1:1 (square). iPhone 17 family
+        /// (`iPhone18,x` and up). This is the VERIFIED-correct baseline
+        /// (iPhone 17 Pro Max + iOS 26.3.1, pass-13e); its preview rows must
+        /// NOT change.
+        case squareFrontSensor
+
+        /// Front sensor is natively 4:3. iPhone 16 / 15 / 14 / 13 / SE and
+        /// most pre-17 iPhones (`iPhone17,x` and below). iPhone 13 Pro
+        /// (GitHub #2) lands here. Preview angle for this class is UNVERIFIED —
+        /// see `PREVIEW_ANGLE_WIDE_FRONT_UNVERIFIED` and V3 Design 06 §5.
+        case wideFrontSensor
+
+        /// Unknown / future / iPad / simulator model we haven't classified.
+        /// Falls back to the `.squareFrontSensor` preview rows (current shipped
+        /// behavior) so an unrecognized device is never worse off than today.
+        case unknown
+
+        /// Classify from the raw `utsname.machine` identifier (e.g.
+        /// `"iPhone18,2"`, `"iPhone14,2"`, `"iPhone15,4"`, `"x86_64"`,
+        /// `"arm64"`).
+        ///
+        /// PURE. No AVFoundation, no `UIDevice`, no globals — this is the unit
+        /// under test in the multi-sim harness. The `>= 18` cutoff is the
+        /// single load-bearing constant (iPhone 17 family = `iPhone18,x`
+        /// reports a 1:1 front sensor, confirmed on the founder's device);
+        /// it ASSUMES future families keep a square front sensor, which is a
+        /// documented, revisitable assumption (V3 Design 06 §2.1). A future
+        /// non-square-front device at gen ≥ 18 would be mis-classified as
+        /// `.squareFrontSensor` and simply get today's shipped behavior — the
+        /// safe default — with a self-test report flagging it for a row add.
+        static func from(modelIdentifier raw: String) -> DeviceGenerationHint {
+            if let gen = iPhoneGeneration(from: raw) {
+                return gen >= 18 ? .squareFrontSensor : .wideFrontSensor
+            }
+            // Non-iPhone (iPad "iPadN,M", sim "x86_64"/"arm64", Mac, etc.):
+            // we have no verified front-sensor data → unknown → safe default.
+            return .unknown
+        }
+
+        /// Parse the leading generation integer out of `"iPhoneNN,M"`.
+        /// Returns nil for any non-`"iPhone…,…"` string (iPad, sim host,
+        /// marketing-only `"iPhone"`, empty).
+        private static func iPhoneGeneration(from raw: String) -> Int? {
+            guard raw.hasPrefix("iPhone") else { return nil }
+            let rest = raw.dropFirst("iPhone".count)          // "18,2"
+            guard let comma = rest.firstIndex(of: ",") else { return nil }
+            return Int(rest[..<comma])                        // 18
+        }
+    }
 
     /// Classification of the camera buffer's pixel shape. Driven by
     /// width-vs-height comparison. Used by callers that still want to
@@ -93,13 +264,36 @@ enum OrientationPolicy {
         }
     }
 
-    /// True for aspects whose intended PLAYBACK is portrait. Everything
-    /// except 16:9 is portrait-intent on this app.
-    static func wantsPortraitPlayback(for aspect: RecordingAspect) -> Bool {
-        switch aspect {
-        case .ratio9x16, .ratio4x3, .ratio1x1, .openGate:
+    /// Under auto-orientation (V3 §07), portrait-vs-landscape playback intent
+    /// is the HOLD, not the shape. This public overload is the source of
+    /// truth for the self-test's expected-aspect math. Shape no longer decides
+    /// this — held upright = portrait playback, held sideways = landscape,
+    /// regardless of which shape is picked.
+    static func wantsPortraitPlayback(for hold: PhysicalHold) -> Bool {
+        hold == .portrait
+    }
+
+    /// INTERNAL, UNCHANGED (V3 §07 §2.3). The shape-based portrait-intent
+    /// predicate used ONLY inside the verified 2-arg `writerTransform` to
+    /// select its branch. Its branch selection is preserved VERBATIM: `.wide`
+    /// (the merged 16:9 shape, raw `"ratio16x9"`) is the sole landscape-intent
+    /// (`false`) case — exactly as the old `.ratio16x9` was — so the 2-arg
+    /// function still hits the `!wantsPortraitPlayback` branch for `.wide`
+    /// (portrait buffer → +π/2, the verified 16:9-user-pick value). Reads
+    /// `.canonicalShape` so the `.legacyVertical9x16` alias resolves to `.wide`
+    /// consistently. This is NOT a public predicate — the public one above is
+    /// hold-based. Do NOT flip `.wide` into the `true` branch: that returns
+    /// identity for a portrait buffer and would silently change today's 16:9
+    /// output from +π/2 to identity (caught by the anti-regression test).
+    fileprivate static func wantsPortraitPlayback(forShape aspect: RecordingAspect) -> Bool {
+        switch aspect.canonicalShape {
+        case .classic, .square, .openGate:
             return true
-        case .ratio16x9:
+        case .wide:
+            return false
+        case .legacyVertical9x16:
+            // Unreachable after canonicalShape (collapses to .wide). Matches
+            // .wide's landscape-intent classification for exhaustiveness.
             return false
         }
     }
@@ -133,7 +327,7 @@ enum OrientationPolicy {
         for aspect: RecordingAspect,
         bufferShape: BufferShape
     ) -> CGAffineTransform {
-        if !wantsPortraitPlayback(for: aspect) {
+        if !wantsPortraitPlayback(forShape: aspect) {
             // 16:9 landscape intent. After the pass-13e 9x16↔16x9 swap,
             // user-picked 16:9 maps to iOS .ratio9x16. Per the pass-13f
             // self-test JSON for ratio16x9 user-pick on iPhone 17 Pro Max
@@ -168,34 +362,180 @@ enum OrientationPolicy {
         }
     }
 
-    /// Preview-layer connection's `videoRotationAngle`. Always 0°.
+    /// Full writer `videoInput.transform` under auto-orientation (V3 §07).
+    /// ADDITIVE over the verified 2-arg function — it is a COMPOSITION:
     ///
-    /// User testing on iPhone 17 Pro Max + iOS 26.3.1 (pass-13e):
-    ///   - 90° on landscape buffer → "rotated 90° to the left" (wrong)
-    ///   - 270° on landscape buffer → "rotated 90° to the right" (also wrong)
-    ///   - 0° on square buffer → upright (correct)
-    /// Both 90° and 270° produce wrong rotation in opposite directions for
-    /// landscape buffers, while 0° is confirmed correct for square. The
-    /// AVCaptureVideoPreviewLayer evidently applies its own device-orientation-
-    /// aware rotation when `videoRotationAngle == 0`, and any non-zero value
-    /// stacks ON TOP of that auto-rotation, breaking it.
+    ///     finalTransform = holdRotation(hold) ∘ baseTransform(shape, bufferShape)
     ///
-    /// QA REVIEWER FOCUS: do NOT re-introduce buffer-shape branching here.
-    /// 0° lets AVCaptureVideoPreviewLayer's built-in orientation handling do
-    /// the right thing. The bufferShape parameter is kept for API symmetry
-    /// with `writerTransform` and for future test-only use, but is unused.
+    /// where `baseTransform` IS the untouched 2-arg `writerTransform(for:bufferShape:)`
+    /// above (defined as "the transform that lands upright playback when the
+    /// phone is held in PORTRAIT" — exactly what pass-13g verified). Because
+    /// `holdRotation(.portrait) == .identity` and `x ∘ identity == x`, the
+    /// portrait-hold result equals today's verified value BYTE-FOR-BYTE for
+    /// every (shape × bufferShape) cell — enforced mechanically by
+    /// `testPortraitHoldEqualsVerifiedBaseForEveryShape`. Landscape holds add
+    /// the `±π/2` `_UNVERIFIED` handedness constants on top.
+    ///
+    /// Composition order: `base.concatenating(hold)` applies `base` first,
+    /// then `hold`. `base` already lands upright-portrait, so `hold` rotates
+    /// that upright frame by the physical tilt. If device verification shows
+    /// the visual result is off by a sign, the fix is ONLY the two
+    /// `_UNVERIFIED` constants — never `base`, never the composition order,
+    /// never the avAspectRatio swap.
+    ///
+    /// Reads `.canonicalShape` internally (via the 2-arg call and the shape
+    /// predicate) so a stray `.legacyVertical9x16` resolves to `.wide`.
+    static func writerTransform(
+        for aspect: RecordingAspect,
+        hold: PhysicalHold,
+        bufferShape: BufferShape
+    ) -> CGAffineTransform {
+        let base = writerTransform(for: aspect.canonicalShape, bufferShape: bufferShape) // UNCHANGED 2-arg
+        return base.concatenating(holdRotation(for: hold))
+    }
+
+    /// Preview-layer connection's `videoRotationAngle` (DEGREES), keyed by
+    /// device generation. Returns 0/90/180/270 to match
+    /// `connection.videoRotationAngle`'s units — UNLIKE `writerTransform`,
+    /// which returns radians. That unit split already exists in the codebase
+    /// (`applyOrientationDependentRotation` assigns this value straight onto
+    /// `connection.videoRotationAngle`); we keep it.
+    ///
+    /// - `.squareFrontSensor` / `.unknown`: VERIFIED baseline (iPhone 17 Pro
+    ///   Max + iOS 26.3.1, pass-13e). `AVCaptureVideoPreviewLayer`'s own
+    ///   device-orientation-aware rotation is correct here; any non-zero angle
+    ///   stacks on top and breaks it. Confirmed 0/90/270 by user testing:
+    ///     - 90° on landscape buffer → "rotated 90° to the left" (wrong)
+    ///     - 270° on landscape buffer → "rotated 90° to the right" (also wrong)
+    ///     - 0° → upright (correct)
+    ///   `.unknown` deliberately shares this row so unrecognized devices get
+    ///   today's shipped behavior, never worse. DO NOT change this row without
+    ///   re-verifying on a 1:1-front-sensor device.
+    /// - `.wideFrontSensor`: GitHub #2 (iPhone 13 Pro, 4:3 front sensor) shows
+    ///   the preview rotated 90° and locked — the layer's built-in auto-rotation
+    ///   does NOT land upright for this sensor class. The angle is UNVERIFIED /
+    ///   device-blocked; see `PREVIEW_ANGLE_WIDE_FRONT_UNVERIFIED` and the
+    ///   confirmation loop in V3 Design 06 §5.
+    ///
+    /// QA REVIEWER FOCUS: the DEVICE axis was added ONLY to this preview
+    /// function. `writerTransform` is untouched (recording is verified correct
+    /// on both sensor classes per #2). Do NOT invent a verified non-zero value
+    /// for `.wideFrontSensor`; it ships as the named placeholder.
+    static func previewRotationAngle(
+        for aspect: RecordingAspect,
+        bufferShape: BufferShape,
+        device: DeviceGenerationHint
+    ) -> CGFloat {
+        _ = aspect       // kept for API symmetry / future per-aspect overrides
+        _ = bufferShape  // kept for API symmetry / future per-shape overrides
+
+        switch device {
+        case .squareFrontSensor, .unknown:
+            return 0
+        case .wideFrontSensor:
+            #if DEBUG
+            // DEBUG angle-cycler override (Settings → Labs → "wide-front
+            // preview angle"). When the founder / #2 reporter cycles the angle
+            // to find the upright value, this returns their chosen degrees
+            // instead of the placeholder. `nil` = no override = ship the
+            // hypothesis. Release builds ALWAYS use the placeholder (the
+            // override read is compiled out below).
+            if let override = debugWideFrontPreviewAngleOverride {
+                return override
+            }
+            #endif
+            return PREVIEW_ANGLE_WIDE_FRONT_UNVERIFIED
+        }
+    }
+
+    /// Back-compat 2-arg overload — resolves the device hint from the live
+    /// model identifier and forwards to the 3-arg version. Kept so callers /
+    /// tests that don't care about the device axis stay terse; the primary
+    /// call site (`CameraPreview.applyOrientationDependentRotation`) passes an
+    /// explicit hint via the 3-arg form.
     static func previewRotationAngle(
         for aspect: RecordingAspect,
         bufferShape: BufferShape
     ) -> CGFloat {
-        _ = aspect       // kept for API symmetry / future per-aspect overrides
-        _ = bufferShape  // kept for API symmetry / future per-shape overrides
-        return 0
+        return previewRotationAngle(
+            for: aspect,
+            bufferShape: bufferShape,
+            device: DeviceGenerationHint.from(modelIdentifier: currentDeviceModelIdentifier)
+        )
     }
 
-    /// Resolve the user's current aspect from `Prefs`. Centralized so
-    /// callers don't repeat the raw-string parsing.
+    /// Resolve the user's current aspect SHAPE from `Prefs`. Centralized so
+    /// callers don't repeat the raw-string parsing. Returns `.canonicalShape`
+    /// so a stray persisted `.legacyVertical9x16` (V3 §07 alias, e.g. from
+    /// iCloud KVS mirror lag before the one-shot migration runs) resolves to
+    /// `.wide` before it ever reaches the policy table.
     static var current: RecordingAspect {
-        return RecordingAspect(rawValue: Prefs.recordingAspect) ?? .default
+        return (RecordingAspect(rawValue: Prefs.recordingAspect) ?? .default).canonicalShape
     }
+
+    /// The device's hardware identifier (e.g. `"iPhone18,2"` for iPhone 17
+    /// Pro Max, `"iPhone14,2"` for iPhone 13 Pro) via `utsname`. SINGLE source
+    /// of truth for the uname read — `RecordingSelfTest` consumes this too, so
+    /// there is exactly one parser. `UIDevice.current.model` only returns the
+    /// marketing class (`"iPhone"`); we want the specific hardware revision so
+    /// the preview policy can branch by front-sensor generation.
+    ///
+    /// Synchronous and race-free (unlike `dynamicDimensions`), which is why
+    /// the rotation decision keys off THIS and not a probed buffer — matching
+    /// CLAUDE.md lesson 6 ("read intent synchronously, never probe buffers for
+    /// rotation decisions").
+    static var currentDeviceModelIdentifier: String {
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        let mirror = Mirror(reflecting: systemInfo.machine)
+        return mirror.children.compactMap { element -> String? in
+            guard let value = element.value as? Int8, value != 0 else { return nil }
+            return String(UnicodeScalar(UInt8(bitPattern: value)))
+        }.joined()
+    }
+
+    #if DEBUG
+    /// UserDefaults key backing the DEBUG wide-front preview angle-cycler.
+    /// Namespaced so it never collides with a `PrefKey`. Not a `PrefKey` case
+    /// on purpose — it's a DEBUG diagnostic surface, not a user preference.
+    private static let debugWideFrontAngleKey = "debug.orientation.wideFrontPreviewAngle"
+
+    /// Current DEBUG override for the `.wideFrontSensor` preview angle, or
+    /// `nil` when no override is active (ship the hypothesis). Stored as a
+    /// sentinel: absent / negative = no override; 0/90/180/270 = override.
+    static var debugWideFrontPreviewAngleOverride: CGFloat? {
+        get {
+            let defaults = UserDefaults.standard
+            guard defaults.object(forKey: debugWideFrontAngleKey) != nil else { return nil }
+            let stored = defaults.double(forKey: debugWideFrontAngleKey)
+            return stored < 0 ? nil : CGFloat(stored)
+        }
+        set {
+            let defaults = UserDefaults.standard
+            if let newValue {
+                defaults.set(Double(newValue), forKey: debugWideFrontAngleKey)
+            } else {
+                defaults.removeObject(forKey: debugWideFrontAngleKey)
+            }
+        }
+    }
+
+    /// Advance the DEBUG wide-front angle-cycler one step:
+    /// `nil (hypothesis) → 0 → 90 → 180 → 270 → nil`. Returns the new value so
+    /// the caller can surface it. This is the closed-loop tool for the #2
+    /// reporter to find the upright angle live (V3 Design 06 §5).
+    @discardableResult
+    static func cycleDebugWideFrontPreviewAngle() -> CGFloat? {
+        let next: CGFloat?
+        switch debugWideFrontPreviewAngleOverride {
+        case .none:       next = 0
+        case .some(0):    next = 90
+        case .some(90):   next = 180
+        case .some(180):  next = 270
+        default:          next = nil   // 270 or any other → back to hypothesis
+        }
+        debugWideFrontPreviewAngleOverride = next
+        return next
+    }
+    #endif
 }

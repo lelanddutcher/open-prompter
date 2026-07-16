@@ -186,6 +186,43 @@ final class CameraStore {
     /// process.
     private let suppressDeviceWork: Bool
 
+    // MARK: - Session-run reconciliation (rapid on/off spam fix)
+
+    /// Whether the current scene is active (foreground + prompter on screen).
+    /// Flipped by `resume()` / `suspend()` (view appearance + scenePhase).
+    /// Folded into `shouldSessionRun` so backgrounding stops the session
+    /// (privacy LED off) WITHOUT disturbing the user's chosen `style`.
+    private var sceneActive: Bool = true
+
+    /// The single in-flight reconciliation worker, or `nil` when the session
+    /// state is settled. Every caller that can change the running state
+    /// (`setStyle`, `resume`, `suspend`, `bootstrapSessionForLaunchStyle`)
+    /// updates the desired inputs (`style` / `sceneActive` / `authorization`)
+    /// synchronously and then awaits THIS worker.
+    ///
+    /// This serialization is the root-cause fix for "spam the PiP button
+    /// (camera on/off rapidly) → 'camera starting' then a black screen while
+    /// the Dynamic Island shows the camera IS on." The previous design let
+    /// each chip tap spawn its own `setStyle` Task; those Tasks interleaved
+    /// their blocking `startRunning()` / `stopRunning()` calls, and the
+    /// separately-dispatched `isSessionRunning` updates could land out of
+    /// order — leaving the @MainActor mirror `false` (preview shows the
+    /// "starting camera…" placeholder / black) while the real
+    /// `session.isRunning` was `true` (green privacy LED on). A single serial
+    /// worker (see `runReconcileLoop`) drives the session to the FINAL
+    /// desired state exactly once — never thrashing through stale
+    /// intermediates — and always leaves `isSessionRunning` equal to the
+    /// actual `session.isRunning`, so the preview gate is truthful.
+    private var reconcileTask: Task<Void, Never>?
+
+    /// Desired running state: the session should run when the user picked a
+    /// non-`.off` style, we hold camera permission, and the scene is active.
+    /// Read fresh on every pass of the reconcile loop so a mid-flight change
+    /// (the spam case) is honored.
+    private var shouldSessionRun: Bool {
+        style != .off && authorization == .authorized && sceneActive
+    }
+
     // MARK: - Init
 
     init(suppressDeviceWork: Bool = false) {
@@ -199,19 +236,22 @@ final class CameraStore {
 
     /// 2.0.3: bootstrap the session for the persisted style at app
     /// launch. `init` reads `Prefs.cameraStyle` into `self.style` but
-    /// does NOT call `start()` — historically only user gestures
-    /// flipped style and started sessions. With `cameraStyle`
-    /// defaulting to `.pip` (2.0.1+) the persisted style on a fresh
-    /// install is already non-off, so the camera chip in the bottom
-    /// toolbar reads "pip" and the PiP tile renders, but its preview
-    /// is attached to a session whose `isSessionRunning == false` —
-    /// the user sees a black tile until they cycle the chip
-    /// (pip→off→pip) which forces a real `setStyle` transition.
+    /// does NOT call `start()` — only user gestures flip style and start
+    /// sessions. This bootstrap covers the RETURNING user who left the
+    /// camera on: their PERSISTED `cameraStyle` is non-off, so the chip
+    /// reads "pip" and the PiP tile mounts, but the preview is attached to
+    /// a session whose `isSessionRunning == false`. Without this call they'd
+    /// see a black tile until they cycled the chip (pip→off→pip).
     ///
-    /// Bypasses the same-style early-return in `setStyle` by calling
-    /// `start()` directly when style is already non-off. Idempotent —
-    /// the AVFoundation `startRunning` is itself a no-op when the
-    /// session is already running. Call from the app entry once
+    /// The registered default is `.off` (camera is opt-in — see
+    /// `Prefs.cameraStyle`), so a FRESH install hits the `style != .off`
+    /// guard below and no-ops: nothing auto-mounts, no black box. First-run
+    /// users enable the camera through the coach-mark "enable camera" button,
+    /// which calls `setStyle(.pip)` directly.
+    ///
+    /// Drives the session up through the serial reconciler when style is
+    /// already non-off. Idempotent — the reconciler no-ops when the session
+    /// already matches the desired state. Call from the app entry once
     /// camera permission has been resolved.
     func bootstrapSessionForLaunchStyle() async {
         guard !suppressDeviceWork else { return }
@@ -227,7 +267,8 @@ final class CameraStore {
             pendingPermissionDeniedBanner = true
             return
         }
-        await start()
+        sceneActive = true
+        await reconcileSession()
     }
 
     // MARK: - Mode transitions (the core state machine)
@@ -244,17 +285,19 @@ final class CameraStore {
     /// correct. Without this, the chip froze for 2-3s whenever the user
     /// re-enabled the camera (the dogfood report that triggered the fix).
     ///
-    /// Post-dogfood-pass-2: revert-on-failure now ONLY fires when we're
-    /// transitioning from `.off` (i.e. starting the session for real). On a
-    /// non-off → non-off transition (pip → behind, behind → pip) the session
-    /// is already running and we don't need to verify it again. The
-    /// over-aggressive revert from the previous fixup pass was the actual
-    /// pip → behind bug — it tripped on a stale `isSessionRunning` read
-    /// during the brief begin/commit window AVFoundation opens whenever a
-    /// SwiftUI view-tree change re-mounts the preview layer.
+    /// Rapid-toggle safe: `setStyle` only mutates the desired inputs
+    /// (`style` synchronously, permission via the await) and then defers the
+    /// actual AVFoundation start/stop to the serial `reconcileSession`. It no
+    /// longer contains a post-`start()` revert — start-failure handling now
+    /// lives in the reconcile loop (its termination guarantee), which is the
+    /// one place that can read the true `session.isRunning` result. This is
+    /// what makes "spam the PiP button" safe: N interleaved calls collapse
+    /// into one settled, truthful session state instead of racing.
     func setStyle(_ new: CameraStyle) async {
         guard new != style else { return }
-        let previous = style
+        #if DEBUG
+        let previous = style   // captured for the transition logs below
+        #endif
 
         if new == .off {
             // Flip the UI state first — there's no permission gate to wait
@@ -264,7 +307,7 @@ final class CameraStore {
             #endif
             style = .off
             persistStyle()
-            await stop()
+            await reconcileSession()
             return
         }
 
@@ -275,58 +318,110 @@ final class CameraStore {
             if style != .off { style = .off }
             persistStyle()
             pendingPermissionDeniedBanner = true
-            await stop()
+            await reconcileSession()
             return
         }
 
         // Optimistic update: flip `style` before awaiting the session start.
         // The PiP tile renders the moment SwiftUI reads `style == .pip`,
         // even if the first preview frame hasn't arrived. The user sees the
-        // tile instantly with a black preview that fills in shortly after.
+        // tile instantly with the "starting camera…" placeholder that fills
+        // in with live video once the reconciler lands `isSessionRunning`.
         style = new
         persistStyle()
         #if DEBUG
         behindLog.info(
-            "setStyle entry old=\(previous.rawValue, privacy: .public) new=\(new.rawValue, privacy: .public) (calling start)"
+            "setStyle entry old=\(previous.rawValue, privacy: .public) new=\(new.rawValue, privacy: .public) (reconciling)"
         )
         #endif
-        await start()
+        await reconcileSession()
         #if DEBUG
         behindLog.info(
-            "setStyle post-start running=\(self.isSessionRunning, privacy: .public) style=\(self.style.rawValue, privacy: .public)"
+            "setStyle post-reconcile running=\(self.isSessionRunning, privacy: .public) style=\(self.style.rawValue, privacy: .public)"
         )
         #endif
-
-        // Revert is ONLY relevant when we just kicked the session up from
-        // an off state. Non-off → non-off transitions (pip → behind, etc.)
-        // are config-only — the session is still running, so don't second-
-        // guess it. The previous pass's blanket revert was the actual
-        // pip → behind bug.
-        if previous == .off, !isSessionRunning, !suppressDeviceWork {
-            #if DEBUG
-            behindLog.error(
-                "start() did not produce a running session — reverting to off"
-            )
-            #endif
-            style = .off
-            persistStyle()
-            await stop()
-        }
     }
 
-    /// Resume session if we should be running (mode != off, permission granted).
-    /// Called on `scenePhase == .active`, view appearance, etc. Idempotent.
+    /// Resume the session if we should be running (mode != off, permission
+    /// granted, scene active). Called on `scenePhase == .active`, view
+    /// appearance, etc. Idempotent — routes through the serial reconciler,
+    /// which no-ops when the session already matches the desired state.
     func resume() async {
-        guard style != .off else { return }
-        guard authorization == .authorized else { return }
-        await start()
+        sceneActive = true
+        await reconcileSession()
     }
 
-    /// Stop the session unconditionally — used on view disappear, app
-    /// background, and inside `setStyle(.off)`. Blocks until the session
-    /// queue acks the stop so the privacy LED extinguishes promptly.
+    /// Stop the session for backgrounding / view disappear. Clears the
+    /// scene-active flag and reconciles, so the privacy LED extinguishes
+    /// promptly WITHOUT clearing the user's chosen `style` (a later
+    /// `resume()` brings the session back for the same style).
     func suspend() async {
-        await stop()
+        sceneActive = false
+        await reconcileSession()
+    }
+
+    // MARK: - Serial session reconciliation
+
+    /// Drive the AVCaptureSession toward `shouldSessionRun` through a SINGLE
+    /// serial worker. All concurrent callers await the same in-flight task;
+    /// the task loops until the live session state matches the (possibly
+    /// newly-updated) desired state. See `reconcileTask` for the full
+    /// rationale — this is the rapid-on/off-spam root-cause fix.
+    private func reconcileSession() async {
+        let task: Task<Void, Never>
+        if let existing = reconcileTask {
+            // A worker is already running. It re-reads `shouldSessionRun`
+            // every pass, so it will observe the state WE just changed. Just
+            // await it — no second concurrent worker, no interleaved ops.
+            task = existing
+        } else {
+            task = Task { @MainActor in
+                defer { self.reconcileTask = nil }
+                await self.runReconcileLoop()
+            }
+            reconcileTask = task
+        }
+        await task.value
+    }
+
+    /// Loop until the live `isSessionRunning` matches `shouldSessionRun`,
+    /// re-reading the desired state after every blocking op so a caller that
+    /// toggled mid-flight (spam) is honored. `performStart` / `performStop`
+    /// each land `isSessionRunning` from the ACTUAL `session.isRunning`, so
+    /// the loop condition converges on the truth. Terminates on match, or on
+    /// a failed start (camera unavailable / held by another app), which snaps
+    /// the style back to `.off` — both the failure UX and the loop's
+    /// guaranteed exit.
+    private func runReconcileLoop() async {
+        while shouldSessionRun != isSessionRunning {
+            if shouldSessionRun {
+                await performStart()
+                if !isSessionRunning {
+                    // Start produced no running session (camera unavailable /
+                    // held by another app). Snap the chosen style back to
+                    // `.off` so the loop can't spin. This REPLACES the old
+                    // post-`start()` revert that used to live in `setStyle`;
+                    // moving it here means it fires from the one place that
+                    // knows the start truly failed (the real
+                    // `session.isRunning` read), and it doubles as the loop's
+                    // termination guarantee. Silent (no banner) — the failure
+                    // isn't necessarily a permission denial, and the permission
+                    // path already raises its own banner from `setStyle`.
+                    if style != .off {
+                        style = .off
+                        persistStyle()
+                        #if DEBUG
+                        behindLog.error(
+                            "performStart produced no running session — reverting style to off"
+                        )
+                        #endif
+                    }
+                    break
+                }
+            } else {
+                await performStop()
+            }
+        }
     }
 
     /// SwiftUI banner consumer. Returns true exactly once per denial event,
@@ -388,11 +483,17 @@ final class CameraStore {
     /// Configure inputs (front camera) and start the session. The blocking
     /// `startRunning()` runs on `sessionQueue`; we await its completion so
     /// the @MainActor caller can flip UI state once the session is live.
-    /// `start()` is idempotent — re-entry while the session is already
-    /// running is a no-op (`if !session.isRunning`).
+    /// Idempotent — re-entry while the session is already running is a no-op
+    /// (`if !session.isRunning`).
+    ///
+    /// CALL ONLY FROM `runReconcileLoop` — the serial reconciler guarantees
+    /// no two `performStart` / `performStop` bodies run concurrently, which is
+    /// what keeps `isSessionRunning` and the real `session.isRunning` in sync
+    /// under rapid on/off spam. Do NOT call this directly from `setStyle` /
+    /// `resume` / `bootstrap…` again (that reintroduces the interleaving race).
     ///
     /// Dogfood-pass-2: the previous pass wrapped a begin/commit configuration
-    /// block around every `start()` call, even when the input was already
+    /// block around every start call, even when the input was already
     /// attached. That empty bracket on iOS 26 caused a brief frame-delivery
     /// window where the preview layer drew its background color — the actual
     /// "PiP goes black" symptom on .pip → .behind. We now only enter a config
@@ -400,7 +501,7 @@ final class CameraStore {
     /// transition this short-circuits to a no-op `if !session.isRunning`
     /// check (which also returns false → skip `startRunning`), and the
     /// running session keeps delivering frames uninterrupted.
-    private func start() async {
+    private func performStart() async {
         if suppressDeviceWork {
             isSessionRunning = true
             return
@@ -423,7 +524,7 @@ final class CameraStore {
                 let running = self.session.isRunning
                 #if DEBUG
                 behindLog.info(
-                    "start() complete running=\(running, privacy: .public) hasInput=\(self.currentInput != nil, privacy: .public)"
+                    "performStart complete running=\(running, privacy: .public) hasInput=\(self.currentInput != nil, privacy: .public)"
                 )
                 #endif
                 Task { @MainActor in
@@ -441,10 +542,11 @@ final class CameraStore {
         }
     }
 
-    /// Stop the running session. Cleared `currentInput` so the next start
-    /// rebuilds from scratch — it's cheap and avoids stale-device bugs after
-    /// a backgrounding cycle.
-    private func stop() async {
+    /// Stop the running session and clear `currentInput` so the next start
+    /// rebuilds from scratch — cheap, and avoids stale-device bugs after a
+    /// backgrounding cycle. CALL ONLY FROM `runReconcileLoop` (see
+    /// `performStart`).
+    private func performStop() async {
         if suppressDeviceWork {
             isSessionRunning = false
             return
@@ -473,7 +575,7 @@ final class CameraStore {
     }
 
     /// Build and attach the front-camera input. Must be called inside a
-    /// `beginConfiguration` block (or equivalent — `start()` and the
+    /// `beginConfiguration` block (or equivalent — `performStart()` and the
     /// reconfigure path both set up configuration brackets around the call).
     /// Position is hardcoded `.front` — the rear camera affordance was
     /// dropped in the post-merge dogfooding pass.
@@ -519,15 +621,15 @@ final class CameraStore {
         // explicit format assignments at commitConfiguration time.
         session.sessionPreset = .inputPriority
 
-        // Resolve the user's fps target and aspect-ratio choice, then run
-        // the tiered selection. Aspect defaults to `.ratio9x16` for fresh
+        // Resolve the user's fps target and aspect-shape choice, then run
+        // the tiered selection. Shape defaults to `.wide` (16:9) for fresh
         // installs and `.openGate` for migrated users — the format selector
         // honors the choice when iOS 26 + the format support it, and falls
         // back to the historical largest-area `.openGate` behaviour
-        // otherwise.
+        // otherwise. `.canonicalShape` collapses a stray legacy alias (V3 §07).
         let framerate = RecordingFramerate(rawValue: Prefs.recordingFramerate) ?? .default
         let fps = Double(framerate.fps)
-        let userAspect = RecordingAspect(rawValue: Prefs.recordingAspect) ?? .default
+        let userAspect = (RecordingAspect(rawValue: Prefs.recordingAspect) ?? .default).canonicalShape
         guard let choice = Self.selectOpenGateFormat(
             from: device.formats,
             preferredFPS: fps,
@@ -879,10 +981,14 @@ final class CameraStore {
     ///
     /// The algorithm:
     ///   1. Filter to formats whose framerate range covers `preferredFPS`.
-    ///   2a. When `userAspect == .openGate`: if any candidate has
-    ///       `supportsDynamicAspectRatios == true`, pick the largest such
-    ///       format with the historical 4×3 → 1×1 → 3×4 → first-declared
-    ///       aspect-preference order (sensor-natural full readout).
+    ///   2a. When `userAspect == .openGate`: full-sensor readout, sensor-
+    ///       shape aware. ratio1x1 is only in the preference order when the
+    ///       device exposes a SQUARE-NATIVE format (width == height) — the
+    ///       genuine 1:1 sensor (iPhone 17), where the order is the verified
+    ///       1×1 → 4×3 → 9×16 → 3×4. On any other sensor (legacy 4:3) 1×1
+    ///       would be a square crop, so it's dropped and the order is
+    ///       4×3 → 9×16 → 3×4 → first-declared, all of which the writer
+    ///       orients to a VERTICAL capture (Bug 4). Searched ACROSS formats.
     ///   2b. When `userAspect` is a specific aspect (9:16, 1:1, 4:3, 16:9):
     ///       prefer the largest dynamic-aspect-capable format that DECLARES
     ///       that aspect. If none declares it, fall through to step 3
@@ -918,31 +1024,52 @@ final class CameraStore {
         let dynamic = candidates.filter { $0.descriptor.supportsDynamicAspectRatios }
 
         if userAspect == .openGate {
-            // 2a — open-gate: search ACROSS dynamic-aspect-capable formats
-            // per preference (NOT just within the largest format). On iPhone
-            // 17 + iOS 26.3.1 the front camera's largest dynamic format may
-            // not declare ratio1x1 even when a smaller format does — the
-            // prior "pick largest, then choose aspect" order missed that.
+            // 2a — open-gate = FULL sensor readout ("reframe in post"). The
+            // aspect that yields the full readout depends on the PHYSICAL
+            // front sensor, and the two shapes MUST NOT be conflated (Bug 4):
             //
-            // For each preference, find every format that declares it and
-            // pick the LARGEST among those. First non-empty match wins.
+            //   • iPhone 17 family (1:1 square sensor): the full readout IS
+            //     1×1 (≈3840×3840). A genuine square sensor exposes a
+            //     SQUARE-NATIVE format (width == height) — that presence is
+            //     our reliable "this is a 1:1 sensor" signal (a 4:3 sensor's
+            //     formats are all reported 4:3; dynamic aspect reshapes at
+            //     capture but never changes a format's reported dims).
             //
-            // Preference order:
-            //   1. .ratio1x1 — true full-sensor readout on iPhone 17 (1×1
-            //      sensor) → 3024×3024 square. Identity writer transform.
-            //   2. .ratio4x3 — landscape full-width readout. iPhone 17 reshapes
-            //      its 1×1 sensor to 4032×3024. Writer rotates to portrait
-            //      via the new buffer-shape-aware OrientationPolicy.
-            //   3. .ratio9x16 — portrait reshape (loses sensor area but keeps
-            //      portrait playback intent).
-            //   4. .ratio3x4 — last resort portrait container.
-            //   5. First declared on the largest dynamic format.
-            let openGatePreferences = [
-                "AVCaptureAspectRatio1x1",
-                "AVCaptureAspectRatio4x3",
-                "AVCaptureAspectRatio9x16",
-                "AVCaptureAspectRatio3x4"
-            ]
+            //   • Older 4:3 front sensors (iPhone 16 / 15 / 14 / 13 / SE):
+            //     on iOS 26 these MAY still list ratio1x1 in a format's
+            //     dynamic aspects — but there 1×1 is a CENTER CROP that
+            //     discards the top/bottom of the frame AND yields an
+            //     ambiguous SQUARE. The founder's intent (Bug 4) for open
+            //     gate on those devices is the full-sensor readout, which is
+            //     4:3 — and the writer's portrait-intent +π/2 (openGate is
+            //     portrait-intent; landscape/square buffer → +π/2 in
+            //     OrientationPolicy) lands it as a ~3:4 VERTICAL capture.
+            //
+            // So we only allow ratio1x1 into the preference order when a
+            // SQUARE-NATIVE format exists (the 1:1 sensor). When it does, the
+            // order is IDENTICAL to the verified iPhone-17 behaviour (1×1 →
+            // 4×3 → 9×16 → 3×4, searched ACROSS formats per the pass-13
+            // cross-format fix). When it does NOT, 1×1 is dropped and 4:3 (the
+            // legacy-sensor full readout → vertical) leads.
+            let hasSquareSensor = descriptors.contains {
+                $0.width > 0 && $0.width == $0.height
+            }
+            let openGatePreferences = hasSquareSensor
+                ? [
+                    "AVCaptureAspectRatio1x1",   // full readout on a 1:1 sensor
+                    "AVCaptureAspectRatio4x3",
+                    "AVCaptureAspectRatio9x16",
+                    "AVCaptureAspectRatio3x4"
+                  ]
+                : [
+                    // Non-square (4:3) sensor: never pick a 1×1 crop. 4:3 is
+                    // the full readout; the writer orients it to vertical.
+                    "AVCaptureAspectRatio4x3",
+                    "AVCaptureAspectRatio9x16",
+                    "AVCaptureAspectRatio3x4"
+                  ]
+            // For each preference, find every dynamic format that declares it
+            // and pick the LARGEST among those. First non-empty match wins.
             for pref in openGatePreferences {
                 let matching = dynamic.filter { $0.descriptor.dynamicAspectRatios.contains(pref) }
                 if let best = matching.max(by: byPixelArea) {
@@ -961,13 +1088,19 @@ final class CameraStore {
             //
             // SWAPPED 9x16↔16x9 (post-pass-13e): mirrors the swap in
             // `RecordingAspect.avAspectRatio` — see that doc comment.
+            //
+            // V3 §07: read `.canonicalShape` first so a persisted
+            // `.legacyVertical9x16` alias resolves to `.wide` before the
+            // switch (keeping it off the swap with its own identity). `.wide`
+            // (raw "ratio16x9") requests iOS's 9x16 — the verified portrait
+            // 2160×3840 buffer the whole composition is built on.
             let requestedRaw: String
-            switch userAspect {
-            case .ratio9x16: requestedRaw = "AVCaptureAspectRatio16x9"  // SWAPPED
-            case .ratio1x1:  requestedRaw = "AVCaptureAspectRatio1x1"
-            case .ratio4x3:  requestedRaw = "AVCaptureAspectRatio4x3"
-            case .ratio16x9: requestedRaw = "AVCaptureAspectRatio9x16"  // SWAPPED
-            case .openGate:  requestedRaw = "" // unreachable
+            switch userAspect.canonicalShape {
+            case .wide:      requestedRaw = "AVCaptureAspectRatio9x16"  // SWAPPED: 16:9 shape → request iOS 9x16
+            case .square:    requestedRaw = "AVCaptureAspectRatio1x1"
+            case .classic:   requestedRaw = "AVCaptureAspectRatio4x3"
+            case .openGate:  requestedRaw = "" // unreachable (handled by the .openGate branch above)
+            case .legacyVertical9x16: requestedRaw = "AVCaptureAspectRatio9x16"  // unreachable after canonicalShape
             }
             let matching = dynamic.filter { $0.descriptor.dynamicAspectRatios.contains(requestedRaw) }
             if let best = matching.max(by: byPixelArea) {
@@ -1000,21 +1133,24 @@ final class CameraStore {
     /// formats actually support on this device and OS. Used by the Settings
     /// picker so the user can only choose aspects their hardware can deliver.
     ///
-    /// `.openGate`, `.ratio4x3`, and `.ratio16x9` are always included
+    /// `.openGate`, `.classic` (4:3), and `.wide` (16:9) are always included
     /// because they work everywhere — `.openGate` via the largest native-
-    /// aspect format (no dynamic-aspect API required), and `.ratio4x3` /
-    /// `.ratio16x9` either natively (legacy 4:3 front sensors) or via the
-    /// iOS 26 dynamic-aspect API.
+    /// aspect format (no dynamic-aspect API required), and `.classic` /
+    /// `.wide` either natively (legacy 4:3 front sensors) or via the iOS 26
+    /// dynamic-aspect API. V3 §07: `.wide` is ALWAYS supported (the merged
+    /// 16:9 shape works via the existing fallback), so the merge does not
+    /// gate the vertical hold behind a device check the way the old
+    /// `.ratio9x16` case was.
     ///
-    /// `.ratio9x16` and `.ratio1x1` are only included on iOS 26+ AND when
-    /// the front camera declares them in at least one format's
+    /// `.square` (1:1) is only included on iOS 26+ AND when the front camera
+    /// declares `AVCaptureAspectRatio1x1` in at least one format's
     /// `supportedDynamicAspectRatios`.
     ///
     /// This is a static query (no running session required) so it can be
     /// called from Settings before the camera is activated.
     nonisolated static func supportedRecordingAspects() -> Set<RecordingAspect> {
-        // openGate / 4:3 / 16:9 work everywhere.
-        var supported: Set<RecordingAspect> = [.openGate, .ratio4x3, .ratio16x9]
+        // openGate / 4:3 (classic) / 16:9 (wide) work everywhere.
+        var supported: Set<RecordingAspect> = [.openGate, .classic, .wide]
 
         guard #available(iOS 26.0, *) else {
             return supported
@@ -1027,8 +1163,7 @@ final class CameraStore {
         let declared = Set(
             device.formats.flatMap { $0.supportedDynamicAspectRatios.map { $0.rawValue } }
         )
-        if declared.contains("AVCaptureAspectRatio9x16") { supported.insert(.ratio9x16) }
-        if declared.contains("AVCaptureAspectRatio1x1")  { supported.insert(.ratio1x1) }
+        if declared.contains("AVCaptureAspectRatio1x1")  { supported.insert(.square) }
         return supported
     }
 

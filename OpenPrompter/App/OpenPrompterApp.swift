@@ -63,11 +63,13 @@ struct OpenPrompterApp: App {
                 // Already-answered permissions are skipped silently so this
                 // is cheap on warm launches.
                 //
-                // 2.0.3: after permissions resolve, start the camera
-                // session if `cameraStyle != .off` so a fresh launch
-                // doesn't render a black PiP tile (CameraStore.init
-                // reads the persisted style but doesn't start the
-                // session — that has historically been a user gesture).
+                // After permissions resolve, start the camera session if the
+                // PERSISTED `cameraStyle != .off`, so a returning user who
+                // left the camera on gets a live preview without cycling the
+                // chip. The registered default is `.off` (camera is opt-in —
+                // see `Prefs.cameraStyle`), so a fresh install no-ops here and
+                // never auto-mounts a black PiP tile. `bootstrapCameraIfNeeded`
+                // guards on `style != .off` internally.
                 .task {
                     await PermissionPrimer.requestAllIfNeeded()
                     await PermissionPrimer.bootstrapCameraIfNeeded(appState.cameraStore)

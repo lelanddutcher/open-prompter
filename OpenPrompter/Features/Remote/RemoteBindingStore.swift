@@ -50,6 +50,17 @@ enum RemoteKey: Hashable, Identifiable, Sendable {
     case volumeUp
     case volumeDown
 
+    // MARK: Pointer / mouse (GameController GCMouse)
+    //
+    // The founder's BLE-M5 D-pad is a Bluetooth TRACKPAD, not a keyboard —
+    // iOS sees pointer X/Y axis movement + digitizer taps (BLE-M5 Capture.md).
+    // The D-pad CENTER and the AUX SHUTTER are digitizer taps → mouse clicks.
+    // `mouseClick` is the primary (left) button; `mouseRightClick` and
+    // `mouseMiddleClick` cover remotes that emit a secondary/aux click.
+    case mouseClick
+    case mouseRightClick
+    case mouseMiddleClick
+
     /// Stable string identifier used in JSON storage and SwiftUI Picker tags.
     /// Keep these strings stable across releases.
     var id: String {
@@ -70,6 +81,9 @@ enum RemoteKey: Hashable, Identifiable, Sendable {
         case .mediaPrevTrack:  return "media.prev"
         case .volumeUp:        return "vol.up"
         case .volumeDown:      return "vol.down"
+        case .mouseClick:      return "mouse.click"
+        case .mouseRightClick: return "mouse.rightclick"
+        case .mouseMiddleClick: return "mouse.middleclick"
         }
     }
 
@@ -92,6 +106,9 @@ enum RemoteKey: Hashable, Identifiable, Sendable {
         case .mediaPrevTrack:  return "Previous track (media key)"
         case .volumeUp:        return "Volume Up"
         case .volumeDown:      return "Volume Down"
+        case .mouseClick:      return "Pointer tap / click"
+        case .mouseRightClick: return "Pointer right / secondary click"
+        case .mouseMiddleClick: return "Pointer middle click"
         }
     }
 
@@ -123,15 +140,28 @@ final class RemoteBindingStore {
     static let defaultBindings: [RemoteKey: RemoteEvent] = [
         .space:          .playPause,
         .return:         .playPause,
-        .arrowUp:        .speedUp,
-        .arrowDown:      .speedDown,
-        .arrowLeft:      .jumpBackward,
-        .arrowRight:     .jumpForward,
-        .pageUp:         .prevSection,
-        .pageDown:       .nextSection,
+        // A d-pad should NAVIGATE, not nudge speed (audit B2 / R3). The
+        // common HID remotes (Satechi R1, AirTurn, most gamepad-clone
+        // camera remotes) emit ARROWS, not Page keys — so section nav has
+        // to live on the arrows to be reachable. Up/Down step one line for
+        // fine positioning; Left/Right jump by section. The founder's
+        // BLE-M5 D-pad emits pointer axes routed through GCMouse to
+        // scrollUp/scrollDown → the same one-line steps.
+        .arrowUp:        .lineUp,
+        .arrowDown:      .lineDown,
+        .arrowLeft:      .prevSection,
+        .arrowRight:     .nextSection,
+        // Page keys are the coarse leap; presenter clickers that DO emit
+        // Page Up/Down (Logitech R400/R700) get half-screen paging.
+        .pageUp:         .jumpBackward,
+        .pageDown:       .jumpForward,
         .letter("b"):    .jumpToStart,
         .letter("m"):    .mirrorToggle,
         .letter("r"):    .restart,
+        // Speed control moves to letters so it stays reachable on a full
+        // keyboard after the arrows were repurposed for navigation.
+        .letter("j"):    .speedDown,
+        .letter("k"):    .speedUp,
         // Media keys — Satechi R2 et al. emit play/pause + skip on the
         // MPRemoteCommandCenter pathway. Default to play/pause on all
         // three; user can remap.
@@ -139,9 +169,17 @@ final class RemoteBindingStore {
         .mediaNextTrack: .nextSection,
         .mediaPrevTrack: .prevSection,
         // Volume bindings are wired but only fire when the user enables
-        // the volume opt-in. Default action is play/pause for AB Shutter 3.
+        // the volume opt-in. Default action is play/pause for AB Shutter 3
+        // / BLE-M5 (whose shutter is a volume button, BLE-M5 Capture.md).
         .volumeUp:       .playPause,
-        .volumeDown:     .playPause
+        .volumeDown:     .playPause,
+        // Pointer taps from a mouse-class remote (the BLE-M5 D-pad center
+        // and aux shutter are digitizer taps → GCMouse clicks). Primary
+        // tap → play/pause; secondary/aux → jump to the take start so a
+        // one-button retake is reachable on the founder's remote.
+        .mouseClick:       .playPause,
+        .mouseRightClick:  .jumpToStart,
+        .mouseMiddleClick: .mirrorToggle
     ]
 
     private(set) var bindings: [RemoteKey: RemoteEvent] = [:]
@@ -239,6 +277,9 @@ final class RemoteBindingStore {
         case "media.prev":        return .mediaPrevTrack
         case "vol.up":            return .volumeUp
         case "vol.down":          return .volumeDown
+        case "mouse.click":       return .mouseClick
+        case "mouse.rightclick":  return .mouseRightClick
+        case "mouse.middleclick": return .mouseMiddleClick
         default:
             if id.hasPrefix("kb.letter.") {
                 let suffix = id.dropFirst("kb.letter.".count)

@@ -206,21 +206,48 @@ struct PipTile: View {
 
             // THE camera preview — structurally stable across promote/
             // demote. Same session, same layer, same id.
-            CameraPreview(
-                session: store.session,
-                gravity: .resizeAspect,
-                horizontalMirror: horizontalMirror,
-                verticalMirror: verticalMirror,
-                requestedDynamicAspectRaw: store.requestedDynamicAspectRaw,
-                sessionConfigurationVersion: store.sessionConfigurationVersion
-            )
-            .id("camera-preview-pip")
+            //
+            // Gated on `store.isSessionRunning`: until the session is up and
+            // the first buffer flows, an unpopulated AVCaptureVideoPreviewLayer
+            // paints solid `.black`. Showing it before then is the "black box"
+            // first-run bug. We render a neutral "starting camera…" placeholder
+            // in the interim, then reveal the live preview once frames arrive.
+            // `CameraStore` is `@Observable`, so this re-renders when the flag
+            // flips on the main actor after `startRunning()`.
+            ZStack {
+                if store.isSessionRunning {
+                    CameraPreview(
+                        session: store.session,
+                        gravity: .resizeAspect,
+                        horizontalMirror: horizontalMirror,
+                        verticalMirror: verticalMirror,
+                        requestedDynamicAspectRaw: store.requestedDynamicAspectRaw,
+                        sessionConfigurationVersion: store.sessionConfigurationVersion
+                    )
+                    .id("camera-preview-pip")
+                } else {
+                    startingCameraPlaceholder
+                }
+            }
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
 
             // Tile border — hidden when promoted.
             if !promoted {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Theme.border, lineWidth: 1)
+                if #available(iOS 26.0, *) {
+                    // Liquid Glass rim — a light-to-dark edge highlight reads as
+                    // a glass bezel around the (opaque) camera preview.
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(
+                            LinearGradient(
+                                colors: [.white.opacity(0.55), .white.opacity(0.12)],
+                                startPoint: .topLeading, endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1
+                        )
+                } else {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Theme.border, lineWidth: 1)
+                }
             }
 
             // Minimize button — only in promoted mode, bottom-right.
@@ -286,6 +313,27 @@ struct PipTile: View {
                     }
                 }
         )
+    }
+
+    /// Neutral placeholder shown in place of the live camera preview until
+    /// `store.isSessionRunning` is true (the session is up and the first
+    /// buffer has flowed). Replaces the raw `.black` an empty
+    /// AVCaptureVideoPreviewLayer would otherwise paint — the first-run
+    /// "black box" symptom. A dim surface fill + spinner reads as "loading"
+    /// rather than "broken".
+    private var startingCameraPlaceholder: some View {
+        ZStack {
+            Theme.surface2
+            VStack(spacing: 8) {
+                ProgressView()
+                    .tint(Theme.muted)
+                Text("starting camera…")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .tracking(0.5)
+                    .foregroundStyle(Theme.muted)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func chevronTab(in viewport: CGSize) -> some View {

@@ -25,11 +25,26 @@
 //  - The Live Activity actor calls happen on a Task that drops back to
 //    the global concurrent pool.
 //
-//  Future work hooks (not implemented in this PR):
-//  - Chapter markers (Feature 3) — `appendChapter(_:at:)` is reserved on
-//    this type so the writer pipeline accommodates the future addition
-//    without a refactor. Marker writes happen at finalize time as
-//    `AVMetadataItem`s on the writer's metadata track.
+//  Video markers (V3 headline, H0a manual + H0b script):
+//  - A THIRD writer input (timed metadata) + an `AVAssetWriterInputMetadataAdaptor`
+//    are built in `lazilyStartWriterOnFirstSample` alongside video/audio, plus a
+//    fourth input for a QuickTime `.chapterList` TEXT track. `tapMark()` (manual)
+//    and `appendChapter(title:at:)` (script) queue a `RecordingMarker` into
+//    `WriterState.pendingMarkers` under `writerStateLock`; the `recordingQueue`
+//    drains it after each video frame (`drainPendingMarkers`) — copy-out, release,
+//    append — staying inside the "never await holding the lock" rule. Every marker
+//    time is clamped to `[sessionStart, lastVideoPTS]`; the chapter track's titled
+//    TEXT samples are written from the accumulated markers at `finishWriting`
+//    (a `.text` track, NOT `.metadata` — QuickTime reads chapter titles only from
+//    text sample data, so a metadata chapter track shows empty titles). Both are
+//    pref-gated (`recordingMarkerMetadataTrack` / `recordingMarkerChapterTrack`,
+//    default on) and live INSIDE the .mov so they survive the Photos save + share.
+//  - THE DELIVERABLE (Adobe Premiere Pro native markers): after `finishWriting`,
+//    `XMPMarkerWriter` embeds an Adobe XMP Dynamic Media `xmpDM:Tracks` marker
+//    track into `moov/udta/XMP_` (where Premiere reads/writes XMP for a `.mov`).
+//    Neither the chapter track nor the `mebx` metadata track imports into Premiere
+//    as a marker; the XMP does. Gated on `recordingMarkerMetadataTrack`, injected
+//    on the recording queue BEFORE the Photos save + self-test stash.
 //
 
 import AVFAudio
@@ -125,6 +140,42 @@ final class RecordingSession {
         var audioInput: AVAssetWriterInput?
         var videoOutput: AVCaptureVideoDataOutput?
         var audioOutput: AVCaptureAudioDataOutput?
+        // MARK: Video markers (V3 headline, H0a manual + H0b script)
+        //
+        // The third writer input is a TIMED-METADATA track. It's built in
+        // `lazilyStartWriterOnFirstSample` alongside the video/audio inputs
+        // and added before `startWriting`, so both the timed-metadata track
+        // AND the finalize-time QuickTime chapter track can be written into
+        // the same `.mov`. Nil when the metadata-track pref is off or the
+        // writer hasn't been built yet.
+        var metadataInput: AVAssetWriterInput?
+        var metadataAdaptor: AVAssetWriterInputMetadataAdaptor?
+        /// QuickTime CHAPTER-track input (separate from the timed-metadata
+        /// track above). This is a `.text` track associated to the video track
+        /// as a `.chapterList` so Photos / QuickTime render the markers as
+        /// scrubber ticks WITH readable titles (a `.metadata`/`mebx` chapter
+        /// track yields empty `TAG:title=`; QuickTime reads chapter names only
+        /// from a text track's sample data). Its titled samples are written all
+        /// at once at `finishWriting` (each spans `[marker_i, marker_{i+1})`),
+        /// so nothing is appended to it during the take. Nil when the
+        /// chapter-track pref is off. Held so finalize can append + finish it.
+        var chapterInput: AVAssetWriterInput?
+        /// The `.text` sample format description for `chapterInput`, needed at
+        /// finalize to build each chapter's text `CMSampleBuffer`. Nil when the
+        /// chapter track isn't being written.
+        var chapterTextFormat: CMFormatDescription?
+        /// Markers a MainActor caller (manual tap / script crossing) has
+        /// queued but the `recordingQueue` hasn't drained yet. Copied out
+        /// and cleared under `writerStateLock` on the next video frame.
+        var pendingMarkers: [RecordingMarker] = []
+        /// Every marker successfully drained this take, in append order.
+        /// Consumed at `finishWriting` to build the QuickTime chapter track.
+        var committedMarkers: [RecordingMarker] = []
+        /// PTS of the most recently appended video sample buffer — the
+        /// frame-accurate "now" for a marker tap and the upper clamp bound
+        /// `[sessionStart, lastVideoPTS]`. Nil until the first non-warmup
+        /// frame has been appended.
+        var lastVideoPTS: CMTime?
         /// Legacy slot for an audio device input attached at REC tap. As of
         /// dogfood-pass-3 the audio input is owned by `CameraStore` and
         /// attached at session-config time, so this stays nil — kept for
@@ -137,6 +188,16 @@ final class RecordingSession {
         /// Capture initial save destinations at start-of-take so a Settings
         /// flip mid-recording doesn't change the destination list.
         var lockedDestinations: SaveDestinations = .default
+        /// The physical hold captured ONCE at REC tap (V3 §07). The recording's
+        /// orientation must be stable for the whole take — Photos/QuickTime
+        /// have no concept of mid-file orientation change for a single track —
+        /// so we snapshot the hold synchronously at the moment the user commits
+        /// to the take (mirroring `lockedDestinations`), never per-frame and
+        /// never from a device-orientation notification. Read in
+        /// `lazilyStartWriterOnFirstSample` to compose the writer transform.
+        /// Defaults `.portrait` — the identity-hold path that reproduces
+        /// today's verified pipeline byte-for-byte.
+        var lockedHold: OrientationPolicy.PhysicalHold = .portrait
         var sampleBufferRouter: SampleBufferRouter?
         /// Buffer dimensions the writer was configured with — populated by
         /// `lazilyStartWriterOnFirstSample` once the first frame's
@@ -276,12 +337,21 @@ final class RecordingSession {
         }
 
         // Lock save destinations now — the user may flip Settings mid-take
-        // and we want the original choice to win.
+        // and we want the original choice to win. Lock the physical hold in
+        // the SAME block (V3 §07): the hold is the phone's interface
+        // orientation at the moment the user committed to the take, read
+        // synchronously on the main actor. The countdown path funnels through
+        // here before `beginRecording`, so a locked-in-advance hold is correct
+        // even with a 3-second countdown.
         let destinations = SaveDestinations(
             photos: true,
             scriptFolder: Prefs.recordingSaveToScriptFolder
         )
-        writerStateLock.withLock { $0.lockedDestinations = destinations }
+        let hold = OrientationPolicy.currentPhysicalHold()
+        writerStateLock.withLock {
+            $0.lockedDestinations = destinations
+            $0.lockedHold = hold
+        }
 
         let countdown = RecordingCountdown(rawValue: Prefs.recordingCountdown) ?? .three
         if countdown.seconds <= 0 {
@@ -345,7 +415,7 @@ final class RecordingSession {
     /// `audioFork != nil` AND `voiceTracker.isActive` for voice
     /// tracking). When neither consumer wants buffers, the router
     /// just discards them with an early return.
-    func ensureAudioCaptureRunning() async {
+    func ensureAudioCaptureRunning(role: AudioSessionRole = .voiceTracking) async {
         guard !suppressDeviceWork else { return }
         guard let cameraSessionQueue = cameraSessionQueue,
               let audioOut = cameraStore?.preAttachedAudioOutput else {
@@ -353,8 +423,11 @@ final class RecordingSession {
         }
         // The audio session needs to be active for the AVCapture audio
         // path to actually deliver buffers. Re-running this is cheap
-        // and safe — it's also called at start of every recording.
-        configureAudioSession()
+        // and safe — it's also called at start of every recording. The
+        // `role` reflects the actual consumer so the coordinator releases
+        // the right claim later (default `.voiceTracking` — the standalone
+        // voice-start path; the recording path passes `.recording`).
+        configureAudioSession(role: role)
         // 2.0.2: removed the `guard persistentAudioRouter == nil`
         // early-return that gated this whole function. If the camera
         // session ever reconfigured between voice activations (style
@@ -460,7 +533,7 @@ final class RecordingSession {
         // Activate the audio session for recording. Running this once at
         // start-of-take rather than session-load time keeps a non-recording
         // user from triggering a needless mic LED flicker.
-        configureAudioSession()
+        configureAudioSession(role: .recording)
 
         // Sample-buffer router. Holds a weak ref back into the session so
         // the AVFoundation callback path can append on the recording queue
@@ -527,8 +600,10 @@ final class RecordingSession {
         // Audio path: install the persistent audio router IF not already
         // installed. Voice tracking needs audio whether or not a recording
         // is in progress, so we keep the audio delegate set for the
-        // session's lifetime instead of toggling per-take.
-        await ensureAudioCaptureRunning()
+        // session's lifetime instead of toggling per-take. Pass `.recording`
+        // so this call reinforces the recording claim rather than leaving a
+        // stray `.voiceTracking` claim behind when voice isn't active.
+        await ensureAudioCaptureRunning(role: .recording)
 
         // Video path: install per-take router. Cleared in `finalize`.
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -558,7 +633,15 @@ final class RecordingSession {
     nonisolated fileprivate func lazilyStartWriterOnFirstSample(
         url: URL,
         firstBuffer: CMSampleBuffer
-    ) -> (writer: AVAssetWriter, video: AVAssetWriterInput, audio: AVAssetWriterInput)? {
+    ) -> (
+        writer: AVAssetWriter,
+        video: AVAssetWriterInput,
+        audio: AVAssetWriterInput,
+        metadata: AVAssetWriterInput?,
+        metadataAdaptor: AVAssetWriterInputMetadataAdaptor?,
+        chapter: AVAssetWriterInput?,
+        chapterTextFormat: CMFormatDescription?
+    )? {
         guard let formatDescription = CMSampleBufferGetFormatDescription(firstBuffer) else {
             return nil
         }
@@ -674,8 +757,16 @@ final class RecordingSession {
             width: writerWidth,
             height: writerHeight
         ) ?? .landscape  // Defensive default — buffer dims should be valid here.
+        // V3 §07: the writer transform is now a COMPOSITION of the physical
+        // hold (locked at REC tap) and the verified per-(shape, bufferShape)
+        // base. `lockedHold == .portrait` (the default and the upright case)
+        // composes with identity, so portrait output is byte-identical to
+        // today's verified pipeline. Read the hold synchronously from the
+        // locked writer state — never probe device orientation here.
+        let hold = writerStateLock.withLock { $0.lockedHold }
         videoInput.transform = OrientationPolicy.writerTransform(
-            for: OrientationPolicy.current,
+            for: OrientationPolicy.current,   // .canonicalShape applied inside
+            hold: hold,
             bufferShape: bufferShape
         )
 
@@ -701,6 +792,108 @@ final class RecordingSession {
         writer.add(videoInput)
         writer.add(audioInput)
 
+        // Timed-metadata input (V3 markers, H0a/H0b). A THIRD writer input
+        // carrying an in-file timed-metadata track that Premiere / FCP /
+        // Resolve read as markers. Gated on `recordingMarkerMetadataTrack`
+        // (default on). The chapter track is written separately at
+        // `finishWriting`; the two output shapes are independent so a user /
+        // future Settings row can turn either off. The input must be added
+        // BEFORE `startWriting`, hence its construction here.
+        //
+        // Per-frame metadata is delivered through an
+        // `AVAssetWriterInputMetadataAdaptor`, which wants a source format
+        // hint describing the metadata identifier space. We use the
+        // QuickTime user-data "title" identifier — the same string that
+        // labels a chapter — so a marker reads as a titled point.
+        var metadataInput: AVAssetWriterInput?
+        var metadataAdaptor: AVAssetWriterInputMetadataAdaptor?
+        if Prefs.recordingMarkerMetadataTrack {
+            let spec: [String: Any] = [
+                kCMMetadataFormatDescriptionMetadataSpecificationKey_Identifier as String:
+                    AVMetadataIdentifier.quickTimeUserDataFullName.rawValue,
+                kCMMetadataFormatDescriptionMetadataSpecificationKey_DataType as String:
+                    kCMMetadataBaseDataType_UTF8 as String
+            ]
+            var formatDescription: CMFormatDescription?
+            let status = CMMetadataFormatDescriptionCreateWithMetadataSpecifications(
+                allocator: kCFAllocatorDefault,
+                metadataType: kCMMetadataFormatType_Boxed,
+                metadataSpecifications: [spec] as CFArray,
+                formatDescriptionOut: &formatDescription
+            )
+            if status == noErr, let formatDescription {
+                let input = AVAssetWriterInput(
+                    mediaType: .metadata,
+                    outputSettings: nil,
+                    sourceFormatHint: formatDescription
+                )
+                input.expectsMediaDataInRealTime = true
+                if writer.canAdd(input) {
+                    writer.add(input)
+                    // Associate the metadata track with the video track so a
+                    // player scopes the markers to the picture (chapter-like).
+                    if videoInput.canAddTrackAssociation(
+                        withTrackOf: input, type: AVAssetTrack.AssociationType.metadataReferent.rawValue
+                    ) {
+                        videoInput.addTrackAssociation(
+                            withTrackOf: input,
+                            type: AVAssetTrack.AssociationType.metadataReferent.rawValue
+                        )
+                    }
+                    metadataInput = input
+                    metadataAdaptor = AVAssetWriterInputMetadataAdaptor(
+                        assetWriterInput: input
+                    )
+                }
+            }
+        }
+
+        // QuickTime CHAPTER track (V3 markers, second output shape). A `.text`
+        // track associated to the video track as a `.chapterList`, whose titled
+        // samples Photos / QuickTime render as scrubber ticks WITH readable
+        // names. This is a TEXT track (not `.metadata`/`mebx`): QuickTime and
+        // ffmpeg read chapter titles only from a text track's sample data, so
+        // the previous metadata-based chapter track produced empty `TAG:title=`
+        // chapters. Gated on `recordingMarkerChapterTrack` (default on). Its
+        // samples are written all at once at `finishWriting` from the
+        // accumulated `committedMarkers` (each chapter spans
+        // `[marker_i, marker_{i+1})`), so nothing is appended to it during the
+        // take. Must be added before `startWriting`, hence the construction
+        // here. If CoreMedia rejects the text format description, the chapter
+        // track is simply omitted — no crash, no effect on video/audio/markers.
+        var chapterInput: AVAssetWriterInput?
+        var chapterTextFormat: CMFormatDescription?
+        if Prefs.recordingMarkerChapterTrack,
+           let textFormat = ChapterTextTrack.makeTextFormatDescription() {
+            let input = AVAssetWriterInput(
+                mediaType: .text,
+                outputSettings: nil,
+                sourceFormatHint: textFormat
+            )
+            // Batch-written at `finishWriting`, NOT fed from a real-time capture
+            // source — so `expectsMediaDataInRealTime` is FALSE here. A
+            // real-time flag makes the input apply capture-style back-pressure
+            // to the finalize-time burst and silently drop chapter samples via
+            // `isReadyForMoreMediaData`.
+            input.expectsMediaDataInRealTime = false
+            if writer.canAdd(input) {
+                writer.add(input)
+                // `.chapterList` is what makes this a chapter track a player
+                // exposes as scrubber ticks (vs the metadata referent above,
+                // which is a marker overlay for NLEs).
+                if videoInput.canAddTrackAssociation(
+                    withTrackOf: input, type: AVAssetTrack.AssociationType.chapterList.rawValue
+                ) {
+                    videoInput.addTrackAssociation(
+                        withTrackOf: input,
+                        type: AVAssetTrack.AssociationType.chapterList.rawValue
+                    )
+                }
+                chapterInput = input
+                chapterTextFormat = textFormat
+            }
+        }
+
         if !writer.startWriting() {
             let msg = writer.error?.localizedDescription ?? "Writer refused to start."
             Task { @MainActor [weak self] in
@@ -711,7 +904,11 @@ final class RecordingSession {
             return nil
         }
 
-        return (writer, videoInput, audioInput)
+        return (
+            writer, videoInput, audioInput,
+            metadataInput, metadataAdaptor,
+            chapterInput, chapterTextFormat
+        )
     }
 
     /// Stop sample-buffer delivery, mark the inputs finished, and finalize
@@ -766,18 +963,122 @@ final class RecordingSession {
         // warnings now that finalize is config-free.
         _ = cameraSession
 
-        // Mark inputs finished + finalize the file. Snapshot writer / inputs
-        // out of the lock so we don't hold it across the (long) finishWriting.
-        let (writerRef, video, audio) = writerStateLock.withLock { state -> (
-            AVAssetWriter?, AVAssetWriterInput?, AVAssetWriterInput?
-        ) in
-            (state.writer, state.videoInput, state.audioInput)
+        // Flush any marker taps that landed after the last processed video
+        // frame (e.g. a tap between the final frame and stop). Runs on the
+        // recording queue like every other marker append. Cheap no-op when
+        // there's nothing pending.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            recordingQueue.async { [weak self] in
+                self?.drainPendingMarkers()
+                continuation.resume()
+            }
         }
+
+        // Write the QuickTime chapter track from the accumulated markers,
+        // THEN mark inputs finished + finalize. Snapshot writer / inputs out
+        // of the lock so we don't hold it across the (long) finishWriting.
+        let snapshot = writerStateLock.withLock { state -> (
+            writer: AVAssetWriter?,
+            video: AVAssetWriterInput?,
+            audio: AVAssetWriterInput?,
+            metadata: AVAssetWriterInput?,
+            chapter: AVAssetWriterInput?,
+            chapterTextFormat: CMFormatDescription?,
+            markers: [RecordingMarker],
+            sessionStart: CMTime?,
+            lastPTS: CMTime?
+        ) in
+            (state.writer, state.videoInput, state.audioInput,
+             state.metadataInput, state.chapterInput, state.chapterTextFormat,
+             state.committedMarkers, state.sessionStartTime, state.lastVideoPTS)
+        }
+        let writerRef = snapshot.writer
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             recordingQueue.async {
-                video?.markAsFinished()
-                audio?.markAsFinished()
-                writerRef?.finishWriting {
+                guard let writer = writerRef else {
+                    continuation.resume()
+                    return
+                }
+
+                // HANG GUARD. If a bad sample append (an empty-value marker,
+                // or the encoder) already flipped the writer to `.failed`, or
+                // the session never started (a stop during warmup leaves it
+                // `.unknown`), calling `finishWriting` is undefined and its
+                // completion handler may NEVER fire — the "stuck on saving for
+                // minutes" symptom. In those states, cancel and resume so the
+                // save flow surfaces a clean error instead of the await
+                // suspending forever. Only a `.writing` writer is finishable.
+                guard writer.status == .writing else {
+                    writer.cancelWriting()
+                    continuation.resume()
+                    return
+                }
+
+                // Chapter track: one titled TEXT sample per marker, spanning
+                // `[marker_i, marker_{i+1})` (the last runs to `lastVideoPTS`).
+                // Auto-number untitled (manual) markers "Marker N". Times are
+                // already clamped into `[sessionStart, lastVideoPTS]` at drain,
+                // but `buildChapterSegments` clamps again defensively — an
+                // out-of-range chapter sample fails `finishWriting`.
+                if let chapterInput = snapshot.chapter,
+                   let chapterTextFormat = snapshot.chapterTextFormat,
+                   let sessionStart = snapshot.sessionStart,
+                   let lastPTS = snapshot.lastPTS {
+                    let segments = buildChapterSegments(
+                        from: snapshot.markers,
+                        sessionStart: sessionStart,
+                        lastPTS: lastPTS
+                    )
+                    for segment in segments {
+                        // Skip degenerate (zero/negative-length) spans — a
+                        // marker landing exactly on `lastVideoPTS` yields an
+                        // empty range a text sample can't represent, and
+                        // appending it can fail the writer.
+                        guard CMTimeCompare(segment.end, segment.start) > 0 else { continue }
+                        // The chapter input is batch-written (real-time flag
+                        // off), so it is ready immediately; still, wait a
+                        // BOUNDED interval rather than silently dropping a
+                        // chapter if the writer momentarily back-pressures.
+                        // Capped so finalize can never spin forever.
+                        var waited = 0
+                        while !chapterInput.isReadyForMoreMediaData
+                            && writer.status == .writing
+                            && waited < 200 {
+                            usleep(500)            // 0.5 ms per turn, ≤100 ms total
+                            waited += 1
+                        }
+                        guard writer.status == .writing,
+                              chapterInput.isReadyForMoreMediaData else { break }
+                        // Build the QuickTime text sample ([uint16 len][UTF-8]
+                        // [encd]) for this chapter. A nil here (CoreMedia
+                        // refused) just skips one chapter — it never fails the
+                        // take. `append` returning false likewise stops chapters
+                        // without aborting the video/audio finalize below.
+                        guard let sampleBuffer = ChapterTextTrack.makeTextSampleBuffer(
+                            title: segment.title,
+                            format: chapterTextFormat,
+                            timeRange: CMTimeRange(start: segment.start, end: segment.end)
+                        ) else { continue }
+                        if !chapterInput.append(sampleBuffer) { break }
+                    }
+                }
+
+                // EVERY added input must be finished before `finishWriting`,
+                // or it waits forever on the unfinished input. `nil` means the
+                // input was never added (its pref is off) — nothing to finish.
+                snapshot.metadata?.markAsFinished()
+                snapshot.chapter?.markAsFinished()
+                snapshot.video?.markAsFinished()
+                snapshot.audio?.markAsFinished()
+
+                // Appending chapters must not have failed the writer; if it
+                // did, don't hang on `finishWriting` — cancel and resume.
+                guard writer.status == .writing else {
+                    writer.cancelWriting()
+                    continuation.resume()
+                    return
+                }
+                writer.finishWriting {
                     continuation.resume()
                 }
             }
@@ -788,14 +1089,70 @@ final class RecordingSession {
                 RecordingSessionError.finalizeFailed(err.localizedDescription).localizedDescription ?? ""
             )
         }
+
+        // PRIMARY V3 DELIVERABLE — embed a Premiere-readable XMP Dynamic Media
+        // marker track into the finished `.mov` (moov/udta/XMP_) so the tapped
+        // marks import as NATIVE timeline markers in Adobe Premiere Pro. The
+        // QuickTime chapter track + `mebx` metadata track do NOT import as
+        // markers; XMP `xmpDM:Tracks` is Premiere's native marker format and
+        // `moov/udta/XMP_` is where Premiere reads/writes XMP for a `.mov`
+        // (confirmed by inspecting a founder recording round-tripped through
+        // Premiere Pro 2026 — its own metadata lived there).
+        //
+        // Runs ONLY when finalize succeeded (no writer error) and the
+        // NLE-marker pref is on — the same pref that gates the timed-metadata
+        // track, since the XMP is the shape NLEs actually read. File I/O stays
+        // on the recording queue, off the main actor, and happens BEFORE the
+        // Photos save + DEBUG self-test stash (both in `runSaveFlow`, which
+        // `tapStop` calls only after this `finalizeWriter` returns), so the
+        // saved asset carries the markers. The injector never fails the take:
+        // it leaves the file untouched on any structural surprise.
+        if writerRef?.error == nil, Prefs.recordingMarkerMetadataTrack {
+            let markerURL = writerStateLock.withLock { $0.currentRecordingURL }
+            if let markerURL,
+               let sessionStart = snapshot.sessionStart,
+               let lastPTS = snapshot.lastPTS {
+                let points = orderedMarkerPoints(
+                    from: snapshot.markers,
+                    sessionStart: sessionStart,
+                    lastPTS: lastPTS
+                )
+                if !points.isEmpty {
+                    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                        recordingQueue.async {
+                            let packet = XMPMarkerWriter.makeXMPPacket(markers: points)
+                            XMPMarkerWriter.injectXMPIntoMOV(
+                                xmpPacket: Data(packet.utf8),
+                                fileURL: markerURL
+                            )
+                            continuation.resume()
+                        }
+                    }
+                }
+            }
+        }
+
         writerStateLock.withLock { state in
             state.writer = nil
             state.videoInput = nil
             state.audioInput = nil
+            state.metadataInput = nil
+            state.metadataAdaptor = nil
+            state.chapterInput = nil
+            state.chapterTextFormat = nil
+            state.pendingMarkers = []
+            state.committedMarkers = []
+            state.lastVideoPTS = nil
             state.sampleBufferRouter = nil
             state.sessionStartTime = nil
             state.hasStartedSession = false
         }
+
+        // Release the recording claim on the shared audio session (fix 1a).
+        // If voice tracking is still active its `.voiceTracking` claim keeps
+        // `.capture` applied; otherwise the coordinator re-establishes
+        // `.ambient` and re-arms a live volume-button observer (audit A5).
+        releaseAudioSession(role: .recording)
     }
 
     /// Sample-buffer append. Called on `recordingQueue`. Must NOT touch
@@ -858,10 +1215,20 @@ final class RecordingSession {
                 state.writer = built.writer
                 state.videoInput = built.video
                 state.audioInput = built.audio
+                state.metadataInput = built.metadata
+                state.metadataAdaptor = built.metadataAdaptor
+                state.chapterInput = built.chapter
+                state.chapterTextFormat = built.chapterTextFormat
                 state.outputWidth = Int(bufferDims.width)
                 state.outputHeight = Int(bufferDims.height)
                 state.hasStartedSession = false       // session not started yet
                 state.sessionStartTime = nil
+                state.lastVideoPTS = nil
+                // Fresh take — any markers queued before the writer existed
+                // (there shouldn't be, but a countdown race is conceivable)
+                // are discarded rather than clamped to a stale clock.
+                state.pendingMarkers = []
+                state.committedMarkers = []
                 state.pendingWriterURL = nil
                 state.videoFramesReceived = 1         // count this triggering frame
             }
@@ -915,14 +1282,21 @@ final class RecordingSession {
             case .startSessionAndAppend:
                 let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
                 writer.startSession(atSourceTime: pts)
-                writerStateLock.withLock { $0.sessionStartTime = pts }
+                writerStateLock.withLock {
+                    $0.sessionStartTime = pts
+                    $0.lastVideoPTS = pts
+                }
                 if let input = snapshot.videoInput, input.isReadyForMoreMediaData {
                     input.append(sampleBuffer)
                 }
+                drainPendingMarkers()
             case .append:
+                let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                writerStateLock.withLock { $0.lastVideoPTS = pts }
                 if let input = snapshot.videoInput, input.isReadyForMoreMediaData {
                     input.append(sampleBuffer)
                 }
+                drainPendingMarkers()
             }
         } else if output is AVCaptureAudioDataOutput {
             // Audio waits for the video session to actually start — until
@@ -942,6 +1316,173 @@ final class RecordingSession {
         case startSessionAndAppend
         case append
     }
+
+    // MARK: - Markers (V3 headline, H0a manual + H0b script)
+
+    /// Drain queued markers into the timed-metadata track. Called on the
+    /// `recordingQueue` right AFTER each video frame is appended, so the
+    /// upper clamp bound (`lastVideoPTS`) is current and the session has
+    /// started. Follows the "never await holding the lock" discipline:
+    /// copy the pending array out under the lock, release, then append.
+    ///
+    /// The timed-metadata adaptor wants a `CMTimeRange`; a marker is a POINT,
+    /// so we give it a zero-duration range at the (clamped) marker time.
+    /// Every drained marker is also accumulated into `committedMarkers` so
+    /// the chapter track can be built from the same list at finalize.
+    nonisolated fileprivate func drainPendingMarkers() {
+        // Snapshot everything we need under the lock, then release before any
+        // AVFoundation append. `pendingMarkers` is cleared inside the lock so
+        // a concurrent tap doesn't lose a marker between copy-out and clear.
+        typealias DrainSnapshot = (
+            adaptor: AVAssetWriterInputMetadataAdaptor?,
+            input: AVAssetWriterInput?,
+            markers: [RecordingMarker],
+            sessionStart: CMTime?,
+            lastPTS: CMTime?,
+            writer: AVAssetWriter?
+        )
+        let drained: DrainSnapshot = writerStateLock.withLock { state -> DrainSnapshot in
+            guard !state.pendingMarkers.isEmpty else {
+                return (nil, nil, [], nil, nil, nil)
+            }
+            let pending = state.pendingMarkers
+            state.pendingMarkers.removeAll(keepingCapacity: true)
+            return (
+                state.metadataAdaptor,
+                state.metadataInput,
+                pending,
+                state.sessionStartTime,
+                state.lastVideoPTS,
+                state.writer
+            )
+        }
+
+        guard !drained.markers.isEmpty else { return }
+        // Without a session-start anchor there's no valid clamp window yet —
+        // requeue so a later frame (which will have an anchor) drains them.
+        guard let sessionStart = drained.sessionStart,
+              let lastPTS = drained.lastPTS else {
+            writerStateLock.withLock { $0.pendingMarkers.insert(contentsOf: drained.markers, at: 0) }
+            return
+        }
+
+        var committedThisPass: [RecordingMarker] = []
+        for marker in drained.markers {
+            // A marker queued during warmup (before the first frame) carries
+            // `CMTime.invalid`; anchor it to the session start now that we
+            // have one. Everything else clamps into the valid window.
+            let rawTime = marker.time.isValid ? marker.time : sessionStart
+            let clamped = clampMarkerTime(rawTime, lower: sessionStart, upper: lastPTS)
+            let committed = RecordingMarker(time: clamped, title: marker.title)
+            committedThisPass.append(committed)
+
+            // Timed-metadata track — only if the adaptor exists (pref on), the
+            // writer is still healthy, AND the input can take data. The
+            // QuickTime chapter track is built separately at finalize from
+            // `committedMarkers`, so a marker is still recorded even when the
+            // metadata-track pref is off. Gating on `writer.status == .writing`
+            // stops us from appending into a writer that already failed (which
+            // would compound the failure), and `markerMetadataLabel` guarantees
+            // a NON-EMPTY value — an empty boxed-UTF-8 sample flips the writer
+            // to `.failed` (the manual-mark hang; see `markerMetadataLabel`).
+            if let adaptor = drained.adaptor,
+               let input = drained.input,
+               drained.writer?.status == .writing,
+               input.isReadyForMoreMediaData {
+                let item = AVMutableMetadataItem()
+                item.identifier = .quickTimeUserDataFullName
+                item.dataType = kCMMetadataBaseDataType_UTF8 as String
+                item.value = markerMetadataLabel(title: committed.title) as NSString
+                let group = AVTimedMetadataGroup(
+                    items: [item],
+                    timeRange: CMTimeRange(start: clamped, duration: .zero)
+                )
+                adaptor.append(group)
+            }
+        }
+
+        // Accumulate for the finalize-time chapter track.
+        writerStateLock.withLock { state in
+            state.committedMarkers.append(contentsOf: committedThisPass)
+        }
+    }
+
+    /// Queue a marker at the given absolute capture-clock time. Shared by the
+    /// manual-tap path and the script-crossing path. MainActor-safe: appends
+    /// into `pendingMarkers` under the lock without awaiting. Drained on the
+    /// next video frame by `drainPendingMarkers()`.
+    ///
+    /// No-op outside `.recording` — a mark makes no sense before the writer
+    /// exists, and outside a take there's no timeline to anchor it to.
+    private func enqueueMarker(title: String?) {
+        guard case .recording = state.phase else { return }
+        // Anchor to the most recent video PTS — the frame the user is
+        // actually looking at when they tap / when a block crosses. If no
+        // frame has landed yet (the ~125 ms warmup window at the very start
+        // of a take, before `startSession`), queue with `CMTime.invalid`;
+        // `drainPendingMarkers` substitutes the session start once the anchor
+        // exists, so an early crossing lands at the file's first frame rather
+        // than being lost.
+        writerStateLock.withLock { state in
+            let anchor = state.lastVideoPTS ?? state.sessionStartTime ?? .invalid
+            state.pendingMarkers.append(RecordingMarker(time: anchor, title: title))
+        }
+    }
+
+    /// MANUAL marker (H0a). Bound to the "mark" chip near the camera toggle
+    /// and to the `.dropMarker` remote event. Drops an auto-numbered marker
+    /// (title `nil` → "Marker N" at finalize) at the current frame.
+    func tapMark() {
+        guard case .recording = state.phase else { return }
+        enqueueMarker(title: nil)
+        Haptics.tap(.medium)
+    }
+
+    #if DEBUG
+    // MARK: - Marker test seams (DEBUG only)
+    //
+    // The marker pipeline's live path needs a real writer + sample buffers,
+    // which the `suppressDeviceWork` test mode has none of. These seams let a
+    // unit test drive the queue/anchor/clamp logic deterministically without
+    // AVFoundation: inject a synthetic session clock, enqueue via the public
+    // tap/appendChapter API, run the SAME `drainPendingMarkers` used in
+    // production, and read back the committed markers.
+
+    /// Inject a synthetic capture clock so `enqueueMarker` has an anchor and
+    /// `drainPendingMarkers` has a clamp window, exactly as the video-frame
+    /// path would set them in production.
+    func _testSeedWriterClock(sessionStart: CMTime, lastVideoPTS: CMTime) {
+        writerStateLock.withLock { state in
+            state.sessionStartTime = sessionStart
+            state.lastVideoPTS = lastVideoPTS
+        }
+    }
+
+    /// Number of markers still queued (not yet drained).
+    var _testPendingMarkerCount: Int {
+        writerStateLock.withLock { $0.pendingMarkers.count }
+    }
+
+    /// Markers committed so far this take (drained into the metadata track and
+    /// accumulated for the chapter track), as `(offsetSeconds, title)` where
+    /// the offset is `markerTime − sessionStart` in seconds — i.e. the file-
+    /// relative time the marker lands at. Titles preserve `nil` for manual.
+    var _testCommittedMarkers: [(offset: Double, title: String?)] {
+        writerStateLock.withLock { state in
+            let start = state.sessionStartTime ?? .zero
+            return state.committedMarkers.map { marker in
+                (CMTimeGetSeconds(marker.time - start), marker.title)
+            }
+        }
+    }
+
+    /// Run the production drain synchronously (it's `nonisolated` and takes no
+    /// AVFoundation-only path when the adaptor is absent, which it is in the
+    /// suppressed test mode — markers still accumulate into `committedMarkers`).
+    func _testDrainPendingMarkers() {
+        drainPendingMarkers()
+    }
+    #endif
 
     // MARK: - Save flow
 
@@ -1084,19 +1625,32 @@ final class RecordingSession {
         }
     }
 
-    private func configureAudioSession() {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(
-                .playAndRecord,
-                mode: .videoRecording,
-                options: [.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker]
-            )
-            try session.setActive(true, options: [])
-        } catch {
-            // Audio-session activation is best-effort. The writer falls
-            // back to the system route if we can't lock our category.
-        }
+    /// Claim the shared audio session through the coordinator (fix 1a). The
+    /// coordinator serializes the `.playAndRecord` / `.videoRecording`
+    /// configuration recording and voice both request so the volume-button
+    /// source's `outputVolume` KVO can be re-armed when the category flips —
+    /// it used to race `setCategory` directly and silently killed that KVO.
+    ///
+    /// The audio config is byte-for-byte what recording used before; only the
+    /// path to `AVAudioSession` changed. `role` distinguishes an actual
+    /// recording claim from the voice-tracking path that also runs this via
+    /// `ensureAudioCaptureRunning`, so releases are symmetric.
+    private func configureAudioSession(role: AudioSessionRole) {
+        guard !suppressDeviceWork else { return }
+        // Best-effort — the writer falls back to the system route if we can't
+        // lock our category. The coordinator returns the error rather than
+        // throwing; recording has no user-facing surface for it here (the
+        // mic-unavailable chip covers the observable failure) so we discard.
+        _ = AudioSessionCoordinator.shared.claim(role, configuration: .capture)
+    }
+
+    /// Release this session's audio-session claim. Called when recording
+    /// finalizes; if voice tracking still holds `.voiceTracking` the
+    /// coordinator keeps `.capture` applied, otherwise a live volume observer
+    /// is re-armed against `.ambient` (fix 1a, audit A5).
+    private func releaseAudioSession(role: AudioSessionRole) {
+        guard !suppressDeviceWork else { return }
+        AudioSessionCoordinator.shared.release(role)
     }
 
     /// Fallback dimension resolver — kept for any callsite that needs to
@@ -1305,20 +1859,25 @@ final class RecordingSession {
         #endif
     }
 
-    // MARK: - Reserved future hook (Feature 3)
+    // MARK: - Script markers (V3 headline, H0b)
 
-    /// Reserved for the chapter-marker feature. The writer pipeline keeps
-    /// `AVMutableMetadataItem` writes deferred to finalize-time, so Feature
-    /// 3 can wire `appendChapter(title:at:)` into the same writer without
-    /// touching `tapREC` / `tapStop`. Not implemented in this PR.
+    /// SCRIPT marker (H0b). Called from the prompter when a heading or a
+    /// `[MARK]` / `[MARK: title]` / `[[mark]]` cue crosses the reading
+    /// eye-line during a take. Anchors the marker to the current frame —
+    /// the `time` argument is retained for API shape but the frame-accurate
+    /// anchor is `lastVideoPTS`, read synchronously under the lock, which is
+    /// exactly the crossing moment for both constant-speed and voice-tracked
+    /// scroll. Dedupe (mark each block index once per take) lives in the
+    /// caller (`PrompterViewModel`), which owns block identity.
     ///
     /// - Parameters:
-    ///   - title: The chapter title (typically a markdown heading).
-    ///   - time: A `CMTime` relative to the writer session start.
+    ///   - title: The chapter title (heading text or the cue's title).
+    ///   - time: Retained for call-site clarity / tests; the marker is
+    ///     anchored to the live capture clock, not this value.
     func appendChapter(title: String, at time: CMTime) {
-        // Intentional no-op — wired when Feature 3 lands.
-        _ = title
         _ = time
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        enqueueMarker(title: trimmed.isEmpty ? nil : trimmed)
     }
 }
 

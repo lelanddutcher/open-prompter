@@ -135,6 +135,14 @@ final class VoiceTracker {
     private var aligner: ScriptAligner?
     private var cursor: Int = 0
 
+    /// Distinctive contextual-bias strings for the loaded script (V3
+    /// Design 05, Slice A). Rebuilt on every `loadScript(...)`. Fed to
+    /// whichever recognizer backend starts, replacing the old near-cursor
+    /// window that wasted bias budget on generic filler like "the"/"and".
+    /// Empty when the script has no distinctive terms — then we simply
+    /// don't set `contextualStrings` (same as an empty window today).
+    private var biasVocabulary: [String] = []
+
     /// 2.0.6: parallel array of `aligner.tokens.count` length where
     /// `tokenToBlock[i]` is the index of the rendered ScriptBlock that
     /// produced token `i`. Empty when loaded via the String-based
@@ -162,23 +170,30 @@ final class VoiceTracker {
     /// after ~1.5 seconds without a match).
     private(set) var lastMatchTime: Date = Date()
 
+    /// The live recognition backend for the current session. Either
+    /// `SFSpeechBackend` (shipped path, all iOS versions) or
+    /// `SpeechAnalyzerBackend` (iOS 26+, Labs-gated). Owns the recognizer /
+    /// request / task / mic engine for its engine. `nil` when not tracking
+    /// or in test-suppress mode. (V3 Design 05 §4.2.)
+    private var speechBackend: SpeechBackend?
+
+    /// 2.0.4 / DEBUG replay: the recognizer + request + task for the
+    /// DEBUG-only `startWithSampleAudio` URL-replay path, which drives
+    /// `SFSpeechURLRecognitionRequest` directly rather than through a
+    /// `SpeechBackend`. The live-mic path uses `speechBackend` instead.
     private var recognizer: SFSpeechRecognizer?
     /// Apple's `SFSpeechAudioBufferRecognitionRequest` is documented
     /// thread-safe for `appendAudioSampleBuffer`. Held nonisolated so
     /// the camera audio queue can call it without a main-actor hop.
+    /// Used ONLY by the legacy `feedAudio(_:)` camera-fork path (dormant
+    /// now that the live path is engine-driven) — remains nil on the
+    /// backend-driven live path.
     private nonisolated(unsafe) var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
 
-    /// 2.0.4: VoiceTracker now grabs the microphone directly via
-    /// `AVAudioEngine` instead of forwarding from the camera's
-    /// `AVCaptureAudioDataOutput`. Old architecture required the user
-    /// to enable PiP/camera before voice tracking could receive any
-    /// audio at all (the comment at the top of this file documented
-    /// the dependency). Founder feedback: voice tracking should grab
-    /// the mic itself when activated — and should show the orange
-    /// "mic in use" indicator in the dynamic island, which only fires
-    /// when the audio engine is actively tapping the input. This
-    /// removes the cross-feature ordering trap entirely.
+    /// DEBUG replay engine placeholder — the URL replay path feeds itself
+    /// from the file, so no live mic engine is needed there. Retained for
+    /// teardown symmetry.
     private var audioEngine: AVAudioEngine?
 
     /// Throttle gate for audio-level publishing — only post one update
@@ -217,6 +232,9 @@ final class VoiceTracker {
         self.lastTranscription = ""
         self.lastMatchTime = Date()
         self.visibleTokenRange = nil
+        // Slice A: derive the distinctiveness-ranked bias vocabulary from
+        // the whole script body (independent of cursor position).
+        self.biasVocabulary = ScriptBiasVocabulary.extract(from: text)
     }
 
     /// 2.0.6 block-aware load. Each tuple `(blockIndex, text)` has its
@@ -265,6 +283,11 @@ final class VoiceTracker {
         self.lastTranscription = ""
         self.lastMatchTime = Date()
         self.visibleTokenRange = nil
+        // Slice A: build the joined body the same way the tokens are joined
+        // (blocks joined by "\n\n") so the extractor sees the identical text,
+        // then derive the bias vocabulary from it.
+        let joined = blocks.map(\.text).joined(separator: "\n\n")
+        self.biasVocabulary = ScriptBiasVocabulary.extract(from: joined)
     }
 
     /// 2.0.6: matched token's location for accurate pixel positioning.
@@ -327,155 +350,119 @@ final class VoiceTracker {
             return true
         }
 
-        // Real path. Build the recognizer + request + task.
-        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
-              recognizer.isAvailable else {
-            return false
-        }
-        self.recognizer = recognizer
-
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        // On-device only — privacy, no 60s server cap, works offline.
-        request.requiresOnDeviceRecognition = true
-        // Bias recognition toward words NEAR THE CURRENT CURSOR. Feeding
-        // the entire script's vocabulary made common words match at far
-        // positions ("say 'the' once at start, recognizer hears 'the',
-        // aligner finds 'the' at end of script"). A sliding ~100-word
-        // window near the cursor keeps the recognizer's prior consistent
-        // with where we expect the user to be.
+        // Real path. Choose the recognition backend (V3 Design 05 §4.2).
+        // The word stream flows through the SAME handleRecognizerResult
+        // sink regardless of backend, so the aligner + momentum controller
+        // are untouched — only the PRODUCER of the word stream is swapped.
         //
-        // SFSpeechRecognizer doesn't reapply contextualStrings mid-task,
-        // so this snapshot reflects the cursor at start time only. A
-        // future pass can periodically restart the recognition task as
-        // the cursor advances; for now, short scripts get the whole
-        // vocabulary and long scripts get a forward-biased window.
-        if let aligner = aligner {
-            let from = max(0, cursor - 10)
-            let nearCursor = aligner.tokens
-                .dropFirst(from)
-                .prefix(100)
-                .map(\.normalized)
-            let unique = Array(Set(nearCursor))
-            request.contextualStrings = unique
-        }
-        self.recognitionRequest = request
-
-        let task = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            // Callback runs on a background queue. Hop to main and
-            // process. Capture only Sendable values out of `result`.
-            let resultSnapshot: (segments: [String], formatted: String, isFinal: Bool)?
-            if let result = result {
-                resultSnapshot = (
-                    segments: result.bestTranscription.segments.map { $0.substring },
-                    formatted: result.bestTranscription.formattedString,
-                    isFinal: result.isFinal
-                )
-            } else {
-                resultSnapshot = nil
+        // Backend choice is the ONE version branch in the whole feature:
+        // iOS 26 SpeechAnalyzer when available AND the Labs pref is on;
+        // otherwise the shipped SFSpeechRecognizer path.
+        if #available(iOS 26, *), Prefs.voiceUseSpeechAnalyzer {
+            let analyzer = SpeechAnalyzerBackend()
+            // The analyzer's availability is only knowable asynchronously
+            // (§6.2), so a synchronous `true` means "committed to trying".
+            // If it discovers it can't run it fires `onUnavailable`, which
+            // routes to `fallBackToSFBackend()` — the iOS 26 path can never
+            // make tracking worse than today.
+            if startBackend(analyzer, contextualStrings: biasVocabulary) {
+                self.speechBackend = analyzer
+                isActive = true
+                return true
             }
-            let errorSnapshot = (error as NSError?)
-
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
-                if let snap = resultSnapshot {
-                    self.lastTranscription = snap.formatted
-                    self.handleRecognizerResult(allWords: snap.segments)
-                }
-                // The recognizer task ends on `isFinal` or error. Tear
-                // down so the next start() builds a fresh request.
-                //
-                // 2.0.6 fix: SFSpeechRecognizer (especially with
-                // requiresOnDeviceRecognition) ends naturally after
-                // ~30-60 seconds with `isFinal == true`. Pre-2.0.6 we
-                // tore down WITHOUT setting isActive=false, so voice
-                // tracking thought it was running but had no
-                // recognition machinery — voice tracking "fell off
-                // rapidly" exactly as the user reported. Now: on a
-                // natural isFinal end, restart so tracking continues
-                // seamlessly. Only a hard error sets isActive=false.
-                if errorSnapshot != nil {
-                    self.tearDownRecognition()
-                    self.isActive = false
-                } else if resultSnapshot?.isFinal == true {
-                    self.tearDownRecognition()
-                    if self.isActive {
-                        // Re-arm. start() rebuilds the request, the
-                        // engine, and the recognition task.
-                        self.isActive = false   // start() guards on !isActive
-                        _ = self.start()
-                    }
-                }
-            }
-        }
-        self.recognitionTask = task
-
-        // 2.0.4: stand up our own AVAudioEngine input tap so voice
-        // tracking captures the mic directly, no camera dependency.
-        // The tap forwards PCM buffers into the recognition request
-        // (and posts an audio-level reading for the HUD meter, same
-        // throttle as the old camera-buffer path).
-        if !startAudioEngineTap(request: request) {
-            // Engine setup failed — tear the request down so a retry
-            // is clean.
-            tearDownRecognition()
-            return false
+            // Synchronous refusal (SpeechTranscriber.isAvailable == false).
+            // Fall through to SF immediately.
         }
 
-        isActive = true
-        return true
+        let sf = SFSpeechBackend()
+        if startBackend(sf, contextualStrings: biasVocabulary) {
+            self.speechBackend = sf
+            isActive = true
+            return true
+        }
+        return false
     }
 
-    /// Build + start an AVAudioEngine input tap that pumps PCM buffers
-    /// into `request`. Returns false if the engine refused to start
-    /// (no input available, audio session in a conflicting category,
-    /// etc.) so the caller can roll back the recognition request.
-    ///
-    /// Audio session note: the engine works inside the
-    /// `.playAndRecord` / `.videoRecording` category set by
-    /// `RecordingSession.configureAudioSession`. We don't reconfigure
-    /// the session here — recording and voice tracking can both
-    /// observe the mic in that category, and changing it underneath a
-    /// running camera capture would interrupt video audio.
-    private func startAudioEngineTap(
-        request: SFSpeechAudioBufferRecognitionRequest
+    /// Start `backend`, wiring its word / transcription / final /
+    /// unavailable / error callbacks to VoiceTracker's existing sinks.
+    /// Returns whether the backend committed to running.
+    private func startBackend(
+        _ backend: SpeechBackend,
+        contextualStrings: [String]
     ) -> Bool {
-        // 2.0.5 ordering fix: configure the audio session for record
-        // BEFORE reading the input node's outputFormat. Pre-2.0.5
-        // we read the format first; on a fresh launch with camera
-        // OFF (no prior session activation), the input bus has no
-        // format yet (sampleRate == 0), the early-return tripped,
-        // and voice tracking silently failed. Activating the
-        // session first ensures the input bus advertises a valid
-        // format. Idempotent if RecordingSession already activated
-        // for video recording.
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(
-                .playAndRecord,
-                mode: .videoRecording,
-                options: [.allowBluetooth, .allowBluetoothA2DP, .defaultToSpeaker]
-            )
-            try session.setActive(true, options: [])
-        } catch {
-            // Best-effort — engine may still start on the system
-            // route. If it doesn't, `engine.start()` below throws.
+        backend.start(
+            locale: Locale(identifier: "en-US"),
+            contextualStrings: contextualStrings,
+            onWords: { [weak self] words in
+                self?.handleRecognizerResult(allWords: words)
+            },
+            onTranscription: { [weak self] formatted in
+                self?.lastTranscription = formatted
+            },
+            onFinal: { [weak self] in
+                self?.handleBackendFinal()
+            },
+            onUnavailable: { [weak self] in
+                self?.fallBackToSFBackend()
+            },
+            onError: { [weak self] in
+                self?.handleBackendError()
+            }
+        )
+    }
+
+    /// The active backend reported it can't run (iOS 26 analyzer model not
+    /// installed / locale unsupported / mic refused). Swap to the shipped
+    /// SFSpeechRecognizer path WITHOUT bouncing `isActive`, so the swap is
+    /// invisible to the user (§6.2 seamless fallback). No-op if we're no
+    /// longer active or already on the SF backend.
+    private func fallBackToSFBackend() {
+        guard isActive else { return }
+        // Only the analyzer backend fires onUnavailable; if the current
+        // backend is already SF (or gone), there's nothing to swap.
+        guard let current = speechBackend, !(current is SFSpeechBackend) else { return }
+        current.stop()
+        speechBackend = nil
+
+        let sf = SFSpeechBackend()
+        if startBackend(sf, contextualStrings: biasVocabulary) {
+            speechBackend = sf
+            // isActive stays true — the user never sees a gap.
+        } else {
+            // Even SF refused (no recognizer / mic). Nothing left to try.
+            isActive = false
         }
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-        guard format.sampleRate > 0 else { return false }
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak request] buffer, _ in
-            request?.append(buffer)
+    }
+
+    /// Natural end of a recognition task (SF `isFinal` analog / analyzer
+    /// stream end). Matches the shipped 2.0.6 behaviour: tear down and
+    /// re-arm so tracking continues seamlessly across the recognizer's
+    /// ~30-60s natural stop. Only a hard error deactivates.
+    private func handleBackendFinal() {
+        tearDownRecognition()
+        if isActive {
+            // Re-arm. start() rebuilds the backend, engine, and task.
+            isActive = false   // start() guards on !isActive
+            _ = start()
         }
-        do {
-            try engine.start()
-        } catch {
-            inputNode.removeTap(onBus: 0)
-            return false
+    }
+
+    /// A backend reported a HARD failure AFTER it had started.
+    ///
+    /// If the failing backend is the iOS 26 `SpeechAnalyzerBackend`, don't
+    /// dead-end voice tracking — fall back to the shipped `SFSpeechBackend`
+    /// (the SAME seam the pre-start `onUnavailable` route uses), so a runtime
+    /// analyzer error becomes an INVISIBLE swap instead of the voice button
+    /// flipping OFF. `isActive` stays true across the swap. Only when the SF
+    /// backend ITSELF hard-fails is there nothing left to try — then we
+    /// deactivate (matches the shipped SF error branch). (V3 Design 05 §6.2.)
+    private func handleBackendError() {
+        if let current = speechBackend, !(current is SFSpeechBackend) {
+            fallBackToSFBackend()
+            return
         }
-        self.audioEngine = engine
-        return true
+        tearDownRecognition()
+        isActive = false
     }
 
     /// Reset the cursor to the start of the script. Use when tracking
@@ -513,14 +500,10 @@ final class VoiceTracker {
         let request = SFSpeechURLRecognitionRequest(url: url)
         request.shouldReportPartialResults = true
         request.requiresOnDeviceRecognition = true
-        if let aligner = aligner {
-            let from = max(0, cursor - 10)
-            let nearCursor = aligner.tokens
-                .dropFirst(from)
-                .prefix(100)
-                .map(\.normalized)
-            let unique = Array(Set(nearCursor))
-            request.contextualStrings = unique
+        // Slice A: replay uses the SAME distinctiveness-ranked vocabulary as
+        // the live path so replay and live behave identically.
+        if !biasVocabulary.isEmpty {
+            request.contextualStrings = biasVocabulary
         }
 
         let task = recognizer.recognitionTask(with: request) { [weak self] result, error in
@@ -576,6 +559,17 @@ final class VoiceTracker {
     }
 
     private func tearDownRecognition() {
+        // Live path: stop whichever backend is running. The backend owns its
+        // recognizer / request / task / mic engine AND releases the audio-
+        // session claim (fix 1a) in its own `stop()`.
+        if let backend = speechBackend {
+            backend.stop()
+            speechBackend = nil
+        }
+
+        // DEBUG replay path (SFSpeechURLRecognitionRequest): the request +
+        // task live directly on VoiceTracker, not behind a backend. Tear
+        // them down here.
         recognitionRequest?.endAudio()
         recognitionTask?.cancel()
         recognitionRequest = nil
@@ -589,6 +583,14 @@ final class VoiceTracker {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
             audioEngine = nil
+        }
+        // Release our audio-session claim (fix 1a) for the DEBUG replay path
+        // (the backend already released for the live path; release() is
+        // idempotent per role). If recording still holds `.recording` the
+        // coordinator keeps `.capture` applied; otherwise a live volume-
+        // button observer is re-armed against `.ambient`.
+        if !suppressDeviceWork {
+            AudioSessionCoordinator.shared.release(.voiceTracking)
         }
     }
 
@@ -825,4 +827,10 @@ final class VoiceTracker {
         guard suppressDeviceWork else { return }
         self.authorization = status
     }
+
+    /// Read-only view of the extracted contextual-bias vocabulary (V3
+    /// Design 05, Slice A) for unit tests. Populated by `loadScript(...)`;
+    /// independent of the cursor. `internal` so `@testable import` reaches
+    /// it without exposing a mutation surface.
+    var biasVocabularyForTesting: [String] { biasVocabulary }
 }

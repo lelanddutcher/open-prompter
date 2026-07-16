@@ -41,11 +41,11 @@ struct RecordingChip: View {
                     micWarning
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
             .frame(minHeight: Theme.hitMin)
-            .background(Theme.surface, in: Capsule())
             .foregroundStyle(Theme.fg)
+            .glassSurface(in: Capsule())
             .overlay(Capsule().stroke(borderColor, lineWidth: 1))
             .contentShape(Capsule())
         }

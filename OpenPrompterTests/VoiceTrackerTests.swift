@@ -214,4 +214,78 @@ final class VoiceTrackerTests: XCTestCase {
     // Buffer in unit tests without dragging AVFoundation into the
     // setup, and the contract is simple: read recognitionRequest, no-
     // op if nil. Real device testing exercises the buffer-append path.
+
+    // MARK: - Contextual-bias vocabulary (V3 Design 05, Slice A)
+    //
+    // These exercise the wiring between loadScript and the
+    // ScriptBiasVocabulary extractor via the `biasVocabularyForTesting`
+    // read-only seam. The SpeechAnalyzerBackend itself is device-only
+    // (like SFSpeechRecognizer) and is verified on hardware.
+
+    // 15
+    func testLoadScriptStringPopulatesBiasVocabulary() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("We use Kubernetes")
+        XCTAssertTrue(t.biasVocabularyForTesting.contains("Kubernetes"),
+                      "String loadScript must populate the bias vocabulary")
+    }
+
+    // 16
+    func testLoadScriptBlocksPopulatesBiasVocabulary() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript(blocks: [
+            (blockIndex: 0, text: "We deployed OpenPrompter"),
+            (blockIndex: 1, text: "with the SwiftUI framework")
+        ])
+        let vocab = t.biasVocabularyForTesting
+        XCTAssertTrue(vocab.contains("OpenPrompter"),
+                      "block loadScript must extract from the joined body")
+        XCTAssertTrue(vocab.contains("SwiftUI"),
+                      "block loadScript must span all blocks")
+    }
+
+    // 17
+    func testLoadScriptResetsBiasVocabulary() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("We use Kubernetes daily")
+        XCTAssertFalse(t.biasVocabularyForTesting.isEmpty)
+
+        // A stopword-only script clears the previous vocabulary.
+        t.loadScript("the and of to a in that")
+        XCTAssertEqual(t.biasVocabularyForTesting, [],
+                       "loading an all-stopword script must reset the vocabulary")
+    }
+
+    // 18
+    func testBiasVocabularyIndependentOfCursor() {
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("alpha Kubernetes beta OpenPrompter gamma SwiftUI delta")
+        XCTAssertTrue(t.start())
+        let before = t.biasVocabularyForTesting
+
+        // Advance the cursor by ingesting words — the vocabulary must NOT
+        // change (unlike the old near-cursor window it replaced).
+        t.ingestRecognizedWords(["alpha", "beta"])
+        XCTAssertGreaterThan(t.currentCursor, 0,
+                             "cursor must advance for this test to be meaningful")
+        XCTAssertEqual(t.biasVocabularyForTesting, before,
+                       "bias vocabulary must be cursor-independent")
+    }
+
+    // 19
+    func testSuppressDeviceWorkStartUnaffected() {
+        // With suppressDeviceWork, start() must still succeed exactly as
+        // before — the backend swap is skipped entirely in suppress mode.
+        let t = VoiceTracker(suppressDeviceWork: true)
+        t.prepareTestAuthorization(.authorized)
+        t.loadScript("We use Kubernetes and OpenPrompter")
+        XCTAssertTrue(t.start(), "suppress-mode start must succeed as before")
+        XCTAssertTrue(t.isActive)
+        // Vocabulary is still populated even though no recognizer starts.
+        XCTAssertFalse(t.biasVocabularyForTesting.isEmpty)
+    }
 }

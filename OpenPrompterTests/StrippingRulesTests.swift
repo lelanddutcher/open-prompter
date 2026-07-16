@@ -145,4 +145,207 @@ final class StrippingRulesTests: XCTestCase {
         let result = rules.frontmatter.removingMatches(in: input)
         XCTAssertFalse(result.contains("author:"))
     }
+
+    // MARK: - Stage-direction / camera-cue detection (V3 item 4)
+
+    func testAggressiveEnablesStageDirectionStripping() {
+        XCTAssertTrue(StrippingRules.aggressive.stripStageDirections)
+    }
+
+    func testGentleDisablesStageDirectionStripping() {
+        XCTAssertFalse(StrippingRules.gentle.stripStageDirections)
+    }
+
+    func testAggressiveKeepingStageDirectionsFlagOff() {
+        XCTAssertFalse(StrippingRules.aggressiveKeepingStageDirections.stripStageDirections)
+    }
+
+    func testResolvedSelectsCorrectRuleSet() {
+        // aggressive off -> gentle regardless of the stage-direction toggle
+        XCTAssertFalse(
+            StrippingRules.resolved(aggressive: false, stripStageDirections: true).stripStageDirections
+        )
+        XCTAssertFalse(
+            StrippingRules.resolved(aggressive: false, stripStageDirections: false).stripStageDirections
+        )
+        // aggressive on -> stage-direction toggle decides
+        XCTAssertTrue(
+            StrippingRules.resolved(aggressive: true, stripStageDirections: true).stripStageDirections
+        )
+        XCTAssertFalse(
+            StrippingRules.resolved(aggressive: true, stripStageDirections: false).stripStageDirections
+        )
+    }
+
+    func testStageDirectionBracketStripsCameraCues() {
+        let rules = StrippingRules.aggressive
+        let samples = [
+            "[Cut to: close-up of the phone]",
+            "[B-roll: hand picking up a camera]",
+            "[SFX: door slam]",
+            "[VO: narration line]",
+            "[graphic: pricing table]",
+            "[wide shot]",
+            "[close up]",
+            "[reverse angle]"
+        ]
+        for sample in samples {
+            let body = "before. \(sample) after."
+            let result = rules.stageDirectionBracket.removingMatches(in: body)
+            XCTAssertFalse(
+                result.contains("["),
+                "Bracket cue should be stripped: \(sample). Got: \(result)"
+            )
+            XCTAssertTrue(result.contains("before."))
+            XCTAssertTrue(result.contains("after."))
+        }
+    }
+
+    func testStageDirectionBracketPreservesMarkdownLinksAndWikilinks() {
+        let rules = StrippingRules.aggressive
+        // A markdown link's text is followed by `(url)`; a wikilink is `[[...]]`.
+        // Neither should be consumed by the bracket-cue pattern.
+        let link = "see [the docs](https://example.com) for more"
+        XCTAssertEqual(rules.stageDirectionBracket.removingMatches(in: link), link)
+        let wikilink = "read [[Some Page]] carefully"
+        XCTAssertEqual(rules.stageDirectionBracket.removingMatches(in: wikilink), wikilink)
+    }
+
+    func testStageDirectionParenStripsPerformanceCues() {
+        let rules = StrippingRules.aggressive
+        let samples = [
+            "(beat)",
+            "(pause)",
+            "(laughs)",
+            "(to camera)",
+            "(cont'd)",
+            "(sotto)",
+            "(whispering)"
+        ]
+        for sample in samples {
+            let body = "line one \(sample) line two"
+            let result = rules.stageDirectionParen.removingMatches(in: body)
+            XCTAssertFalse(
+                result.contains("("),
+                "Parenthetical cue should be stripped: \(sample). Got: \(result)"
+            )
+        }
+    }
+
+    func testStageDirectionParenPreservesOrdinaryParentheticals() {
+        let rules = StrippingRules.aggressive
+        // Legitimate asides must survive — the first token is not a cue word.
+        let samples = [
+            "the price (about $30) is fair",
+            "(see figure 2)",
+            "released in (2020)",
+            "the app (my favorite) is free"
+        ]
+        for sample in samples {
+            XCTAssertEqual(
+                rules.stageDirectionParen.removingMatches(in: sample), sample,
+                "Ordinary parenthetical must be preserved: \(sample)"
+            )
+        }
+    }
+
+    func testStageDirectionCapsStripsShotDirections() {
+        let rules = StrippingRules.aggressive
+        let samples = [
+            "and then CUT TO: the anchor desk here",
+            "we FADE IN on the scene",
+            "a WIDE SHOT establishes place",
+            "SMASH CUT TO the reveal",
+            "PAN LEFT across the room"
+        ]
+        for sample in samples {
+            let result = rules.stageDirectionCaps.removingMatches(in: sample)
+            XCTAssertFalse(
+                result.contains("CUT TO")
+                || result.contains("FADE IN")
+                || result.contains("WIDE SHOT")
+                || result.contains("SMASH CUT")
+                || result.contains("PAN LEFT"),
+                "ALL-CAPS shot direction should be stripped: \(sample). Got: \(result)"
+            )
+        }
+    }
+
+    func testStageDirectionCapsPreservesEmphaticCaps() {
+        let rules = StrippingRules.aggressive
+        // Ordinary shouted caps that are not recognizable shot directions
+        // must survive — no bare common word triggers the caps pass.
+        let samples = [
+            "I said NO to that offer",
+            "this is FREE forever",
+            "the answer is YES",
+            "INSERTED the key into the lock"  // "INSERT" is not a caps trigger
+        ]
+        for sample in samples {
+            XCTAssertEqual(
+                rules.stageDirectionCaps.removingMatches(in: sample), sample,
+                "Emphatic caps must be preserved: \(sample)"
+            )
+        }
+    }
+
+    func testStageDirectionLineMatchesWholeCueLines() {
+        let rules = StrippingRules.aggressive
+        let lines = [
+            "WIDE SHOT",
+            "Cut to: the anchor desk",
+            "CUT TO:",
+            "(beat)",
+            "[B-roll: the rig]",
+            "fade in"
+        ]
+        for line in lines {
+            XCTAssertTrue(
+                rules.stageDirectionLine.hasMatch(in: line),
+                "Whole-line cue should match: \(line)"
+            )
+        }
+    }
+
+    func testStageDirectionLineIgnoresNormalProse() {
+        let rules = StrippingRules.aggressive
+        let lines = [
+            "welcome to the show",           // "show" is not a line trigger
+            "hold on to your hats",          // "hold on" is not a line trigger
+            "let me reveal the secret",
+            "the camera loves you",
+            "this is a normal spoken line",
+            "a wide range of options"        // "wide" alone is not "wide shot"
+        ]
+        for line in lines {
+            XCTAssertFalse(
+                rules.stageDirectionLine.hasMatch(in: line),
+                "Normal prose must NOT match the whole-line cue: \(line)"
+            )
+        }
+    }
+
+    func testGentleKeepsStageDirections() {
+        let rules = StrippingRules.gentle
+        let body = "before. [Cut to: desk] (beat) after. WIDE SHOT"
+        XCTAssertEqual(rules.stageDirectionBracket.removingMatches(in: body), body)
+        XCTAssertEqual(rules.stageDirectionParen.removingMatches(in: body), body)
+        XCTAssertEqual(rules.stageDirectionCaps.removingMatches(in: body), body)
+        XCTAssertFalse(rules.stageDirectionLine.hasMatch(in: "WIDE SHOT"))
+    }
+
+    func testAggressiveKeepingStageDirectionsStillStripsLegacyVisualDirection() {
+        // The stage-direction-preserving variant keeps the four new patterns
+        // inert but leaves the legacy `visualDirection` bracket set active.
+        let rules = StrippingRules.aggressiveKeepingStageDirections
+        let legacy = "before [B-roll: wide shot] after"
+        XCTAssertFalse(
+            rules.visualDirection.removingMatches(in: legacy).contains("B-roll")
+        )
+        // The broadened stage-direction patterns are inert here.
+        XCTAssertEqual(
+            rules.stageDirectionParen.removingMatches(in: "line (beat) line"),
+            "line (beat) line"
+        )
+    }
 }

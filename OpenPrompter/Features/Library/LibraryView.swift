@@ -21,14 +21,6 @@ struct LibraryView: View {
     var body: some View {
         NavigationStack {
             List {
-                // Folder header — lives inside the list so it scrolls
-                // with the content rather than squatting in the nav bar.
-                Section {
-                    folderHeader
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                }
-
                 if state.watcher.files.isEmpty {
                     emptyState
                         .listRowBackground(Color.clear)
@@ -108,26 +100,6 @@ struct LibraryView: View {
     }
 
     // MARK: - Sub-views
-
-    @ViewBuilder
-    private var folderHeader: some View {
-        let folder = state.watcher.folderDisplayName ?? "no folder"
-        HStack(spacing: 6) {
-            Text("$").foregroundStyle(Theme.green)
-            Text("ls ").foregroundStyle(Theme.ghost)
-            Text(folder)
-                .foregroundStyle(Theme.fg)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            if let count = state.watcher.files.count as Int?, !state.watcher.files.isEmpty {
-                Text("· \(count) .md")
-                    .foregroundStyle(Theme.ghost)
-            }
-        }
-        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-        .tracking(0.5)
-        .padding(.vertical, 8)
-    }
 
     @ViewBuilder
     private var emptyState: some View {

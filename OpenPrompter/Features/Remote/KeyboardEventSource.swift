@@ -24,15 +24,35 @@
 //
 
 import SwiftUI
+import os
+
+#if DEBUG
+/// Shared `[Remote-Capture]` channel (see VolumeEventSource for rationale).
+fileprivate let remoteCaptureLog = Logger(
+    subsystem: "app.openprompter.remote",
+    category: "Remote-Capture"
+)
+#endif
 
 @MainActor
 final class KeyboardEventSource: RemoteEventSource {
     private let bus: RemoteEventBus
     private let store: RemoteBindingStore
 
-    init(bus: RemoteEventBus, store: RemoteBindingStore) {
+    /// Optional tap invoked with the resolved `RemoteKey` for every
+    /// translatable press, BEFORE the binding lookup — the Labs "learn my
+    /// remote" capture tool subscribes so unmapped keys still surface. `nil`
+    /// in the normal prompter path. `@MainActor` to match every caller / sink.
+    private let onCapture: (@MainActor (RemoteKey) -> Void)?
+
+    init(
+        bus: RemoteEventBus,
+        store: RemoteBindingStore,
+        onCapture: (@MainActor (RemoteKey) -> Void)? = nil
+    ) {
         self.bus = bus
         self.store = store
+        self.onCapture = onCapture
     }
 
     func start() { /* No-op — focus owns lifetime. */ }
@@ -43,7 +63,18 @@ final class KeyboardEventSource: RemoteEventSource {
     /// emitted, `.ignored` otherwise — so SwiftUI can fall back to default
     /// behavior for keys we don't bind.
     func handle(_ press: KeyPress) -> KeyPress.Result {
-        guard let remoteKey = Self.remoteKey(from: press) else { return .ignored }
+        guard let remoteKey = Self.remoteKey(from: press) else {
+            #if DEBUG
+            remoteCaptureLog.info("keyboard.onKeyPress chars=\(press.characters, privacy: .public) → no RemoteKey mapping (ignored)")
+            #endif
+            return .ignored
+        }
+        #if DEBUG
+        remoteCaptureLog.info("keyboard.onKeyPress key=\(remoteKey.id, privacy: .public) → onCapture hook=\(self.onCapture != nil, privacy: .public)")
+        #endif
+        // Surface to the capture tool before the binding gate so an unbound
+        // key still shows up in "learn my remote."
+        onCapture?(remoteKey)
         guard let event = store.event(for: remoteKey) else { return .ignored }
         bus.publish(event)
         return .handled

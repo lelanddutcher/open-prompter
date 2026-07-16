@@ -131,6 +131,22 @@ final class PrompterViewModel {
     /// prompter view goes away.
     let remoteBus = RemoteEventBus()
 
+    /// Invoked when a `.recordToggle` remote event arrives. Recording lives
+    /// on `AppState.recordingSession`, which the VM deliberately doesn't
+    /// reference (the VM is per-script state; AppState is app-scoped). The
+    /// view sets this to `handleRecordingChipTap` so a remote button bound to
+    /// "Start / stop recording" runs the SAME start/cancel/stop dispatch as
+    /// the on-screen REC chip and the hardware capture button. `nil` when the
+    /// prompter isn't showing the recording chip — the event is then a no-op.
+    var onRecordToggle: (() -> Void)?
+
+    /// Invoked when a `.dropMarker` remote event arrives (V3 headline, H0a).
+    /// Like `onRecordToggle`, recording lives on `AppState.recordingSession`
+    /// which this per-script VM deliberately doesn't reference, so the view
+    /// sets this to `RecordingSession.tapMark`. `nil` (or a no-op when nothing
+    /// is recording) when the recording chip isn't on screen.
+    var onDropMarker: (() -> Void)?
+
     // MARK: - Init
 
     init(file: ScriptFile) {
@@ -153,7 +169,10 @@ final class PrompterViewModel {
         playStartScrollOffset = 0
         do {
             let text = try await FileCoordinatorReader.readAsync(file.url)
-            let rules: StrippingRules = Prefs.aggressiveStripping ? .aggressive : .gentle
+            let rules: StrippingRules = .resolved(
+                aggressive: Prefs.aggressiveStripping,
+                stripStageDirections: Prefs.stripStageDirections
+            )
             let parsedResult = await Task.detached(priority: .userInitiated) {
                 MarkdownCleaner.clean(text: text, rules: rules)
             }.value
@@ -232,6 +251,83 @@ final class PrompterViewModel {
     func reload() async {
         reloadAvailable = false
         await load()
+    }
+
+    // MARK: - Script markers (V3 headline, H0b)
+
+    /// Block indices already marked in the CURRENT take. Prevents a heading /
+    /// `[MARK]` block from re-firing a marker when the user scrolls back over
+    /// it (retake workflow) — each block marks at most once per take. Reset by
+    /// `resetScriptMarkerDedupe()` at the start of every recording.
+    private var markedBlockIndices: Set<Int> = []
+
+    /// Prime the per-take script-marker dedupe set at the START of a take.
+    /// Seeds it with every marker-bearing block ALREADY at/above the eye-line,
+    /// so a recording that begins mid-script doesn't retroactively fire a
+    /// marker for each heading the presenter already scrolled past — only
+    /// blocks that cross the reading line DURING the take mark. Called by the
+    /// view when recording begins.
+    func resetScriptMarkerDedupe() {
+        markedBlockIndices.removeAll(keepingCapacity: true)
+        guard !parsed.blocks.isEmpty, viewportHeight > 0 else { return }
+        let eyeLine = scroller.offset + viewportHeight * 0.5
+        for idx in parsed.blocks.indices {
+            let isMarkerBlock = parsed.blocks[idx].isHeading || parsed.markerCues[idx] != nil
+            guard isMarkerBlock else { continue }
+            // A block whose top is already at/above the eye-line has been
+            // read past — seed it so it won't re-fire. Blocks with no measured
+            // frame yet are treated as below (they'll mark when they cross).
+            if let frame = blockFrames[idx], frame.minY <= eyeLine {
+                markedBlockIndices.insert(idx)
+            }
+        }
+    }
+
+    /// Which blocks CURRENTLY have their top edge at or above the reading
+    /// eye-line, are marker-bearing (a heading OR a `[MARK]` cue block), and
+    /// have not yet been marked this take. Returns them in index order with
+    /// the title to write, and records them in the dedupe set so the next
+    /// call won't re-report them.
+    ///
+    /// Uses the REAL per-block geometry (`blockFrames`) rather than the linear
+    /// fraction estimate, so it's frame-accurate for BOTH constant-speed and
+    /// voice-tracked scroll (which move the offset non-linearly). A block with
+    /// no measured frame yet is skipped — it'll be caught on a later tick once
+    /// SwiftUI has published its geometry.
+    ///
+    /// "Crossed" = the block's top (`minY`) has scrolled up to or past the
+    /// eye-line (`scroller.offset + viewportHeight * 0.5`). We report a block
+    /// the moment its top reaches the reading line — the point the presenter
+    /// starts reading it — matching where a manual mark would land.
+    func scriptMarkersCrossingEyeLine() -> [(index: Int, title: String)] {
+        guard !parsed.blocks.isEmpty, viewportHeight > 0 else { return [] }
+        let eyeLine = scroller.offset + viewportHeight * 0.5
+        var result: [(index: Int, title: String)] = []
+        for (idx, block) in parsed.blocks.enumerated() {
+            if markedBlockIndices.contains(idx) { continue }
+            // Only headings and explicit [MARK] cue blocks mark.
+            let title: String?
+            if block.isHeading {
+                title = block.text
+            } else if let cueTitle = parsed.markerCues[idx] {
+                // `markerCues[idx]` is `Optional<Optional<String>>`; a present
+                // key (outer optional non-nil) means the block carries a cue.
+                // `cueTitle` is the inner `String?` — the cue's title or nil
+                // for a bare `[MARK]`. A bare cue titles to the block's text
+                // (its spoken line) so an untitled mid-paragraph mark still
+                // gets a meaningful chapter name.
+                title = cueTitle ?? block.text
+            } else {
+                continue
+            }
+            guard let frame = blockFrames[idx] else { continue }  // geometry not measured yet
+            if frame.minY <= eyeLine {
+                markedBlockIndices.insert(idx)
+                let resolved = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                result.append((index: idx, title: resolved))
+            }
+        }
+        return result
     }
 
     // MARK: - Playback actions
@@ -337,6 +433,26 @@ final class PrompterViewModel {
         scroller.seek(to: scroller.offset + viewportHeight * 0.5, maxOffset: maxScrollOffset)
     }
 
+    /// One-line step, in pixels. A body line's rendered height is roughly
+    /// `fontSize * lineHeightMultiple`; 1.6 matches the prompter's line
+    /// spacing well enough for fine positioning without a per-line geometry
+    /// pass. This is the small-step counterpart to the half-viewport
+    /// `jump*` leaps (audit B3 / R3) and the target of `scrollUp/scrollDown`
+    /// from a mouse-class remote (BLE-M5 D-pad → `GCMouse` deltas).
+    var lineStep: CGFloat { CGFloat(fontSize) * 1.6 }
+
+    /// Nudge scroll up by one line. Bound to `.lineUp` and reached by
+    /// `scrollUp` (pointer / wheel deltas travelling up).
+    func lineUp() {
+        scroller.seek(to: scroller.offset - lineStep, maxOffset: maxScrollOffset)
+    }
+
+    /// Nudge scroll down by one line. Bound to `.lineDown` and reached by
+    /// `scrollDown` (pointer / wheel deltas travelling down).
+    func lineDown() {
+        scroller.seek(to: scroller.offset + lineStep, maxOffset: maxScrollOffset)
+    }
+
     /// Bump the scroll speed by 5 pts/s, clamped to the slider range.
     func speedUp()   { setSpeed(speed + 5) }
     /// Cut the scroll speed by 5 pts/s, clamped to the slider range.
@@ -346,6 +462,11 @@ final class PrompterViewModel {
     /// fractional layout (block index / count of total height) the same way
     /// `currentBlockIndex` does — good enough for the "navigate by section"
     /// remote action without standing up a full per-block measurement pass.
+    ///
+    /// Heading-less fallback (audit C4): a script with no headings would make
+    /// media Next/Prev silently no-op — a remote button that "does nothing
+    /// sometimes" reads as broken. When no heading is found below the current
+    /// block, fall back to a half-viewport jump so the button always advances.
     func nextSection() {
         guard !parsed.blocks.isEmpty, contentHeight > 0 else { return }
         let currentIdx = currentBlockIndex
@@ -353,6 +474,8 @@ final class PrompterViewModel {
             .first(where: { $0 > currentIdx && parsed.blocks[$0].isHeading })
         {
             seekToBlockIndex(nextIdx)
+        } else {
+            jumpForward()
         }
     }
 
@@ -385,10 +508,15 @@ final class PrompterViewModel {
     func handleRemoteEvent(_ event: RemoteEvent) {
         switch event {
         case .playPause:    togglePlay()
-        case .scrollUp:     jumpBackward()
-        case .scrollDown:   jumpForward()
-        case .scrollLeft:   jumpBackward()
-        case .scrollRight:  jumpForward()
+        // scroll* are pointer / wheel deltas from a mouse-class remote
+        // (BLE-M5 D-pad → GCMouse). Route to one-line steps instead of
+        // collapsing to half-viewport jumps (audit B2 dead vocabulary).
+        case .scrollUp:     lineUp()
+        case .scrollDown:   lineDown()
+        case .scrollLeft:   lineUp()
+        case .scrollRight:  lineDown()
+        case .lineUp:       lineUp()
+        case .lineDown:     lineDown()
         case .speedUp:      speedUp()
         case .speedDown:    speedDown()
         case .jumpBackward: jumpBackward()
@@ -398,10 +526,27 @@ final class PrompterViewModel {
         case .nextSection:  nextSection()
         case .prevSection:  prevSection()
         case .jumpToStart:  jumpToStartOfTake()
+        // Recording start/cancel/stop. Routed to the view's recording
+        // dispatch via `onRecordToggle` because recording state lives on
+        // AppState, not this per-script VM. No-op when the recording chip
+        // isn't on screen (closure is nil), matching the on-screen chip.
+        case .recordToggle: onRecordToggle?()
+        // Drop a video marker into the in-flight recording (V3 headline).
+        // Routed to the view's `RecordingSession.tapMark` via `onDropMarker`
+        // for the same reason as `.recordToggle`. No-op when nothing records.
+        case .dropMarker:   onDropMarker?()
         }
     }
 
     var maxScrollOffset: CGFloat {
         max(0, contentHeight - viewportHeight * 0.5)
+    }
+
+    /// Read position through the script, 0 (top) … 1 (end). Drives the
+    /// left-edge `ReadingProgressBar`. Uses the same offset/maxScrollOffset
+    /// the nav actions use, so it tracks manual drag, auto-scroll, and voice
+    /// tracking identically.
+    var readFraction: CGFloat {
+        maxScrollOffset > 0 ? min(max(scroller.offset / maxScrollOffset, 0), 1) : 0
     }
 }

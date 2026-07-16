@@ -6,11 +6,17 @@ options:
   createIntermediateGroups: true
   generateEmptyDirectories: true
   xcodeVersion: "16.0"
+  # Treat Icon Composer `.icon` bundles as opaque files. Without this,
+  # XcodeGen explodes the bundle into its contents (icon.json + PNGs) and
+  # Xcode stops recognizing it as an app icon. (XcodeGen issue #1556.)
+  fileTypes:
+    icon:
+      file: true
 
 settings:
   base:
     SWIFT_VERSION: "5.10"
-    MARKETING_VERSION: "2.0.10"
+    MARKETING_VERSION: "3.0"
     CURRENT_PROJECT_VERSION: "1"
     DEVELOPMENT_TEAM: PKUE74YS72
     CODE_SIGN_STYLE: Automatic
@@ -35,6 +41,15 @@ targets:
           - OpenPrompter.entitlements
           - Resources/Info.plist
           - Resources/PrivacyInfo.xcprivacy
+      # Icon Composer app icon (Liquid Glass, iOS 26/27). `type: file` keeps
+      # the .icon bundle as ONE resource instead of exploding it into
+      # icon.json + PNGs (XcodeGen #1556). actool compiles it, and
+      # ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon resolves to it on iOS 26+.
+      # The flat AppIcon.appiconset is KEPT as the iOS 17/18 fallback
+      # (Apple known issue 152258860 — .icon back-deploys with broken render).
+      - path: AppIcon.icon
+        type: file
+        buildPhase: resources
     resources:
       - path: OpenPrompter/Resources/welcome.md
       - path: OpenPrompter/Resources/demo-everything.md

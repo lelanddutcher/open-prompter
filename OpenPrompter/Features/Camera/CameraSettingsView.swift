@@ -9,17 +9,21 @@
 //  non-`.off` mode. This keeps the setting hidden from users who never opted
 //  in until they do, but doesn't strand a setting they're already using.
 //
-//  After the post-merge dogfood pass we dropped two pickers:
+//  Pickers dropped over successive dogfood passes:
 //  - "default camera" (front/rear) — the camera is now selfie-only
 //  - "pip starting corner" — the tile is free-positioned; corners gone
+//  - "style" (pip / behind / off) — REMOVED in v3. The app only supports
+//    picture-in-picture; "behind" was already gone (routes to `.off`), so
+//    the picker offered no real choice. The camera is turned on/off via the
+//    in-prompter chip (off↔pip); there is no user-facing STYLE choice. The
+//    `CameraStyle.behind` enum case is kept elsewhere for downgrade safety.
 //
 
 import SwiftUI
 
 struct CameraSettingsView: View {
-    // @AppStorage so the pickers self-heal when the user touches the same
-    // prefs from outside Settings (e.g. via the chip in the prompter).
-    @AppStorage(PrefKey.cameraStyle.rawValue) private var styleRaw: String = "off"
+    // @AppStorage so the picker self-heals when the user touches the same
+    // pref from outside Settings (e.g. via the chip in the prompter).
     @AppStorage(PrefKey.cameraPipSize.rawValue) private var pipSizeRaw: String = "medium"
 
     /// Recording-state model. Optional — Settings doesn't need a real
@@ -38,16 +42,6 @@ struct CameraSettingsView: View {
     var body: some View {
         Group {
             Section("camera") {
-                Picker("style", selection: $styleRaw) {
-                    ForEach(CameraStyle.allCases, id: \.rawValue) { style in
-                        Text(style.settingsDisplayName).tag(style.rawValue)
-                    }
-                }
-                .pickerStyle(.menu)
-                Text("picture-in-picture floats a small camera tile over the prompter. behind text fills the screen with the camera and overlays the script.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.dim)
-
                 Picker("pip starting size", selection: $pipSizeRaw) {
                     ForEach(PipSize.allCases, id: \.rawValue) { size in
                         Text(size.displayName).tag(size.rawValue)
@@ -58,6 +52,7 @@ struct CameraSettingsView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.dim)
 
+                #if DEBUG
                 if hasRecordingState {
                     Toggle(
                         "debug: force tally light on",
@@ -67,6 +62,7 @@ struct CameraSettingsView: View {
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.dim)
                 }
+                #endif
             }
         }
     }

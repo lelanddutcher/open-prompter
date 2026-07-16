@@ -118,6 +118,57 @@ enum PrompterFont: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Returns the SwiftUI `Font` for a body run, honoring inline emphasis
+    /// (GitHub #3). Bold maps to the requested weight (each bundled face ships
+    /// a real `-Bold`). Italic uses the system face's real italic where one
+    /// exists, but the two bundled accessibility faces (Atkinson, Lexend) ship
+    /// Regular + Bold ONLY — `.italic()` silently no-ops on a custom font with
+    /// no italic variant, so we synthesize an oblique via a shear matrix to
+    /// guarantee *italic* always reads on camera.
+    func swiftUIFont(size: CGFloat, weight: Font.Weight = .regular, italic: Bool) -> Font {
+        let upright = swiftUIFont(size: size, weight: weight)
+        guard italic else { return upright }
+        #if canImport(UIKit)
+        if let oblique = synthesizedObliqueFont(size: size, weight: weight) {
+            return Font(oblique)
+        }
+        #endif
+        return upright.italic()
+    }
+
+    #if canImport(UIKit)
+    /// Synthesize an oblique `UIFont` for the bundled faces that lack an italic
+    /// variant. Returns nil for the system faces (System Sans, Verdana, New
+    /// York, Brand Mono) — those have real / synthesizable italics, so the
+    /// caller falls back to SwiftUI's `.italic()` which picks the designed slant.
+    private func synthesizedObliqueFont(size: CGFloat, weight: Font.Weight) -> UIFont? {
+        let postScriptName: String
+        switch self {
+        case .atkinsonHyperlegible:
+            postScriptName = (weight == .bold) ? "AtkinsonHyperlegible-Bold" : "AtkinsonHyperlegible-Regular"
+        case .lexend:
+            postScriptName = (weight == .bold) ? "Lexend-Bold" : "Lexend-Regular"
+        case .systemSans, .verdana, .newYorkSerif, .brandMono:
+            return nil
+        }
+        guard let base = UIFont(name: postScriptName, size: size) else { return nil }
+        return Self.oblique(base)
+    }
+
+    /// Apply a synthetic-italic shear to a `UIFont`, PRESERVING its point size.
+    /// The matrix is unit-scale (`a == d == 1`) — only the `c` term shears. The
+    /// glyph size comes from the `size:` argument (`base.pointSize`), NOT the
+    /// matrix. Baking the size into the matrix (`a == d == size`) while the
+    /// descriptor already carries that size double-scales the glyphs (size²) —
+    /// that was the bug where one italic letter filled the screen. ~12° forward
+    /// slant (tan 12° ≈ 0.21).
+    static func oblique(_ base: UIFont, slant: CGFloat = 0.21) -> UIFont {
+        let shear = CGAffineTransform(a: 1, b: 0, c: slant, d: 1, tx: 0, ty: 0)
+        let descriptor = base.fontDescriptor.withMatrix(shear)
+        return UIFont(descriptor: descriptor, size: base.pointSize)
+    }
+    #endif
+
     /// Build a `Font.custom` for a bundled face. If UIKit reports that
     /// the PostScript name hasn't been registered (e.g. the TTF didn't
     /// ship in the bundle), return the matching system font instead so

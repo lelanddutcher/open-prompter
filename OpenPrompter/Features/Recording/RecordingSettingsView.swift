@@ -23,7 +23,7 @@ struct RecordingSettingsView: View {
     // view without re-mounting the prompter.
     @AppStorage(PrefKey.recordingQuality.rawValue) private var qualityRaw: String = "high"
     @AppStorage(PrefKey.recordingFramerate.rawValue) private var framerateRaw: String = "fps30"
-    @AppStorage(PrefKey.recordingAspect.rawValue) private var aspectRaw: String = "ratio9x16"
+    @AppStorage(PrefKey.recordingAspect.rawValue) private var aspectRaw: String = "ratio16x9"
     @AppStorage(PrefKey.recordingStabilization.rawValue) private var stabilizationRaw: String = "off"
     @AppStorage(PrefKey.recordingCountdown.rawValue) private var countdownRaw: String = "three"
     @AppStorage(PrefKey.recordingIndicator.rawValue) private var indicatorRaw: String = "both"
@@ -62,19 +62,20 @@ struct RecordingSettingsView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.dim)
 
-                // Aspect ratio. `availableAspects` filters by OS — 9:16 and
-                // 1:1 require the iOS 26 dynamic-aspect API to land at non-
-                // native crops on the iPhone front sensor, so we hide them
-                // on older iOS rather than silently demoting the user's
+                // Aspect (shape). V3 §07: the picker sets SHAPE ONLY — the
+                // recording orientation follows how the phone is held.
+                // `availableAspects` filters by OS — 1:1 requires the iOS 26
+                // dynamic-aspect API to crop from the front sensor, so we hide
+                // it on older iOS rather than silently demoting the user's
                 // choice. The other three (4:3, 16:9, open gate) work
                 // everywhere via the existing largest-area fallback.
-                Picker("aspect ratio", selection: $aspectRaw) {
+                Picker("aspect", selection: $aspectRaw) {
                     ForEach(availableAspects, id: \.rawValue) { aspect in
                         Text(aspect.displayName).tag(aspect.rawValue)
                     }
                 }
                 .pickerStyle(.menu)
-                Text("9:16 records vertically end-to-end. open gate keeps the full sensor for reframing in post. 1:1 is iphone 17 only.")
+                Text("aspect sets the shape. hold the phone upright for tall, sideways for wide — the recording follows.")
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.dim)
 
@@ -162,18 +163,19 @@ struct RecordingSettingsView: View {
         RecordingFramerate(rawValue: framerateRaw) ?? .fps30
     }
 
-    /// Aspect-ratio cases the picker should show. Filtered to aspects the
+    /// SHAPE cases the picker should show (V3 §07). Four rows, orientation-
+    /// agnostic — the downgrade-safety alias `.legacyVertical9x16` is never
+    /// listed (it is not in the canonical list). Filtered to shapes the
     /// device's front camera actually supports (via `supportedDynamicAspectRatios`
-    /// on iOS 26+, or the pre-iOS-26 native-aspect fallback set). This means
-    /// the user can only select an aspect their hardware can deliver — no
-    /// silent demotions to openGate for unsupported picks.
+    /// on iOS 26+, or the pre-iOS-26 native-aspect fallback set), so the user
+    /// can only select a shape their hardware can deliver — no silent
+    /// demotions to openGate for unsupported picks.
     ///
-    /// Order: 9:16 first (the new social-share default) → 1:1 → 4:3 → 16:9
-    /// → open gate. Matches the canonical UX order in the spec.
+    /// Order: 16:9 (wide) first (the new default) → 4:3 (classic) → 1:1
+    /// (square) → open gate. `.wide` is always supported; only `.square`
+    /// is gated on device declaration of 1:1.
     private var availableAspects: [RecordingAspect] {
-        let canonical: [RecordingAspect] = [
-            .ratio9x16, .ratio1x1, .ratio4x3, .ratio16x9, .openGate
-        ]
+        let canonical: [RecordingAspect] = [.wide, .classic, .square, .openGate]
         let supported = CameraStore.supportedRecordingAspects()
         return canonical.filter { supported.contains($0) }
     }

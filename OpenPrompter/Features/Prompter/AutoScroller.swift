@@ -199,19 +199,27 @@ final class AutoScroller {
         // feel they had before this refactor.
         let gain: CGFloat = 0.9 - normalized * 0.5
         let velocityAlpha: CGFloat = 0.15 - normalized * 0.13
-        // Momentum weight: 0 at tight feather (pure P-controller),
-        // 1 at wide feather (full reading-pace baseline + position
-        // correction). The blend is what gives "wider feather =
-        // momentum sensation" the founder asked for.
+        // Momentum weight: 0 at tight feather (pure P-controller), 1 at wide
+        // feather (full reading-pace baseline + position correction). The
+        // blend gives "wider feather = momentum sensation" and lets a wide
+        // feather keep pace with CONTINUOUS reading (2.0.9 — needed so the
+        // spoken word reaches the read line instead of equilibrating ~125pt
+        // behind). The "constant playback" the founder saw is a PAUSE
+        // overshoot, addressed by the faster momentum decay below + the 1.0s
+        // silence-halt — NOT by weakening this term, which would reintroduce
+        // the wide-feather steady-state lag (VoiceFeatherTests guards it).
         let momentumWeight = normalized
 
-        // 2.0.10 momentum decay: slowly bleed `targetVelocity` so a
-        // mid-sentence pause doesn't keep the prompter rolling forever
-        // (silence-halt at 1.5s from TeleprompterView is the hard
-        // backstop, but a soft decay before that prevents overshoot
-        // when the user takes a breath). Half-life ~0.7s = per-second
-        // factor 0.371. At dt=1/60 that's ~0.984 per frame.
-        let perSecondDecay: CGFloat = 0.371
+        // 2.0.10 momentum decay: bleed `targetVelocity` so a mid-sentence
+        // pause doesn't keep the prompter rolling (silence-halt at 1.0s in
+        // TeleprompterView is the hard backstop; this soft decay settles the
+        // coast BEFORE that, so a breath between phrases doesn't read as
+        // "constant playback" — dogfood feedback). Sped up from half-life
+        // ~0.7s (0.371) to ~0.43s (0.20). Continuous reading re-samples
+        // `targetVelocity` on every match, so keep-pace is intact (the
+        // per-frame moving-target test still converges); only genuine pauses,
+        // where no new match refreshes it, feel the faster bleed.
+        let perSecondDecay: CGFloat = 0.20
         let frameDecay = pow(perSecondDecay, CGFloat(dt))
         targetVelocity *= frameDecay
 

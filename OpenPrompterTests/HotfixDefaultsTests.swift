@@ -2,16 +2,21 @@
 //  HotfixDefaultsTests.swift
 //  OpenPrompterTests
 //
-//  2.0.1 hotfix sanity tests. Validates that the three Labs feature
-//  flags graduated to ON by default and that `cameraStyle` defaults
-//  to `"pip"` so the in-app camera is discoverable without the user
-//  having to find Settings → Labs first. These defaults drive whether
-//  a fresh-installed user sees the camera/recording chips at all,
-//  which is the entire point of the 2.0.1 release.
+//  Registration-domain default sanity tests. Validates that the three
+//  Labs feature flags graduated to ON by default (so a fresh-installed
+//  user sees the camera/recording/remote chips) AND that `cameraStyle`
+//  defaults to `"off"` — the camera is OPT-IN.
 //
-//  These are intentionally brittle: if anyone flips the registration-
-//  domain default back to false / "off" in a future change, this test
-//  fires immediately. The comment in `Prefs.swift` documents the
+//  The camera default was `"pip"` in the 2.0.1 hotfix, but a `.pip`
+//  default auto-mounts a PiP tile on first launch whose preview layer
+//  paints black before any frames flow (the first-run "black box" bug).
+//  The fix flips the default to `"off"` and surfaces an opt-in "enable
+//  camera" coach-mark instead. The Labs flags stay ON so the chip is
+//  still visible for the user to enable the camera whenever they want.
+//
+//  These are intentionally brittle: if anyone flips the camera default
+//  back to `"pip"`, or drops a Labs flag, this test fires immediately.
+//  The comments in `Prefs.swift` / `CameraStyle.swift` document the
 //  reasoning; this test enforces it at CI time.
 //
 
@@ -46,13 +51,41 @@ final class HotfixDefaultsTests: XCTestCase {
         )
     }
 
-    // MARK: - Camera style (2.0.1: discoverable on first open)
+    // MARK: - Camera style (opt-in: no black box on first launch)
 
-    func test_cameraStyle_registrationDefault_isPip() {
+    /// The camera is OPT-IN. A `"pip"` registration default auto-mounts a
+    /// PiP tile on first launch whose `AVCaptureVideoPreviewLayer` paints
+    /// black before frames flow — the first-run "black box" bug. The default
+    /// must be `"off"`; users enable the camera via the coach-mark "enable
+    /// camera" button (which calls `CameraStore.setStyle(.pip)`) or the chip.
+    func test_cameraStyle_registrationDefault_isOff() {
         XCTAssertEqual(
             PrefKey.cameraStyle.defaultValue as? String,
-            "pip",
-            "Default camera mode for fresh installs is PiP — the founder's directive in the 2.0.1 hotfix is that the camera is on by default so the feature is obvious without diving into Settings."
+            "off",
+            "Default camera mode for fresh installs must be OFF — a .pip default auto-mounts a black PiP tile on first launch. The camera is opt-in via the coach-mark. Do NOT flip this back to \"pip\"."
+        )
+    }
+
+    /// The `Prefs.cameraStyle` accessor must also resolve to `"off"` on a
+    /// fresh registration (no persisted value), matching the registration
+    /// default. This guards the read path a `CameraStore.init` takes.
+    func test_cameraStyle_freshRegistration_resolvesToOff() {
+        let suiteName = "HotfixDefaultsTests.cameraStyle.\(UUID().uuidString)"
+        guard let store = UserDefaults(suiteName: suiteName) else {
+            XCTFail("could not create isolated UserDefaults suite")
+            return
+        }
+        defer { store.removePersistentDomain(forName: suiteName) }
+        // Register the same registration-domain defaults into the isolated
+        // suite, then read the camera style out. No user has written a value,
+        // so the registration default is what surfaces.
+        store.register(defaults: [
+            PrefKey.cameraStyle.rawValue: PrefKey.cameraStyle.defaultValue
+        ])
+        XCTAssertEqual(
+            store.string(forKey: PrefKey.cameraStyle.rawValue),
+            "off",
+            "A fresh registration with no persisted value must resolve camera style to off."
         )
     }
 

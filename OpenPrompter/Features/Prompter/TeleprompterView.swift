@@ -8,6 +8,7 @@
 //  always readable regardless of flip state.
 //
 
+import AVFoundation
 import SwiftUI
 
 struct TeleprompterView: View {
@@ -25,6 +26,14 @@ struct TeleprompterView: View {
     @State private var keyboardSource: KeyboardEventSource?
     @State private var mediaSource: MediaCommandSource?
     @State private var volumeSource: VolumeEventSource?
+    /// Focus-independent keyboard source (audit fix 2 / R2). Delivers keys via
+    /// `GCKeyboard.coalesced` without SwiftUI first responder, so a mounted
+    /// phone that loses focus still navigates. `.onKeyPress` stays as fallback.
+    @State private var gcKeyboardSource: GameControllerKeyboardSource?
+    /// Pointer / trackpad source (BLE-M5 Capture.md). The founder's D-pad is a
+    /// Bluetooth trackpad emitting pointer axes + digitizer taps, not arrow
+    /// keys — `GCMouse` is what makes it navigate.
+    @State private var gcMouseSource: GCMouseSource?
     /// Editor sheet visibility — bound to the new bottom-row Edit chip.
     /// Lived in PrompterTopBarView before the dogfood-pass-2 control move.
     @State private var showEditor: Bool = false
@@ -184,6 +193,14 @@ struct TeleprompterView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Left-edge read-position bar (classic green) — a page-scrollbar
+        // "where am I in the script" glance. Mounted outside the mirrored
+        // text so it never flips; purely informational.
+        .overlay(alignment: .leading) {
+            ReadingProgressBar(fraction: vm.readFraction)
+                .padding(.leading, 3)
+                .padding(.vertical, 6)
+        }
         // Read PipTile's hidden state so any future "dim peer chrome when
         // the tile is tucked away" affordance has a hook. The camera
         // preview itself lives inside `PipTile` now (dogfood-pass-11
@@ -288,15 +305,32 @@ struct TeleprompterView: View {
             )
         }
         // Hardware capture buttons (V2 Design 02 §"Hardware capture
-        // buttons"). The interaction is enabled whenever the recording chip
-        // is visible — volume / Camera Control / Action button start the
-        // countdown / cancel / stop, mirroring the chip taps. Disabled
-        // gracefully on iOS <17.2; the camera chip-only path stays clean.
+        // buttons") — UNIFIED with the Bluetooth-remote binding system in v3.
+        //
+        // SUPERSEDES the old CLAUDE.md / audit note "do NOT reroute
+        // HardwareCaptureBridge.onPrimary to a bound action." The founder
+        // explicitly decided "the wizard decides everything": every button,
+        // INCLUDING the hardware shutter, is freely bindable and must be able
+        // to do Play/Pause (the default) or Record or anything else. So the
+        // hardware shutter press no longer hardwires to `handleRecordingChipTap`
+        // — it publishes the SHUTTER's bound event (`.volumeUp` key, the same
+        // canonical "shutter pressed" key VolumeEventSource uses) through the
+        // binding store onto the shared bus. `.recordToggle` is a bindable
+        // event, so a user who wants the shutter to record binds the wizard's
+        // RECORD slot to it; the default binding is play/pause.
+        //
+        // Camera-on uses THIS bridge (AVCaptureEventInteraction, which needs a
+        // live capture session); camera-off uses VolumeEventSource (KVO, opt-in
+        // per App Store 2.5.9). Both feed the same binding system, so the
+        // shutter behaves identically either way. Enabled whenever the camera
+        // is on (a session is running for the interaction to fire against) AND
+        // the master remote toggle is on — no longer gated on labs recording,
+        // since the shutter now does more than record.
         .background(
             HardwareCaptureBridge(
-                isEnabled: showRecordingChip,
-                onPrimary: { handleRecordingChipTap() },
-                onSecondary: { handleRecordingChipTap() }
+                isEnabled: hardwareCaptureEnabled,
+                onPrimary: { handleHardwareShutter() },
+                onSecondary: { handleHardwareShutter() }
             )
             .frame(width: 0, height: 0)
             .allowsHitTesting(false)
@@ -377,6 +411,10 @@ struct TeleprompterView: View {
                     // (offset increases), so invert the translation sign.
                     let target = baseline - value.translation.height
                     vm.scroller.seek(to: target, maxOffset: vm.maxScrollOffset)
+                    // Manual scroll can also cross a marker block while
+                    // recording (e.g. dragging through a section). Dedupe keeps
+                    // it from double-marking against the ticker path.
+                    dispatchScriptMarkersIfRecording()
                 }
                 .onEnded { value in
                     let baseline = manualScrollBaseline
@@ -419,6 +457,11 @@ struct TeleprompterView: View {
         .focusEffectDisabled()
         .onKeyPress(phases: .down) { press in
             guard remoteEnabled, let src = keyboardSource else { return .ignored }
+            // Avoid double-fire: when the focus-free GameController keyboard
+            // is actively delivering, it owns keypresses and this SwiftUI
+            // fallback stands down. The fallback only handles the
+            // first-connect gap before GameController registers the keyboard.
+            if gcKeyboardSource?.isDeliveringKeys == true { return .ignored }
             return src.handle(press)
         }
         .task { await vm.load() }
@@ -439,7 +482,13 @@ struct TeleprompterView: View {
                 if volumeSource == nil {
                     volumeSource = VolumeEventSource(
                         bus: vm.remoteBus,
-                        store: appState.remoteBindings
+                        store: appState.remoteBindings,
+                        onActivationFailure: { message in
+                            // Fix 1a (audit A4): surface the previously-
+                            // swallowed audio-session activation failure so
+                            // the user knows the volume remote isn't listening.
+                            appState.userFacingError = message
+                        }
                     )
                 }
                 volumeSource?.start()
@@ -451,6 +500,25 @@ struct TeleprompterView: View {
             // Construct event sources once and start the always-on ones.
             // The keyboard source has no lifecycle of its own (it's driven
             // by .onKeyPress); media commands attach until prompter exits.
+            // Route a `.recordToggle` remote event to the SAME dispatch the
+            // on-screen REC chip and hardware shutter use. Recording lives on
+            // AppState (not the per-script VM), so the VM calls back through
+            // this closure. Gated on `showRecordingChip` so a record binding
+            // is inert when the recording chip isn't on screen — exactly like
+            // the on-screen chip, which isn't shown then. Keeps the on-screen
+            // REC button fully independent of this path (DO-NOT: remove it).
+            vm.onRecordToggle = {
+                guard showRecordingChip else { return }
+                handleRecordingChipTap()
+            }
+            // Hands-free video marker (V3 headline, H0a). Routes a bound
+            // `.dropMarker` remote press to the SAME `tapMark()` the on-screen
+            // MARK chip uses. `tapMark()` is itself a no-op outside `.recording`,
+            // so this is safe to leave wired regardless of chip visibility.
+            vm.onDropMarker = {
+                appState.recordingSession.tapMark()
+            }
+
             keyboardSource = KeyboardEventSource(
                 bus: vm.remoteBus,
                 store: appState.remoteBindings
@@ -460,7 +528,37 @@ struct TeleprompterView: View {
                 store: appState.remoteBindings
             )
             mediaSource = media
-            if remoteEnabled { media.start() }
+
+            // Focus-independent sources (audit fix 2 / BLE-M5): a
+            // GameController keyboard that survives focus loss, and a
+            // GCMouse source for pointer/trackpad remotes (the founder's
+            // D-pad). Both publish onto the same per-VM bus. `onCapture`
+            // feeds the honest connection chip on the first real event.
+            let gcKeyboard = GameControllerKeyboardSource(
+                bus: vm.remoteBus,
+                store: appState.remoteBindings,
+                onCapture: { [monitor = appState.keyboardMonitor] _ in
+                    monitor.noteRemoteEvent()
+                }
+            )
+            gcKeyboardSource = gcKeyboard
+            let gcMouse = GCMouseSource(
+                bus: vm.remoteBus,
+                store: appState.remoteBindings,
+                onCapture: { [monitor = appState.keyboardMonitor] _ in
+                    monitor.noteRemoteEvent()
+                },
+                onScrollCapture: { [monitor = appState.keyboardMonitor] _ in
+                    monitor.noteRemoteEvent()
+                }
+            )
+            gcMouseSource = gcMouse
+
+            if remoteEnabled {
+                media.start()
+                gcKeyboard.start()
+                gcMouse.start()
+            }
 
             // Take focus so .onKeyPress fires. Set after sources exist so
             // the first key press doesn't race the instantiation.
@@ -470,6 +568,23 @@ struct TeleprompterView: View {
             // Drain remote events into the view model. Lives for the
             // duration of this view; the bus is per-VM and ends with it.
             for await event in vm.remoteBus.events {
+                // Honest chip (audit fix 5): the first event from ANY source
+                // proves a remote reaches the app, even a media/volume remote
+                // that presents as neither keyboard nor mouse.
+                appState.keyboardMonitor.noteRemoteEvent()
+                // Voice owns playback while active, so drop `.playPause` here.
+                // This is the ROOT CAUSE of "select voice → the play button
+                // turns green and disabling voice starts scrolling": when
+                // voice starts its AVAudioEngine the audio session activates,
+                // and iOS issues a `play`/`togglePlayPause` media command to us
+                // (the now-playing app). MediaCommandSource republishes it as
+                // `.playPause`, which used to `togglePlay()` mid-voice. Drop it
+                // silently (no conflict flash) so voice activation never shows a
+                // phantom green play button — the deliberate on-screen play
+                // button still flashes the conflict via handlePlayTap.
+                if case .playPause = event, appState.voiceTracker.isActive {
+                    continue
+                }
                 vm.handleRemoteEvent(event)
             }
         }
@@ -491,9 +606,13 @@ struct TeleprompterView: View {
             // when the user has the volume opt-in on.
             if newValue {
                 mediaSource?.start()
+                gcKeyboardSource?.start()
+                gcMouseSource?.start()
                 if useVolumeButtons { volumeSource?.start() }
             } else {
                 mediaSource?.stop()
+                gcKeyboardSource?.stop()
+                gcMouseSource?.stop()
                 volumeSource?.stop()
             }
         }
@@ -535,6 +654,15 @@ struct TeleprompterView: View {
                 playSessionStartedAt = nil
             }
         }
+        .onChange(of: appState.recordingState.isRecording) { _, nowRecording in
+            // At the START of each take, seed the script-marker dedupe set
+            // (V3 headline, H0b) so a heading already scrolled past the reading
+            // line doesn't retroactively mark, and so a fresh take re-marks
+            // every heading it crosses. Only fires on the false→true edge.
+            if nowRecording {
+                vm.resetScriptMarkerDedupe()
+            }
+        }
         .onChange(of: scenePhase) { _, newPhase in
             // Stop the session on background to extinguish the privacy LED;
             // resume on foreground if the mode demands it. iOS will already
@@ -543,6 +671,12 @@ struct TeleprompterView: View {
             switch newPhase {
             case .active:
                 Task { await appState.cameraStore.resume() }
+                // Audit fix 2 / B1: re-assert keyboard focus on return to
+                // foreground so the .onKeyPress fallback recovers after a
+                // sheet / backgrounding stole first responder. The GC
+                // sources are focus-independent, but the fallback path
+                // needs focus back to be useful.
+                if remoteEnabled { prompterFocused = true }
                 // Feature 8: ask for an App Store review on a fresh
                 // foreground if the user has crossed the engagement
                 // threshold. The controller's predicate is the gate; this
@@ -625,6 +759,8 @@ struct TeleprompterView: View {
         }
         .onDisappear {
             mediaSource?.stop()
+            gcKeyboardSource?.stop()
+            gcMouseSource?.stop()
             volumeSource?.stop()
             prompterFocused = false
             Task { await appState.cameraStore.suspend() }
@@ -750,25 +886,24 @@ struct TeleprompterView: View {
                 .lineSpacing(vm.fontSize * 0.2)
                 .frame(maxWidth: .infinity, alignment: .center)
 
-        case .paragraph(let text):
-            Text(text)
-                .font(prompterFont.swiftUIFont(size: vm.fontSize, weight: .regular))
+        case .paragraph(let styled):
+            styledBodyText(styled)
                 .tracking(bodyTracking)
                 .foregroundStyle(Theme.fg)
                 .multilineTextAlignment(.center)
                 .lineSpacing(vm.fontSize * 0.45)
                 .frame(maxWidth: .infinity, alignment: .center)
 
-        case .bullet(let text):
-            listRow(marker: "▸", text: text)
+        case .bullet(let styled):
+            listRow(marker: "▸", text: styled)
 
-        case .numbered(let index, let text):
-            listRow(marker: "\(index).", text: text)
+        case .numbered(let index, let styled):
+            listRow(marker: "\(index).", text: styled)
         }
     }
 
     @ViewBuilder
-    private func listRow(marker: String, text: String) -> some View {
+    private func listRow(marker: String, text: StyledText) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: vm.fontSize * 0.35) {
             // Bullet markers stay monospace so numbers / arrows line up
             // regardless of the body font. It's a structural element,
@@ -776,8 +911,7 @@ struct TeleprompterView: View {
             Text(marker)
                 .font(.system(size: vm.fontSize, weight: .bold, design: .monospaced))
                 .foregroundStyle(Theme.green)
-            Text(text)
-                .font(prompterFont.swiftUIFont(size: vm.fontSize, weight: .regular))
+            styledBodyText(text)
                 .tracking(bodyTracking)
                 .foregroundStyle(Theme.fg)
                 .multilineTextAlignment(.leading)
@@ -785,6 +919,25 @@ struct TeleprompterView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, vm.fontSize * 0.25)
+    }
+
+    /// Compose a `Text` from a block's styled runs, applying the body font at
+    /// the per-run weight / slant so `**bold**` and `*italic*` render with the
+    /// markers gone but the emphasis intact (GitHub #3). Inline-code runs use
+    /// the body font too — current behavior — so only weight and slant vary.
+    /// A single unstyled run renders identically to the pre-#3 `Text(plain)`.
+    private func styledBodyText(_ styled: StyledText) -> Text {
+        guard !styled.runs.isEmpty else { return Text(verbatim: styled.plain) }
+        var result = Text(verbatim: "")
+        for run in styled.runs {
+            let font = prompterFont.swiftUIFont(
+                size: vm.fontSize,
+                weight: run.bold ? .bold : .regular,
+                italic: run.italic
+            )
+            result = result + Text(verbatim: run.text).font(font)
+        }
+        return result
     }
 
     /// Negative tracking works for monospace (tightens the loose default
@@ -883,6 +1036,28 @@ struct TeleprompterView: View {
         let raw = Prefs.recordingIndicator
         let pref = RecordingIndicatorPref(rawValue: raw) ?? .both
         return pref.showsTallyLight
+    }
+
+    /// True when the hardware capture bridge should be listening: the camera
+    /// is on (an AVCaptureSession is running for `AVCaptureEventInteraction`
+    /// to fire against — it's inert without one) AND the master remote toggle
+    /// is on. NO LONGER requires labs recording, because the hardware shutter
+    /// now performs its BOUND action (default play/pause), not just record.
+    private var hardwareCaptureEnabled: Bool {
+        remoteEnabled && cameraStyle != .off
+    }
+
+    /// Hardware shutter press (volume / Camera Control / Action button while
+    /// the camera is on). Routes through the SAME binding system as every
+    /// other remote source: resolve the shutter's bound event via `.volumeUp`
+    /// (the canonical "shutter pressed" key, matching `VolumeEventSource`) and
+    /// publish it onto the prompter's bus. Default binding is play/pause; a
+    /// user who bound the wizard's RECORD slot to the shutter gets recording.
+    /// The honest-chip latch fires through the normal bus consumer.
+    private func handleHardwareShutter() {
+        guard remoteEnabled else { return }
+        guard let event = appState.remoteBindings.event(for: .volumeUp) else { return }
+        vm.remoteBus.publish(event)
     }
 
     /// Single dispatch point for chip taps + hardware capture button
@@ -994,15 +1169,42 @@ struct TeleprompterView: View {
         .padding(.horizontal, 10)
     }
 
+    /// First-run opt-in pop-up for the in-app camera. The camera default is
+    /// `.off` (see `Prefs.cameraStyle`) so a fresh install shows no black PiP
+    /// tile. This banner offers a primary "enable camera" action that flips
+    /// the style to `.pip` through the existing permission-gated
+    /// `CameraStore.setStyle(.pip)` path (permission prompt → optimistic flip
+    /// → session start). The X dismisses without enabling. Either action marks
+    /// `coachMarkShown` so we only surface this once.
     @ViewBuilder
     private var cameraIntroBanner: some View {
         HStack(spacing: 8) {
             Image(systemName: "camera")
                 .font(.system(size: 13, weight: .bold))
-            Text("try the new camera modes — tap the camera chip below")
+            Text("try the new camera recording")
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 .tracking(0.5)
-            Spacer()
+            Spacer(minLength: 6)
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showCameraIntroBanner = false
+                }
+                coachMarkShown = true
+                // Go through the same working path the chip uses: permission
+                // gate → optimistic style flip → session start. On denial the
+                // store snaps back to .off and raises the denied banner.
+                Task { await appState.cameraStore.setStyle(.pip) }
+            } label: {
+                Text("enable camera")
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .tracking(0.5)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Theme.green.opacity(0.22), in: Capsule())
+                    .overlay(Capsule().stroke(Theme.green.opacity(0.7), lineWidth: 1))
+                    .foregroundStyle(Theme.fg)
+            }
+            .buttonStyle(.plain)
             Button {
                 withAnimation(.easeInOut(duration: 0.18)) {
                     showCameraIntroBanner = false
@@ -1045,27 +1247,48 @@ struct TeleprompterView: View {
     }()
 
     /// Centralized chip strip — Edit + Sync + (Camera Style) + (REC) +
-    /// Mirror status, in that order. Camera Style and REC are conditional
-    /// on Labs/style state; Edit/Sync/Mirror always render so the user has
-    /// a stable visual frame for the strip.
+    /// (Mark) + Mirror status, left to right. Camera Style / REC / Mark are
+    /// conditional on Labs/style/record state; Edit + Sync + Mirror always
+    /// render so the strip has a stable frame.
+    ///
+    /// Layout: the active cluster (edit, sync, camera, REC, mark) is LEFT-
+    /// anchored and the mirror pill is pinned right by a single Spacer — so
+    /// nothing re-centers when Mark appears mid-take or the sync label
+    /// changes width (the "buttons move around" report). The two passive
+    /// status chips (sync, mirror) carry a negative layoutPriority so they
+    /// yield/truncate first, keeping the REC timer, Mark button, and camera
+    /// chip un-truncated on every iPhone width including SE.
+    ///
+    /// CAMERA-OFF exception (Bug 1): when the camera is off, the left-anchored
+    /// "no camera" chip is replaced by a single CENTERED "enable camera"
+    /// button (balanced Spacers either side — reflow-safe on SE, no ZStack
+    /// overlap). Tapping it turns the camera on (→ pip), which flips
+    /// `cameraStyle` so this strip re-renders into the ON layout and the
+    /// button "pops out" into the pip toggle + REC in their normal spots.
     @ViewBuilder
     private var bottomChipStrip: some View {
-        HStack(spacing: 8) {
-            editChip
-            syncChip
-            Spacer(minLength: 4)
-            if showCameraChip {
-                CameraStyleChip(store: appState.cameraStore)
+        ZStack {
+            // Side anchors: edit + sync pinned LEFT, mirror pinned RIGHT.
+            // These stay put in every state so the row has a stable frame and
+            // the mirror never collides with the centered controls.
+            HStack(spacing: 8) {
+                editChip
+                syncChip
+                    .layoutPriority(-1)
+                Spacer(minLength: 8)
+                mirrorStatusPill
+                    .layoutPriority(-1)
             }
-            if showRecordingChip {
-                RecordingChip(state: appState.recordingState) {
-                    handleRecordingChipTap()
-                }
-            }
-            Spacer(minLength: 4)
-            mirrorStatusPill
+            // Camera controls CENTERED on the full row — dead over the
+            // Play|Voice split directly below — consistently whether the
+            // camera is off (a single "enable camera" button) or on (the pip
+            // toggle + REC + mid-take Mark cluster). Centering BOTH states was
+            // the dogfood ask: the ON cluster used to be left-anchored, which
+            // left a weird gap on the right.
+            centeredCameraControls
         }
         .padding(.horizontal, 10)
+        .animation(.easeInOut(duration: 0.18), value: cameraStyle)
         .sheet(isPresented: $showEditor) {
             ScriptEditorSheet(
                 file: vm.file,
@@ -1085,6 +1308,71 @@ struct TeleprompterView: View {
         }
     }
 
+    /// The camera controls that sit CENTERED in `bottomChipStrip` — the
+    /// "enable camera" button when the camera is off, or the pip toggle + REC
+    /// + (mid-take) Mark cluster when it's on. Centering both states keeps the
+    /// camera affordance aligned with the Play|Voice split below. Empty when
+    /// the camera UI is hidden and nothing is recording.
+    @ViewBuilder
+    private var centeredCameraControls: some View {
+        if showCameraChip && cameraStyle == .off {
+            enableCameraButton
+        } else if showCameraChip || showRecordingChip {
+            HStack(spacing: 8) {
+                if showCameraChip {
+                    CameraStyleChip(store: appState.cameraStore)
+                }
+                if showRecordingChip {
+                    RecordingChip(state: appState.recordingState) {
+                        handleRecordingChipTap()
+                    }
+                    // Manual marker chip (V3 headline, H0a). Appears next to
+                    // REC only while a take is in progress — one tap drops a
+                    // marker into the .mov at the current frame.
+                    if appState.recordingState.isRecording {
+                        MarkChip(state: appState.recordingState) {
+                            appState.recordingSession.tapMark()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Camera-OFF affordance (Bug 1). A prominent, centered "enable camera"
+    /// pill shown in place of the left-anchored pip toggle when the camera is
+    /// off. Tapping runs the SAME permission-gated path the chip and the
+    /// first-run banner use (`CameraStore.setStyle(.pip)`): on grant the
+    /// camera turns on and `cameraStyle` flips to `.pip`, which re-renders
+    /// `bottomChipStrip` into its ON layout (pip toggle + REC in their normal
+    /// positions) so the button visually "pops out" into those controls; on
+    /// denial the store snaps back to `.off` and raises the denied banner.
+    @ViewBuilder
+    private var enableCameraButton: some View {
+        Button {
+            Task {
+                await appState.cameraStore.setStyle(.pip)
+                Haptics.tap()
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "camera.fill")
+                    .font(.system(size: 12, weight: .bold))
+                Text("enable camera")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .tracking(0.8)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .frame(minHeight: Theme.hitMin)
+            .foregroundStyle(Theme.fg)
+            .glassSurface(in: Capsule())
+            .contentShape(Capsule())
+        }
+        .accessibilityLabel("enable camera")
+        .accessibilityHint("turns on the picture-in-picture camera")
+    }
+
     /// Edit chip — pencil glyph. Tap pauses any in-flight playback and
     /// presents the script editor sheet.
     @ViewBuilder
@@ -1099,10 +1387,9 @@ struct TeleprompterView: View {
         }) {
             Image(systemName: "pencil")
                 .font(.system(size: 13, weight: .bold))
-                .frame(width: 36, height: 32)
-                .background(Theme.surface, in: Capsule())
                 .foregroundStyle(Theme.fg)
-                .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+                .frame(width: 36, height: 32)
+                .glassSurface(in: Capsule())
                 .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
         }
@@ -1128,8 +1415,7 @@ struct TeleprompterView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .frame(minHeight: Theme.hitMin)
-                .background(Theme.surface, in: Capsule())
-                .overlay(Capsule().stroke(Theme.amber.opacity(0.6), lineWidth: 1))
+                .glassSurface(in: Capsule())
             }
         } else if let mtime = vm.fileMTime {
             // After the dogfood-pass-2 strip move there's less width to
@@ -1153,7 +1439,9 @@ struct TeleprompterView: View {
             if vm.mirroredHorizontal || vm.mirroredVertical {
                 Pill(text: mirrorPillText, alert: true)
             } else {
-                Pill(text: "MIRROR OFF")
+                // Off state reads just "MIRROR" (no "OFF") — the alert tint is
+                // absent, which already signals off; the word is the control.
+                Pill(text: "MIRROR")
             }
         }
         .accessibilityLabel("Toggle horizontal mirror")
@@ -1191,8 +1479,15 @@ struct TeleprompterView: View {
     /// tracking first (mutually exclusive) then runs the existing play
     /// toggle.
     private func handlePlayTap() {
+        // Play and voice are mutually-exclusive scroll drivers. While voice
+        // is active the play button is BLOCKED: flash the red conflict (the
+        // same signal as tapping the prompter) rather than silently cancelling
+        // voice and starting playback. To play, the user turns voice off
+        // first. (Dogfood: pressing the play button "cancelled the voice
+        // recording instead of flashing red".)
         if appState.voiceTracker.isActive {
-            appState.voiceTracker.stop()
+            vm.flashPlayTapConflict()
+            return
         }
         vm.togglePlay()
     }
@@ -1274,18 +1569,23 @@ struct TeleprompterView: View {
             bodyTopPad: topPad,
             bodyHeight: bodyHeight
         )
-        Task {
-            // 2.0.4: voice tracking owns its own AVAudioEngine input
-            // tap; this call is now a no-op when camera is off (its
-            // own guard skips when there's no camera audio output to
-            // attach). Kept so a SIMULTANEOUS recording flow gets the
-            // shared mic path through the recorder's writer.
-            await session.ensureAudioCaptureRunning()
-            if !tracker.start() {
-                appState.userFacingError =
-                    "Couldn't start voice tracking. Try again in a moment."
-            }
+        // Flip `isActive` SYNCHRONOUSLY (start() sets it) before this tap
+        // returns. Previously start() ran inside the Task below, AFTER an
+        // `await` — leaving a window where the prompter-tap and play-button
+        // conflict checks saw `isActive == false` and toggled play instead
+        // (the "voice activation turns the play button green, and disabling
+        // voice starts playback" dogfood report). Voice owns its own
+        // AVAudioEngine tap, so start() does not depend on the recorder's
+        // shared-mic bring-up below.
+        guard tracker.start() else {
+            appState.userFacingError =
+                "Couldn't start voice tracking. Try again in a moment."
+            return
         }
+        // Bring up the recorder's shared mic path for a SIMULTANEOUS
+        // recording flow (a no-op when the camera is off). Fire-and-forget —
+        // not on the critical path for voice's own tap.
+        Task { await session.ensureAudioCaptureRunning() }
     }
 
     /// Translate a cursor advance into a target scroll offset.
@@ -1372,14 +1672,49 @@ struct TeleprompterView: View {
     /// Per-frame ticker — handles BOTH play auto-scroll AND voice-
     /// tracking lerp-toward-target. Called from the TimelineView in
     /// `body`.
+    /// Emit script markers (V3 headline, H0b) for any heading / `[MARK]` cue
+    /// block that just crossed the reading eye-line — but ONLY while a real
+    /// take is recording. Reads REAL scroll geometry via the VM, so it fires
+    /// correctly under constant-speed AND voice-tracked scroll, and dedupes
+    /// re-crossings on scroll-back. Cheap no-op when not recording (the guard
+    /// short-circuits before any geometry walk).
+    private func dispatchScriptMarkersIfRecording() {
+        guard appState.recordingState.isRecording else { return }
+        let crossings = vm.scriptMarkersCrossingEyeLine()
+        guard !crossings.isEmpty else { return }
+        for crossing in crossings {
+            // The marker anchors to the live capture clock inside the session;
+            // `at:` is retained for API shape only. `.zero` is a fine sentinel.
+            appState.recordingSession.appendChapter(title: crossing.title, at: .zero)
+        }
+    }
+
     private func handleScrollTick(now: Date) {
-        if vm.isPlaying {
+        // Invariant backstop: voice and play are mutually exclusive. If any
+        // stray input flipped isPlaying while voice is active (e.g. a media
+        // `play` command that raced voice's audio bring-up before the
+        // dispatch-site drop could see isActive), clear it every tick — so the
+        // play button can't sit green under voice, and disabling voice can't
+        // resume a phantom play. The dispatch-site `.playPause` drop is the
+        // primary fix; this guarantees the invariant frame-by-frame.
+        if appState.voiceTracker.isActive && vm.isPlaying {
+            vm.isPlaying = false
+        }
+        // Play auto-scroll and voice tracking are mutually-exclusive scroll
+        // drivers. The button handlers enforce it, but gate the constant-speed
+        // advance on `!isActive` too so it can NEVER run underneath voice —
+        // the invariant backstop for the "voice tracking also has a constant
+        // playback" report.
+        if vm.isPlaying && !appState.voiceTracker.isActive {
             let delta = vm.scroller.advance(now: now, speed: vm.speed)
             vm.scroller.apply(delta: delta, maxOffset: vm.maxScrollOffset)
             if vm.scroller.didReachEnd {
                 vm.isPlaying = false
             }
         }
+        // Script-marker crossings (H0b). Runs every tick while playing or
+        // voice-tracking; the internal recording gate makes it inert otherwise.
+        dispatchScriptMarkersIfRecording()
         if appState.voiceTracker.isActive {
             // Keep the aligner's visible-range constraint in sync with
             // current scroll geometry so a generic word can't match an
@@ -1395,12 +1730,14 @@ struct TeleprompterView: View {
                 bodyHeight: bodyHeightTick
             )
             // Silence detection: if no successful match in the last
-            // 1.5s, halt momentum so a paused user can scroll back to
+            // 1.0s, halt momentum so a paused user can scroll back to
             // re-read a section without the prompter pulling forward.
-            // The next match will set a fresh target and the velocity
-            // controller will ramp up smoothly from zero.
+            // Tightened from 1.5s → 1.0s so the scroll settles sooner when
+            // you stop speaking ("stagnant until words" — dogfood feedback).
+            // The next match sets a fresh target and the velocity controller
+            // ramps up smoothly from zero.
             let elapsedSinceMatch = Date().timeIntervalSince(appState.voiceTracker.lastMatchTime)
-            if elapsedSinceMatch > 1.5 {
+            if elapsedSinceMatch > 1.0 {
                 if vm.voiceTargetOffset != nil {
                     vm.voiceTargetOffset = nil
                     vm.scroller.resetVoiceVelocity()

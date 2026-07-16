@@ -167,14 +167,23 @@ final class PreviewView: UIView {
         }
 
         let shape = bufferShape ?? .landscape
+        // Derive the front-sensor generation hint from the live model id
+        // (synchronous, race-free). GitHub #2: the iPhone-13-Pro-class
+        // (`.wideFrontSensor`) preview needs a different angle than the
+        // verified iPhone-17-class (`.squareFrontSensor`) baseline. See
+        // OrientationPolicy.previewRotationAngle and V3 Design 06.
+        let device = OrientationPolicy.DeviceGenerationHint.from(
+            modelIdentifier: OrientationPolicy.currentDeviceModelIdentifier
+        )
         let targetAngle = OrientationPolicy.previewRotationAngle(
             for: aspect,
-            bufferShape: shape
+            bufferShape: shape,
+            device: device
         )
 
         #if DEBUG
         behindLog.info(
-            "preview rotation: aspect=\(aspect.rawValue, privacy: .public) shape=\(shape.rawValue, privacy: .public) source=\(sourceTag, privacy: .public) angle=\(targetAngle, privacy: .public)"
+            "preview rotation: aspect=\(aspect.rawValue, privacy: .public) shape=\(shape.rawValue, privacy: .public) device=\(device.rawValue, privacy: .public) source=\(sourceTag, privacy: .public) angle=\(targetAngle, privacy: .public)"
         )
         #endif
 

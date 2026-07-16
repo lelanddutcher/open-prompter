@@ -26,6 +26,10 @@ enum UbiquitousPrefsMirror {
         .vMirrorDefault,
         .focusDefault,
         .aggressiveStripping,
+        // Stage-direction / camera-cue display stripping (V3 item 4). A
+        // display-formatting preference the user expects to follow them across
+        // devices, so it mirrors alongside `aggressiveStripping`.
+        .stripStageDirections,
         .appearance,
         // Camera Style + PiP (V2 Feature 1). The labs flag and the coach
         // mark stay device-local: a flag that's on for one device shouldn't
@@ -49,7 +53,21 @@ enum UbiquitousPrefsMirror {
         .recordingCountdown,
         .recordingIndicator,
         .recordingSaveToScriptFolder,
-        .recordingAspect
+        .recordingAspect,
+        // Video markers (V3 headline). Both marker-output toggles travel with
+        // the user — a creator's "write markers" preference is not per-device.
+        .recordingMarkerMetadataTrack,
+        .recordingMarkerChapterTrack,
+        // On-device Format (V3 item C). Only the three prompt strings
+        // mirror — they're small text and the user expects an edited prompt
+        // to follow them across devices. The `labsFormat` flag and
+        // `coachMarkFormatShown` stay device-local (capability + "seen once"
+        // are per-device, matching the labs / coach-mark pattern). The custom
+        // preset NAME travels alongside its prompt.
+        .formatPromptFormatOverride,
+        .formatPromptCleanupOverride,
+        .formatPromptCustom,
+        .formatCustomName
     ]
 
     private static var observerToken: NSObjectProtocol?
