@@ -112,7 +112,7 @@ set your development team in signing, then run on a simulator or device.
 - `NSMetadataQuery` on `NSMetadataQueryUbiquitousDocumentsScope` for live file detection
 - `UIDocumentPickerViewController` + security-scoped bookmarks for the "pick once" folder access pattern
 - `TimelineView(.animation)` for frame-rate-independent auto-scroll and the velocity-controlled voice-tracking lerp
-- `AVCaptureSession` with pre-attached `AVCaptureVideoDataOutput` + `AVCaptureAudioDataOutput`; `AVAssetWriter` is built lazily on the first sample buffer for clean orientation, with an `OrientationPolicy` table mapping `(aspect, bufferShape)` → writer transform — see [`CLAUDE.md`](./CLAUDE.md) for the iPhone 17 + iOS 26 quirk write-up
+- `AVCaptureSession` with pre-attached `AVCaptureVideoDataOutput` + `AVCaptureAudioDataOutput`; `AVAssetWriter` is built lazily on the first sample buffer for clean orientation, with an `OrientationPolicy` table mapping `(aspect, bufferShape)` → writer transform (handles the iPhone 17 + iOS 26 front-camera orientation quirks)
 - `SFSpeechRecognizer` (on-device) drives voice tracking; a custom `ScriptAligner` does word-level Levenshtein + double-metaphone phonetic folding + locality-biased matching so common words don't teleport you to the end of the script
 - `OSAllocatedUnfairLock<WriterState>` guards cross-thread writer state in `RecordingSession` (one lock around a 12-property struct, not 12 individual `nonisolated(unsafe)` fields)
 - `SwiftData` (with CloudKit off) for the recents cache, `@AppStorage` + `NSUbiquitousKeyValueStore` for preferences, `ActivityKit` for the recording Live Activity
@@ -124,7 +124,7 @@ set your development team in signing, then run on a simulator or device.
 
 ## contributing
 
-PRs welcome. issues tagged `good-first-issue` are a safe entry point. see [`CONTRIBUTING.md`](./CONTRIBUTING.md). project-internal lessons (especially around the iPhone 17 + iOS 26 camera orientation quirks, the voice-tracking algorithm, and the recording / writer state machine) are in [`CLAUDE.md`](./CLAUDE.md). that file is the cheat sheet — read it before opening a camera-related PR.
+PRs welcome. issues tagged `good-first-issue` are a safe entry point. see [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the workflow, code style, and the areas that most need care — the iPhone 17 + iOS 26 camera orientation quirks, the voice-tracking algorithm, and the recording / writer state machine.
 
 ## support the project
 

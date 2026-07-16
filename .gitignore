@@ -63,3 +63,6 @@ claude design zip export/
 
 # Local-only audio recordings used for voice-tracking dogfood; not shipped.
 script read audio/
+
+# Internal dev handoff doc — kept local, not public (device UDIDs + process notes).
+CLAUDE.md
