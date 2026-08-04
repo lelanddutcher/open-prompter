@@ -71,7 +71,7 @@ struct OnboardingView: View {
                             .tracking(0.5)
                     }
                 }
-                .frame(maxWidth: .infinity)
+                .padContentWidth()
                 .frame(height: Theme.hitCTA)
                 .background(Theme.green)
                 .foregroundStyle(Color(red: 0.03, green: 0.09, blue: 0.05))

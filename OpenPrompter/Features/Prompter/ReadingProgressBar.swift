@@ -16,7 +16,11 @@ struct ReadingProgressBar: View {
     /// Read position through the script, 0 (top) … 1 (end).
     let fraction: CGFloat
 
-    private let barWidth: CGFloat = 3
+    /// Hairline. Halved from 3 pt in 3.1 — at 3 pt the bar read as chrome
+    /// competing with the script; 1.5 pt is a glanceable hint and nothing
+    /// more. Whether it shows at all is `Prefs.showReadingProgressBar`,
+    /// gated at the mount site in `TeleprompterView`.
+    private let barWidth: CGFloat = 1.5
 
     private var clamped: CGFloat { min(max(fraction, 0), 1) }
 

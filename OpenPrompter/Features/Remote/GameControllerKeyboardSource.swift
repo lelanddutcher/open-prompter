@@ -156,12 +156,14 @@ final class GameControllerKeyboardSource: RemoteEventSource {
     /// look up the bound event, and publish. `internal` so unit tests can
     /// exercise the mapping + publish path without a live keyboard.
     func handle(keyCode: GCKeyCode) {
-        guard let remoteKey = Self.remoteKey(from: keyCode) else {
-            #if DEBUG
-            remoteCaptureLog.info("gckeyboard.handle keycode=\(keyCode.rawValue, privacy: .public) → no RemoteKey mapping (dropped)")
-            #endif
-            return
-        }
+        // Fall back to `.rawKey` rather than dropping the press. Previously an
+        // unmapped key code returned HERE — before `onCapture` below — so the
+        // "learn your remote" wizard never saw it and sat on "waiting for a
+        // press…" indefinitely. That silently excluded every function key,
+        // Home/End, and most punctuation (a Logitech R400 emits F5/Esc; see
+        // `Remote Input Audit.md`), and would make any programmable DIY
+        // controller unbindable. Nothing that reaches this source is dropped.
+        let remoteKey = Self.remoteKey(from: keyCode) ?? .rawKey(keyCode.rawValue)
         #if DEBUG
         remoteCaptureLog.info("gckeyboard.handle key=\(remoteKey.id, privacy: .public) → onCapture hook=\(self.onCapture != nil, privacy: .public)")
         #endif

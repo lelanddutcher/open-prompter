@@ -222,7 +222,8 @@ struct PipTile: View {
                         horizontalMirror: horizontalMirror,
                         verticalMirror: verticalMirror,
                         requestedDynamicAspectRaw: store.requestedDynamicAspectRaw,
-                        sessionConfigurationVersion: store.sessionConfigurationVersion
+                        sessionConfigurationVersion: store.sessionConfigurationVersion,
+                        rotationBox: store.rotationBox
                     )
                     .id("camera-preview-pip")
                 } else {

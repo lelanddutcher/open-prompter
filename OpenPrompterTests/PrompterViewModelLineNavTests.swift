@@ -103,4 +103,39 @@ final class PrompterViewModelLineNavTests: XCTestCase {
         vm.nextSection()
         XCTAssertGreaterThan(vm.scroller.offset, 0)
     }
+
+    // MARK: - jump to end (3.2)
+    //
+    // `restart` (top of script) shipped without a bottom counterpart, so a
+    // user mapping keypad 1/2 to "top" and "bottom" on a Bluetooth 10-key
+    // could only bind half the pair.
+
+    func testJumpToEndSeeksToMaxScrollOffset() {
+        let vm = makeViewModel()
+        vm.scroller.seek(to: 0, maxOffset: vm.maxScrollOffset)
+        vm.jumpToEnd()
+        XCTAssertEqual(vm.scroller.offset, vm.maxScrollOffset, accuracy: 0.001)
+    }
+
+    func testRemoteJumpToEndEventRoutesToBottom() {
+        let vm = makeViewModel()
+        vm.handleRemoteEvent(.jumpToEnd)
+        XCTAssertEqual(vm.scroller.offset, vm.maxScrollOffset, accuracy: 0.001)
+    }
+
+    /// top/bottom round-trip — the pair the 10-key user asked for.
+    func testRestartAndJumpToEndAreInverses() {
+        let vm = makeViewModel()
+        vm.handleRemoteEvent(.jumpToEnd)
+        XCTAssertGreaterThan(vm.scroller.offset, 0, "jumpToEnd must move off the top.")
+        vm.handleRemoteEvent(.restart)
+        XCTAssertEqual(vm.scroller.offset, 0, accuracy: 0.001, "restart must return to the top.")
+    }
+
+    /// Guards the binding picker: a bindable event with no label would show
+    /// blank in Settings.
+    func testJumpToEndIsBindableAndLabelled() {
+        XCTAssertTrue(RemoteEvent.allCases.contains(.jumpToEnd))
+        XCTAssertFalse(RemoteEvent.jumpToEnd.displayName.isEmpty)
+    }
 }

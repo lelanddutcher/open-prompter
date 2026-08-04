@@ -39,6 +39,12 @@ enum RemoteEvent: String, Codable, CaseIterable, Hashable, Sendable {
     case jumpForward
     case mirrorToggle
     case restart
+    /// Bottom of the script — the counterpart to `restart` (top). Added in
+    /// 3.2 after a user described mapping keypad `1` and `2` to the top and
+    /// bottom of the script on a Bluetooth 10-key: `restart` already covered
+    /// the top, but there was no way to bind the end, so the pair was
+    /// unbuildable. Useful on its own for jumping to a sign-off or outro.
+    case jumpToEnd
     case nextSection
     case prevSection
     /// **Novel for Open Prompter.** Returns scroll position to where the
@@ -80,6 +86,7 @@ enum RemoteEvent: String, Codable, CaseIterable, Hashable, Sendable {
         case .jumpForward:   return "Jump forward (half screen)"
         case .mirrorToggle:  return "Toggle mirror"
         case .restart:       return "Restart (top of script)"
+        case .jumpToEnd:     return "Jump to end of script"
         case .nextSection:   return "Next section"
         case .prevSection:   return "Previous section"
         case .jumpToStart:   return "Jump to start of take"

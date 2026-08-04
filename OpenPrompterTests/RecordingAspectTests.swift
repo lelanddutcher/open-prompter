@@ -4,11 +4,16 @@
 //
 //  Covers the user-configurable recording aspect-ratio picker:
 //    - RecordingAspect enum has labels + help-text + Codable round-trip
-//    - Default is `.wide` (raw "ratio16x9", the new-user default under V3 §07)
-//    - Prefs.register() with no prior keys → recordingAspect == "ratio16x9"
-//    - migrateRecordingAspectToOpenGate(...) flips existing users to
+//    - Default is `.openGate` (3.1 — the full-sensor readout; `.wide` held
+//      this slot through 3.0 but 16:9 is a crop off the iPhone 17 family)
+//    - openGate leads `surfacedCases` so the picker's first row is also the
+//      fresh-install selection
+//    - Prefs.register() with no prior keys → recordingAspect == "openGate"
+//    - migrateRecordingAspectToOpenGate(...) pins existing users to
 //      "openGate" without touching brand-new installs OR users who've
-//      already explicitly set the aspect themselves
+//      already explicitly set the aspect themselves. As of 3.1 it writes the
+//      SAME value the registration default supplies, so the two paths agree —
+//      the migration is retained because it PERSISTS the value.
 //    - migrateVerticalAspectToWideShape(...) collapses a persisted legacy
 //      "ratio9x16" onto the merged 16:9 shape "ratio16x9" (V3 §07)
 //    - canonicalShape collapses the .legacyVertical9x16 alias onto .wide
@@ -105,11 +110,28 @@ final class RecordingAspectTests: XCTestCase {
         }
     }
 
-    func testDefaultIsWide() {
-        XCTAssertEqual(RecordingAspect.default, .wide,
-                       "New-user default must be the merged 16:9 (wide) shape.")
-        XCTAssertEqual(RecordingAspect.default.rawValue, "ratio16x9",
-                       "New-user default raw value must reuse \"ratio16x9\".")
+    /// 3.1: the new-user default is the full-sensor readout, NOT `.wide`.
+    /// 16:9 is a crop on every front sensor that isn't natively 16:9, which
+    /// made it a surprising first-record aspect off the iPhone 17 family.
+    /// Open gate has no `requiresIOS26` constraint, so there is nothing to
+    /// fall back FROM. Intentionally brittle — flipping the default back
+    /// should fail here.
+    func testDefaultIsOpenGate() {
+        XCTAssertEqual(RecordingAspect.default, .openGate,
+                       "New-user default must be the full-sensor open-gate shape (3.1).")
+        XCTAssertEqual(RecordingAspect.default.rawValue, "openGate",
+                       "New-user default raw value must be \"openGate\".")
+        XCTAssertFalse(RecordingAspect.default.requiresIOS26,
+                       "The default shape must be honorable on every OS we ship to.")
+    }
+
+    /// The registration domain must agree with `RecordingAspect.default` —
+    /// they are two independent declarations of the same fact and drifting
+    /// apart is exactly the bug class this guards.
+    func testRegistrationDefaultMatchesEnumDefault() {
+        XCTAssertEqual(PrefKey.recordingAspect.defaultValue as? String,
+                       RecordingAspect.default.rawValue,
+                       "PrefKey.recordingAspect registration default must equal RecordingAspect.default.")
     }
 
     /// The downgrade-safety alias must collapse onto `.wide` via
@@ -126,25 +148,55 @@ final class RecordingAspectTests: XCTestCase {
     }
 
     /// The surfaced picker set is exactly the four shapes — never the alias.
+    /// Order is load-bearing: open gate FIRST (3.1) so the picker's leading
+    /// row is also the fresh-install selection.
     func testSurfacedCasesExcludeAlias() {
-        XCTAssertEqual(RecordingAspect.surfacedCases, [.wide, .classic, .square, .openGate])
+        XCTAssertEqual(RecordingAspect.surfacedCases, [.openGate, .wide, .classic, .square])
         XCTAssertFalse(RecordingAspect.surfacedCases.contains(.legacyVertical9x16))
+    }
+
+    /// The picker's first row must be the default, so a fresh install opens
+    /// the menu on the top entry rather than scrolled to the bottom.
+    func testDefaultLeadsThePicker() {
+        XCTAssertEqual(RecordingAspect.surfacedCases.first, RecordingAspect.default,
+                       "Open gate must lead the picker — it is the default (3.1).")
     }
 
     // MARK: - Prefs default + migration
 
     /// Brand-new install: no prior recording-related keys are written.
-    /// `Prefs.register()` should land on `"ratio16x9"` (= `.wide`, the V3 §07
-    /// registration-domain default). Note this test exercises the global
-    /// UserDefaults — we cleared it in setUp so the registration default
-    /// applies.
-    func testNewUserDefaultIsWide() {
+    /// `Prefs.register()` should land on `"openGate"` (the 3.1 registration-
+    /// domain default). Note this test exercises the global UserDefaults —
+    /// we cleared it in setUp so the registration default applies.
+    ///
+    /// setUp also clears `recordingQuality` / `recordingFramerate` /
+    /// `cameraStyle`, so `migrateRecordingAspectToOpenGate` sees a pristine
+    /// install and short-circuits: the value under test comes from the
+    /// registration domain, not the migration.
+    func testNewUserDefaultIsOpenGate() {
         // Sanity — setUp removed any persisted aspect value from the
         // standard defaults. Registering re-installs the registration-
         // domain default.
         Prefs.register()
-        XCTAssertEqual(Prefs.recordingAspect, "ratio16x9",
-                       "Fresh install should start at \"ratio16x9\" (.wide).")
+        XCTAssertEqual(Prefs.recordingAspect, "openGate",
+                       "Fresh install should start at \"openGate\".")
+        XCTAssertEqual(RecordingAspect(rawValue: Prefs.recordingAspect)?.canonicalShape,
+                       .openGate,
+                       "The persisted fresh-install value must decode to .openGate.")
+    }
+
+    /// The getter's hard-coded fallback (used when nothing is stored and
+    /// nothing is registered) must agree with the registration default —
+    /// otherwise a read that beats `Prefs.register()` returns a different
+    /// shape than one that follows it.
+    func testGetterFallbackMatchesRegistrationDefault() {
+        let store = UserDefaults.standard
+        store.removeObject(forKey: PrefKey.recordingAspect.rawValue)
+        // No register() call here: exercise the `?? "openGate"` branch. The
+        // host process may have registered a value already, so accept either
+        // the fallback or the (identical) registration default.
+        XCTAssertEqual(Prefs.recordingAspect, "openGate",
+                       "Getter fallback must be \"openGate\", matching the registration default.")
     }
 
     /// V3 §07: a persisted legacy "ratio9x16" is rewritten to "ratio16x9"
@@ -233,9 +285,10 @@ final class RecordingAspectTests: XCTestCase {
     }
 
     /// Pristine new install: no recording-related keys, no aspect key.
-    /// Migration must NOT pre-write the aspect — that would override the
-    /// registration-domain default ("ratio9x16") for new users. The
-    /// registration default does the work for fresh installs.
+    /// Migration must NOT pre-write the aspect — the registration-domain
+    /// default ("openGate") does the work for fresh installs. Keeping the
+    /// migration write out of the fresh-install path is what lets a future
+    /// default change reach new users while leaving existing users pinned.
     func testMigrationNoOpsForNewInstall() {
         let (store, domain) = makeIsolatedStore()
         // Pristine — no prior recording feature touched.
@@ -245,5 +298,29 @@ final class RecordingAspectTests: XCTestCase {
         let persistent = store.persistentDomain(forName: domain) ?? [:]
         XCTAssertNil(persistent[PrefKey.recordingAspect.rawValue],
                      "New-install migration must not write the aspect key — registration default handles it.")
+    }
+
+    /// 3.1 convergence check: the existing-user migration and the new-user
+    /// registration default now produce the SAME shape. This is the guard
+    /// against the migration and the default drifting apart again — and it
+    /// documents that the two are not in conflict (the migration short-
+    /// circuits on any existing value, so it can never double-apply).
+    func testMigrationAndRegistrationDefaultAgree() {
+        let (store, domain) = makeIsolatedStore()
+        store.set("high", forKey: PrefKey.recordingQuality.rawValue)
+
+        // Existing-user path.
+        Prefs.migrateRecordingAspectToOpenGate(in: store, domain: domain)
+        let migrated = store.string(forKey: PrefKey.recordingAspect.rawValue)
+
+        XCTAssertEqual(migrated, PrefKey.recordingAspect.defaultValue as? String,
+                       "Existing-user migration must land on the same shape as a fresh install (3.1).")
+        XCTAssertEqual(migrated, RecordingAspect.default.rawValue)
+
+        // Re-running is a no-op — the guard sees a value and short-circuits,
+        // so there is no double-apply hazard now that the values match.
+        Prefs.migrateRecordingAspectToOpenGate(in: store, domain: domain)
+        XCTAssertEqual(store.string(forKey: PrefKey.recordingAspect.rawValue), migrated,
+                       "Migration must remain idempotent.")
     }
 }

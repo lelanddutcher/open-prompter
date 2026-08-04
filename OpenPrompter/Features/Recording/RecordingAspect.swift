@@ -51,7 +51,7 @@ enum RecordingAspect: String, CaseIterable, Codable, Hashable, Sendable {
 
     /// Widescreen 16:9 shape. Held upright it records 9:16 vertical
     /// (TikTok / Reels / Shorts); rotated to landscape it records 16:9
-    /// horizontal (YouTube). Default for fresh installs.
+    /// horizontal (YouTube).
     ///
     /// REUSES the raw value `"ratio16x9"` so a persisted 16:9 pick survives
     /// AND so the enum lands on the verified `!wantsPortraitPlayback` branch
@@ -73,9 +73,11 @@ enum RecordingAspect: String, CaseIterable, Codable, Hashable, Sendable {
     /// 4:3 via dynamic aspect on iPhone 17).
     case classic = "ratio4x3"
 
-    /// Full sensor readout — reframe in post. Same either way. The current
-    /// shipping default for existing users (and the shape the open-gate
-    /// algorithm in CameraStore was originally designed for).
+    /// Full sensor readout — reframe in post. Same either way. The shipping
+    /// default for EVERY user as of 3.1 (and the shape the open-gate
+    /// algorithm in CameraStore was originally designed for). It is the only
+    /// shape with no `requiresIOS26` constraint and no crop, so it is honored
+    /// on every device and OS we ship to — there is nothing to fall back FROM.
     case openGate = "openGate"
 
     // MARK: - Downgrade-safety / migration-only (NOT offered in the picker)
@@ -106,18 +108,29 @@ enum RecordingAspect: String, CaseIterable, Codable, Hashable, Sendable {
         self == .legacyVertical9x16 ? .wide : self
     }
 
-    /// The set of shapes the picker surfaces, in canonical UX order. Excludes
-    /// the downgrade-safety alias by construction. `availableAspects` in the
-    /// settings view filters this by device support.
+    /// The set of shapes the picker surfaces, in canonical UX order. Open gate
+    /// leads because it is the default (3.1) — the picker's first row is also
+    /// the selected row on a fresh install. Excludes the downgrade-safety
+    /// alias by construction. `availableAspects` in the settings view filters
+    /// this by device support.
     static var surfacedCases: [RecordingAspect] {
-        [.wide, .classic, .square, .openGate]
+        [.openGate, .wide, .classic, .square]
     }
 
-    /// Default for *new* users — the merged 16:9 shape, which auto-orients to
-    /// 9:16 vertical when the phone is held upright (preserving the
-    /// social-share first impression). Existing users get migrated to
-    /// `.openGate` via `Prefs.migrateRecordingAspectToOpenGate`.
-    static var `default`: RecordingAspect { .wide }
+    /// Default for *new* users (3.1): the full-sensor readout. `.wide` used to
+    /// hold this slot, but 16:9 is a CROP on every front sensor that isn't
+    /// natively 16:9 — a surprising first-record aspect on non–iPhone-17
+    /// hardware. Open gate is the widest the sensor exposes (square on the
+    /// iPhone 17 family, full 4:3 elsewhere), carries no `requiresIOS26`
+    /// constraint, and is "never wrong — reframe in post".
+    ///
+    /// This now MATCHES what `Prefs.migrateRecordingAspectToOpenGate` writes
+    /// for existing users, so new and existing installs converge on the same
+    /// shape. The migration stays in place (it must: it persists the value
+    /// explicitly so a future default change can't silently reshape a
+    /// long-time user's recordings) and remains idempotent — it short-circuits
+    /// the moment `recordingAspect` has any value.
+    static var `default`: RecordingAspect { .openGate }
 
     /// Settings-row label. Orientation-agnostic (V3 §07) — the shape no
     /// longer names a direction.

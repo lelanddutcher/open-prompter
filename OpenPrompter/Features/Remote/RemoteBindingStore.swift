@@ -50,6 +50,20 @@ enum RemoteKey: Hashable, Identifiable, Sendable {
     case keypadEnter
     case keypadDecimal
     case keypadEqual
+    /// Catch-all for any `GCKeyCode` we have no named case for.
+    ///
+    /// WHY THIS EXISTS: before it, `GameControllerKeyboardSource.handle` bailed
+    /// on an unmapped key code BEFORE calling `onCapture`, so the "learn your
+    /// remote" wizard never saw the press — it sat on "waiting for a press…"
+    /// forever and Next never enabled. Every function key, Home/End, and most
+    /// punctuation hit that path, including the F5/Esc a Logitech R400 emits
+    /// (see `Remote Input Audit.md`). A programmable DIY controller could emit
+    /// something arbitrary and be unbindable for the same reason.
+    ///
+    /// With this case, all 134 key codes on the HID keyboard page are bindable
+    /// without enumerating them one by one; named cases above are purely for
+    /// nicer labels.
+    case rawKey(CFIndex)
 
     // MARK: Media keys (MPRemoteCommandCenter)
     case mediaPlayPause
@@ -96,6 +110,7 @@ enum RemoteKey: Hashable, Identifiable, Sendable {
         case .keypadEnter:     return "kb.keypad.enter"
         case .keypadDecimal:   return "kb.keypad.decimal"
         case .keypadEqual:     return "kb.keypad.equal"
+        case .rawKey(let code): return "kb.raw.\(code)"
         case .mediaPlayPause:  return "media.playpause"
         case .mediaNextTrack:  return "media.next"
         case .mediaPrevTrack:  return "media.prev"
@@ -131,6 +146,7 @@ enum RemoteKey: Hashable, Identifiable, Sendable {
         case .keypadEnter:     return "Keypad Enter"
         case .keypadDecimal:   return "Keypad ."
         case .keypadEqual:     return "Keypad ="
+        case .rawKey(let code): return String(format: "Key 0x%02X", code)
         case .mediaPlayPause:  return "Play / Pause (media key)"
         case .mediaNextTrack:  return "Next track (media key)"
         case .mediaPrevTrack:  return "Previous track (media key)"
@@ -336,6 +352,8 @@ final class RemoteBindingStore {
         case "kb.keypad.enter":   return .keypadEnter
         case "kb.keypad.decimal": return .keypadDecimal
         case "kb.keypad.equal":   return .keypadEqual
+        // `kb.raw.<code>` — see the `.rawKey` case. Parsed below with the
+        // other parameterized IDs.
         case "media.playpause":   return .mediaPlayPause
         case "media.next":        return .mediaNextTrack
         case "media.prev":        return .mediaPrevTrack
@@ -350,6 +368,10 @@ final class RemoteBindingStore {
                 if suffix.count == 1, let c = suffix.first, c.isNumber {
                     return .digit(c)
                 }
+            }
+            if id.hasPrefix("kb.raw.") {
+                let suffix = id.dropFirst("kb.raw.".count)
+                if let code = Int(suffix) { return .rawKey(CFIndex(code)) }
             }
             if id.hasPrefix("kb.letter.") {
                 let suffix = id.dropFirst("kb.letter.".count)

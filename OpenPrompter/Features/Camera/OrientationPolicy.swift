@@ -4,6 +4,47 @@
 //
 //  Sensor-orientation-aware rotation policy for the iPhone 17 selfie camera.
 //
+//  ===================================================================
+//  3.1 — WHAT CHANGED, AND WHAT DELIBERATELY DID NOT
+//  ===================================================================
+//
+//  The PORTRAIT table below is untouched. Every lesson from passes 11-13g
+//  still holds and still ships verbatim; `writerTransform(for:bufferShape:)`
+//  is the same function it was, and `basePreviewRotationAngle(device:)` is the
+//  same per-device row it was.
+//
+//  What changed is the LANDSCAPE path, which had shipped as hand-pinned
+//  guesses (`HOLD_LANDSCAPE_*_UNVERIFIED`) composed on top of that verified
+//  base — and on real hardware they double-rotated the file. Those constants
+//  are DELETED. In their place, the extra rotation is a runtime DELTA read
+//  from Apple's purpose-built `AVCaptureDevice.RotationCoordinator` (iOS 17+,
+//  which is our deployment floor, so no availability gate):
+//
+//      delta = coordinatorAngleNow − coordinatorAngleWhileInterfacePortrait
+//
+//  Because both terms are the same Apple property in the same units, the
+//  subtraction cancels every device/camera/sensor-specific constant — the
+//  exact class of quirk that took thirteen dogfood passes to pin. The OS
+//  supplies both the magnitude and the SIGN, so there is nothing left to
+//  guess and nothing left to re-pin per device (iPad included).
+//
+//  The safety property, stated precisely: the reference is re-latched
+//  continuously while the app's interface orientation is portrait, so
+//  `delta == 0` for every portrait take, `holdRotation(deltaDegrees: 0)` is
+//  `.identity`, and `x ∘ identity == x`. Portrait output is therefore
+//  byte-identical to the verified pipeline BY CONSTRUCTION, not by
+//  coincidence — see `testZeroDeltaEqualsVerifiedBaseForEveryShape`.
+//
+//  It also means the degraded case is safe rather than wrong: no coordinator,
+//  no preview layer, or no portrait reference yet ⇒ delta 0 ⇒ exactly today's
+//  behaviour.
+//
+//  Do NOT re-introduce a hand-pinned landscape constant. If landscape is off
+//  on a device, the bug is in the delta plumbing (`RotationCoordinatorBox`)
+//  or in the portrait base row — not in a number to flip.
+//
+//  ===================================================================
+//
 //  Hard-won lessons across passes 11-13d:
 //
 //  1. iPhone 17 selfie cam pixels are ALWAYS in sensor-natural orientation
@@ -56,19 +97,25 @@ enum OrientationPolicy {
     // MARK: - Physical hold (V3 §07 — landscape auto-orientation)
 
     /// How the phone is physically held for a take, read from the foreground
-    /// scene's INTERFACE orientation at REC tap (see `currentPhysicalHold()`).
+    /// scene's INTERFACE orientation (see `currentPhysicalHold()`).
     /// Under auto-orientation, portrait-vs-landscape is a property of the
     /// hold, NOT of the picker shape (V3 §07). Cases are named after the
     /// UIKit *interface* orientation values (not device values) so there is
     /// no cross-namespace confusion inside our code — see the historical
     /// `UIInterfaceOrientation.landscapeLeft == UIDeviceOrientation.landscapeRight`
-    /// inversion. The only place physical direction matters is the handedness
-    /// constants below, which are pinned empirically against recorded pixels.
+    /// inversion.
+    ///
+    /// 3.1 SCOPE CHANGE: `PhysicalHold` is now a CLASSIFICATION ONLY — it
+    /// labels the take for the self-test report and drives the
+    /// expected-playback-orientation math. It no longer carries any rotation
+    /// constant: the writer's extra rotation comes from
+    /// `AVCaptureDevice.RotationCoordinator` as a degree delta (see
+    /// `holdRotation(deltaDegrees:)`). Nothing here is guessed any more.
     enum PhysicalHold: String, Sendable, Equatable {
-        /// Phone upright, home-indicator down. This is the ONLY hold that
-        /// composes with identity (`holdRotation(.portrait) == .identity`),
-        /// which is the anti-regression hinge that keeps portrait output
-        /// byte-identical to today's verified pipeline.
+        /// Phone upright, home-indicator down. This is the hold for which the
+        /// coordinator delta is latched to zero, which is the anti-regression
+        /// hinge that keeps portrait output byte-identical to the
+        /// pass-13g-verified pipeline.
         case portrait
         /// Rotated so the top of the phone points LEFT (interface orientation).
         case landscapeLeft
@@ -76,51 +123,84 @@ enum OrientationPolicy {
         case landscapeRight
         // portrait-upside-down is intentionally NOT a recording orientation —
         // Info.plist doesn't list it and `currentPhysicalHold()` maps it to
-        // `.portrait`. Adding it would create a fourth hold with no verified
-        // transform (V3 §07 §7).
+        // `.portrait`. (V3 §07 §7.)
     }
 
-    /// !!! UNVERIFIED, DEVICE-BLOCKED PLACEHOLDER (V3 Design 07 §5) !!!
-    ///
-    /// EXTRA writer rotation composed ON TOP OF the verified portrait base
-    /// transform when the phone is held landscape-LEFT (interface orientation).
-    /// Handedness (+π/2 vs -π/2) is un-guessable under the selfie data-output
-    /// connection's un-mirroring composed with iOS's per-aspect sensor-pixel
-    /// orientation — the exact interaction that took passes 13a-13g to pin for
-    /// the portrait case, repeatedly defeating first-principles reasoning
-    /// (pass-13f applied a fix to the wrong branch and had to be reverted).
-    /// Pin it via the self-test loop on the iPhone 17, ONE (shape × hold) row
-    /// per roundtrip: hold landscape, record ≥5 s, run the self-test, read
-    /// the PNG — if the head is at the wrong top-of-playback, flip the sign
-    /// of THIS constant. Do NOT touch `base`, the composition order, or the
-    /// avAspectRatio swap. Working hypothesis +π/2; NOT known-good. Do NOT
-    /// present as verified in any shipping copy.
-    static let HOLD_LANDSCAPE_LEFT_UNVERIFIED: CGFloat = .pi / 2
+    // MARK: - Rotation deltas (3.1 — AVCaptureDevice.RotationCoordinator)
+    //
+    // The two `HOLD_LANDSCAPE_*_UNVERIFIED` constants that used to live here
+    // are GONE. They were hand-pinned guesses composed on top of the verified
+    // portrait base, and on device they double-rotated the file (the 3.1
+    // "rotated an extra degree in the wrong direction, like it's multiplied"
+    // report). Their replacement is a runtime DELTA supplied by
+    // `AVCaptureDevice.RotationCoordinator` (iOS 17+, our deployment floor —
+    // no availability gate needed) via `RotationCoordinatorBox`:
+    //
+    //     delta = coordinatorAngleNow − coordinatorAngleWhileInterfacePortrait
+    //
+    // Both terms come from the SAME Apple property in the SAME units
+    // (`AVCaptureConnection.videoRotationAngle` degrees), so the subtraction
+    // cancels every device-, camera-, and sensor-specific constant that took
+    // passes 13a-13g to pin. What survives is exactly "how much extra rotation
+    // does the physical hold need, relative to upright" — magnitude AND sign,
+    // both from the OS.
+    //
+    // THE ANTI-REGRESSION HINGE: the reference is re-latched continuously
+    // whenever the app's interface orientation is portrait, so `delta == 0`
+    // for every portrait take. `holdRotation(deltaDegrees: 0) == .identity`
+    // and `x ∘ identity == x`, therefore portrait writer output is
+    // byte-identical to the pass-13g-verified pipeline. Enforced mechanically
+    // by `testZeroDeltaEqualsVerifiedBaseForEveryShape`.
+    //
+    // Degraded-but-safe fallback: with no coordinator (camera off, unit tests)
+    // or no portrait reference yet (app launched in landscape and never went
+    // upright), the delta is 0 — i.e. today's portrait behaviour. Never a
+    // wrong guess, never a double rotation.
 
-    /// !!! UNVERIFIED, DEVICE-BLOCKED PLACEHOLDER (V3 Design 07 §5) !!!
-    ///
-    /// Landscape-RIGHT is the strict opposite handedness of landscape-LEFT.
-    /// Working hypothesis -π/2; NOT known-good. Same pinning discipline as
-    /// `HOLD_LANDSCAPE_LEFT_UNVERIFIED`. Pinning LEFT for one shape
-    /// effectively pins RIGHT (opposite sign), but the §6 device matrix
-    /// enumerates every cell so we verify rather than assume (the pass-13d
-    /// square-buffer surprise is why we don't assume).
-    static let HOLD_LANDSCAPE_RIGHT_UNVERIFIED: CGFloat = -.pi / 2
-
-    /// EXTRA rotation composed ON TOP OF the verified portrait base transform
-    /// when the phone is held in landscape. Portrait = identity (no change) —
-    /// this is the anti-regression hinge. `x ∘ identity == x`, so the
-    /// portrait-hold composition returns today's verified value verbatim.
-    static func holdRotation(for hold: PhysicalHold) -> CGAffineTransform {
-        switch hold {
-        case .portrait:
-            return .identity                                   // <-- guarantee
-        case .landscapeLeft:
-            return CGAffineTransform(rotationAngle: HOLD_LANDSCAPE_LEFT_UNVERIFIED)
-        case .landscapeRight:
-            return CGAffineTransform(rotationAngle: HOLD_LANDSCAPE_RIGHT_UNVERIFIED)
-        }
+    /// Snap an arbitrary degree value to the nearest quarter turn and fold it
+    /// into `(-180, 180]`. AVFoundation only ever vends 0/90/180/270, but the
+    /// subtraction of two such values needs folding (e.g. `0 − 270 = −270`
+    /// must read as `+90`). PURE — the unit under test.
+    static func normalizedDeltaDegrees(_ degrees: CGFloat) -> CGFloat {
+        guard degrees.isFinite else { return 0 }
+        var d = (degrees / 90).rounded() * 90
+        d = d.truncatingRemainder(dividingBy: 360)
+        if d > 180 { d -= 360 }
+        if d <= -180 { d += 360 }
+        return d == 0 ? 0 : d          // normalise -0 to +0
     }
+
+    /// Snap an arbitrary degree value into the `{0, 90, 180, 270}` set that
+    /// `AVCaptureConnection.videoRotationAngle` accepts. PURE.
+    static func normalizedConnectionAngle(_ degrees: CGFloat) -> CGFloat {
+        guard degrees.isFinite else { return 0 }
+        var d = (degrees / 90).rounded() * 90
+        d = d.truncatingRemainder(dividingBy: 360)
+        if d < 0 { d += 360 }
+        return d == 0 ? 0 : d
+    }
+
+    /// EXTRA rotation composed ON TOP OF the verified portrait base transform,
+    /// expressed as the coordinator's degree delta from the portrait
+    /// reference. `0` ⇒ `.identity` — the anti-regression hinge.
+    ///
+    /// Degrees→radians uses a POSITIVE sign because AVFoundation's
+    /// `videoRotationAngle` and QuickTime's `preferredTransform` agree on
+    /// handedness: a portrait iPhone video is `videoRotationAngle = 90` AND
+    /// `preferredTransform = [0, 1, −1, 0] = CGAffineTransform(rotationAngle: +π/2)`.
+    /// That equivalence is the anchor — NOT a fresh guess about handedness.
+    static func holdRotation(deltaDegrees: CGFloat) -> CGAffineTransform {
+        let d = normalizedDeltaDegrees(deltaDegrees)
+        guard d != 0 else { return .identity }               // <-- guarantee
+        return CGAffineTransform(rotationAngle: d * .pi / 180)
+    }
+
+    /// Horizontal (left↔right) flip in DISPLAY space — the selfie-mirror
+    /// (3.1 item 3). Composed LAST so it mirrors the already-upright frame
+    /// about its vertical axis regardless of the rotation that preceded it.
+    /// Purely a `preferredTransform` flag: zero pixel cost, honored by
+    /// Photos / QuickTime / AVFoundation.
+    static let horizontalFlip = CGAffineTransform(scaleX: -1, y: 1)
 
     /// The physical hold for orientation decisions, read from the foreground
     /// scene's INTERFACE orientation. Main-actor only — read synchronously at
@@ -362,36 +442,47 @@ enum OrientationPolicy {
         }
     }
 
-    /// Full writer `videoInput.transform` under auto-orientation (V3 §07).
+    /// Full writer `videoInput.transform` (3.1 — coordinator-driven).
     /// ADDITIVE over the verified 2-arg function — it is a COMPOSITION:
     ///
-    ///     finalTransform = holdRotation(hold) ∘ baseTransform(shape, bufferShape)
+    ///     final = base(shape, bufferShape) ∘ holdRotation(delta) ∘ [flip]
     ///
-    /// where `baseTransform` IS the untouched 2-arg `writerTransform(for:bufferShape:)`
+    /// where `base` IS the untouched 2-arg `writerTransform(for:bufferShape:)`
     /// above (defined as "the transform that lands upright playback when the
-    /// phone is held in PORTRAIT" — exactly what pass-13g verified). Because
-    /// `holdRotation(.portrait) == .identity` and `x ∘ identity == x`, the
-    /// portrait-hold result equals today's verified value BYTE-FOR-BYTE for
-    /// every (shape × bufferShape) cell — enforced mechanically by
-    /// `testPortraitHoldEqualsVerifiedBaseForEveryShape`. Landscape holds add
-    /// the `±π/2` `_UNVERIFIED` handedness constants on top.
+    /// phone is held in PORTRAIT" — exactly what pass-13g verified), `delta`
+    /// is the `AVCaptureDevice.RotationCoordinator` capture-angle delta from
+    /// the portrait reference (0 in portrait, ±90/180 sideways), and `flip`
+    /// is the optional selfie-mirror.
+    ///
+    /// Because `holdRotation(deltaDegrees: 0) == .identity` and
+    /// `x ∘ identity == x`, the zero-delta result equals today's verified
+    /// value BYTE-FOR-BYTE for every (shape × bufferShape) cell — enforced
+    /// mechanically by `testZeroDeltaEqualsVerifiedBaseForEveryShape`.
     ///
     /// Composition order: `base.concatenating(hold)` applies `base` first,
-    /// then `hold`. `base` already lands upright-portrait, so `hold` rotates
-    /// that upright frame by the physical tilt. If device verification shows
-    /// the visual result is off by a sign, the fix is ONLY the two
-    /// `_UNVERIFIED` constants — never `base`, never the composition order,
-    /// never the avAspectRatio swap.
+    /// then `hold` — `base` already lands upright-portrait, so `hold` rotates
+    /// that upright frame by the physical tilt. Rotations commute, so the
+    /// order is immaterial for the rotation pair; it is NOT immaterial once
+    /// `flip` joins, which is why the flip is applied LAST (mirroring the
+    /// final display frame about its vertical axis, which is what a user
+    /// means by "selfie mirror").
     ///
     /// Reads `.canonicalShape` internally (via the 2-arg call and the shape
     /// predicate) so a stray `.legacyVertical9x16` resolves to `.wide`.
+    ///
+    /// - Parameter captureDeltaDegrees: normally
+    ///   `OrientationPolicy.currentCaptureDeltaDegrees` latched at REC tap.
+    /// - Parameter mirrored: `Prefs.recordingMirrorVideo`.
     static func writerTransform(
         for aspect: RecordingAspect,
-        hold: PhysicalHold,
-        bufferShape: BufferShape
+        captureDeltaDegrees: CGFloat,
+        bufferShape: BufferShape,
+        mirrored: Bool = false
     ) -> CGAffineTransform {
         let base = writerTransform(for: aspect.canonicalShape, bufferShape: bufferShape) // UNCHANGED 2-arg
-        return base.concatenating(holdRotation(for: hold))
+        let rotated = base.concatenating(holdRotation(deltaDegrees: captureDeltaDegrees))
+        guard mirrored else { return rotated }
+        return rotated.concatenating(horizontalFlip)
     }
 
     /// Preview-layer connection's `videoRotationAngle` (DEGREES), keyed by
@@ -424,11 +515,27 @@ enum OrientationPolicy {
     static func previewRotationAngle(
         for aspect: RecordingAspect,
         bufferShape: BufferShape,
-        device: DeviceGenerationHint
+        device: DeviceGenerationHint,
+        previewDeltaDegrees: CGFloat = 0
     ) -> CGFloat {
         _ = aspect       // kept for API symmetry / future per-aspect overrides
         _ = bufferShape  // kept for API symmetry / future per-shape overrides
 
+        // 3.1: the PORTRAIT-REFERENCE angle (unchanged rows below) plus the
+        // coordinator's live delta from portrait. Delta is 0 whenever the
+        // interface is portrait — or whenever no coordinator/reference exists
+        // — so every previously-verified portrait value is returned verbatim.
+        // Sideways, the delta is what fixes the "PiP preview doesn't rotate"
+        // half of the 3.1 rotation bug.
+        let base = basePreviewRotationAngle(device: device)
+        return normalizedConnectionAngle(base + normalizedDeltaDegrees(previewDeltaDegrees))
+    }
+
+    /// The PORTRAIT-hold preview angle per device class. This is the pinned
+    /// table — pass-13e verified `0` for `.squareFrontSensor`; `.wideFrontSensor`
+    /// is still the GitHub #2 placeholder. Split out of `previewRotationAngle`
+    /// so the delta composition can't be confused with the table itself.
+    static func basePreviewRotationAngle(device: DeviceGenerationHint) -> CGFloat {
         switch device {
         case .squareFrontSensor, .unknown:
             return 0
@@ -449,10 +556,11 @@ enum OrientationPolicy {
     }
 
     /// Back-compat 2-arg overload — resolves the device hint from the live
-    /// model identifier and forwards to the 3-arg version. Kept so callers /
-    /// tests that don't care about the device axis stay terse; the primary
+    /// model identifier and forwards to the primary version with a ZERO delta
+    /// (i.e. the portrait-reference answer). Kept so callers / tests that
+    /// don't care about the device or rotation axes stay terse; the primary
     /// call site (`CameraPreview.applyOrientationDependentRotation`) passes an
-    /// explicit hint via the 3-arg form.
+    /// explicit hint AND the live delta.
     static func previewRotationAngle(
         for aspect: RecordingAspect,
         bufferShape: BufferShape
@@ -462,6 +570,36 @@ enum OrientationPolicy {
             bufferShape: bufferShape,
             device: DeviceGenerationHint.from(modelIdentifier: currentDeviceModelIdentifier)
         )
+    }
+
+    // MARK: - Live rotation source (registered by CameraStore)
+
+    /// The live `AVCaptureDevice.RotationCoordinator` wrapper, registered by
+    /// `CameraStore` when the capture session comes up and cleared when it
+    /// goes down. `weak` so the store stays the owner.
+    ///
+    /// This is deliberately the ONE global read point: keeping the decision in
+    /// `OrientationPolicy` (rather than letting each consumer talk to the
+    /// coordinator itself) is what stops rotation logic from scattering again.
+    /// Main-actor only — the writer path must LATCH the delta on the main
+    /// actor at REC tap and carry it into `WriterState`, never read it from
+    /// the recording queue.
+    @MainActor static weak var rotationSource: RotationCoordinatorBox?
+
+    /// Live capture-angle delta from the portrait reference, in degrees.
+    /// `0` when no coordinator is bound or no portrait reference has been
+    /// latched yet — the safe, today's-behaviour default.
+    @MainActor static var currentCaptureDeltaDegrees: CGFloat {
+        rotationSource?.captureDeltaDegrees ?? 0
+    }
+
+    /// Live preview-angle delta from the portrait reference, in degrees.
+    /// `0` when no coordinator is bound, no preview layer is in the hierarchy
+    /// (the coordinator returns 0 degrees for preview in that case — see the
+    /// `AVCaptureDeviceRotationCoordinator` header), or no portrait reference
+    /// has been latched yet.
+    @MainActor static var currentPreviewDeltaDegrees: CGFloat {
+        rotationSource?.previewDeltaDegrees ?? 0
     }
 
     /// Resolve the user's current aspect SHAPE from `Prefs`. Centralized so

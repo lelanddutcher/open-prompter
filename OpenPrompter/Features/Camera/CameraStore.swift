@@ -88,6 +88,16 @@ final class CameraStore {
     /// the store — callers must NOT add inputs/outputs of their own.
     let session: AVCaptureSession = AVCaptureSession()
 
+    /// The app's single `AVCaptureDevice.RotationCoordinator` wrapper (3.1).
+    /// Owned here because the store is the only object that knows when the
+    /// video device changes; registered as `OrientationPolicy.rotationSource`
+    /// at init so the policy — not each consumer — stays the one place that
+    /// resolves a rotation. `PipTile` hands it to `CameraPreview` for the
+    /// preview connection; `RecordingSession` latches its capture delta at
+    /// REC tap. See `RotationCoordinatorBox` for why this vends DELTAS from a
+    /// portrait reference rather than the coordinator's absolute angles.
+    let rotationBox: RotationCoordinatorBox
+
     // MARK: - Internals
 
     /// Apple-recommended pattern: a serial queue for session config so the
@@ -227,11 +237,23 @@ final class CameraStore {
 
     init(suppressDeviceWork: Bool = false) {
         self.suppressDeviceWork = suppressDeviceWork
+        self.rotationBox = RotationCoordinatorBox(suppressDeviceWork: suppressDeviceWork)
         // Read persisted style; if a user wrote a value we no longer recognize
         // (downgrade scenario), fall back to `.off` rather than crashing.
         let raw = Prefs.cameraStyle
         self.style = CameraStyle(rawValue: raw) ?? .off
         self.authorization = AVCaptureDevice.authorizationStatus(for: .video)
+        // Single registration point for the whole app. `OrientationPolicy`
+        // holds it weakly, so the store stays the owner and a torn-down store
+        // silently drops the app back to zero-delta (portrait) behaviour.
+        OrientationPolicy.rotationSource = self.rotationBox
+    }
+
+    /// The video device currently attached to the session, if any. Read by
+    /// the rotation coordinator binding. `nonisolated` because `currentInput`
+    /// is written on `sessionQueue`.
+    nonisolated var currentVideoDevice: AVCaptureDevice? {
+        currentInput?.device
     }
 
     /// 2.0.3: bootstrap the session for the persisted style at app
@@ -349,6 +371,11 @@ final class CameraStore {
     func resume() async {
         sceneActive = true
         await reconcileSession()
+        // Re-evaluate the portrait latch. The coordinator only fires on
+        // physical rotation, so a foreground return that changed the
+        // interface orientation (or a rotation-lock flip) would otherwise
+        // leave the reference stale until the next wobble.
+        rotationBox.refresh()
     }
 
     /// Stop the session for backgrounding / view disappear. Clears the
@@ -536,6 +563,10 @@ final class CameraStore {
                         // the rotation now that the input is attached.
                         self.sessionConfigurationVersion &+= 1
                     }
+                    // Point the rotation coordinator at whatever device we
+                    // just attached (idempotent — a repeat bind to the same
+                    // device is a no-op, so this is safe on every start).
+                    self.rotationBox.bind(device: self.currentVideoDevice)
                     continuation.resume()
                 }
             }
@@ -568,6 +599,9 @@ final class CameraStore {
                 self.session.commitConfiguration()
                 Task { @MainActor in
                     self.isSessionRunning = false
+                    // Device is gone — drop the coordinator so no stale
+                    // rotation delta can survive into the next session.
+                    self.rotationBox.bind(device: nil)
                     continuation.resume()
                 }
             }

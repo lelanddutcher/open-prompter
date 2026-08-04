@@ -417,6 +417,13 @@ final class PrompterViewModel {
     /// a name that matches the remote `RemoteEvent.restart` case for clarity.
     func restart() { jumpToStart() }
 
+    /// Bottom of the script — the counterpart to `restart()`. Seeks to the
+    /// maximum scroll offset, which the scroller clamps, so this is safe
+    /// before layout has produced a real content height (offset stays 0).
+    func jumpToEnd() {
+        scroller.seek(to: maxScrollOffset, maxOffset: maxScrollOffset)
+    }
+
     /// Novel Feature 7 action: return scroll to the offset captured when
     /// the user last pressed play. Doesn't pause — keeps playing if the
     /// prompter was already playing, so a "I flubbed that line" retake
@@ -523,6 +530,7 @@ final class PrompterViewModel {
         case .jumpForward:  jumpForward()
         case .mirrorToggle: toggleMirror()
         case .restart:      restart()
+        case .jumpToEnd:    jumpToEnd()
         case .nextSection:  nextSection()
         case .prevSection:  prevSection()
         case .jumpToStart:  jumpToStartOfTake()

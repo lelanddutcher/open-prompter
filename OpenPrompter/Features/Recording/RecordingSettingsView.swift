@@ -28,6 +28,9 @@ struct RecordingSettingsView: View {
     @AppStorage(PrefKey.recordingCountdown.rawValue) private var countdownRaw: String = "three"
     @AppStorage(PrefKey.recordingIndicator.rawValue) private var indicatorRaw: String = "both"
     @AppStorage(PrefKey.recordingSaveToScriptFolder.rawValue) private var saveToScriptFolder: Bool = false
+    /// 3.1 item 3 — mirror the RECORDED FILE selfie-style. Default off (true
+    /// image), which is what every build before 3.1 wrote.
+    @AppStorage(PrefKey.recordingMirrorVideo.rawValue) private var mirrorRecordedVideo: Bool = false
 
     /// Pinned mic source — port UID, "auto", or "builtin". Read live so the
     /// status row updates when route changes flip the available list.
@@ -116,6 +119,17 @@ struct RecordingSettingsView: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.dim)
 
+                // Selfie-mirror for the FILE. Worded to keep it clearly apart
+                // from the in-prompter mirror chip, which flips only what is
+                // on screen for beam-splitter rigs and never touches the
+                // recording — the help text says so explicitly because the
+                // two live in different places and would otherwise read as
+                // the same setting.
+                Toggle("mirror recorded video", isOn: $mirrorRecordedVideo)
+                Text("flips the saved file left-to-right, like snapchat and the stock selfie camera — so text you hold up reads backwards. off records the true image. this is not the on-screen mirror chip in the prompter, which only flips what you see.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.dim)
+
                 Picker("stabilization", selection: $stabilizationRaw) {
                     ForEach(RecordingStabilization.allCases, id: \.rawValue) { s in
                         Text(s.displayName).tag(s.rawValue)
@@ -171,11 +185,16 @@ struct RecordingSettingsView: View {
     /// can only select a shape their hardware can deliver — no silent
     /// demotions to openGate for unsupported picks.
     ///
-    /// Order: 16:9 (wide) first (the new default) → 4:3 (classic) → 1:1
-    /// (square) → open gate. `.wide` is always supported; only `.square`
-    /// is gated on device declaration of 1:1.
+    /// Order comes from `RecordingAspect.surfacedCases` — the SINGLE source of
+    /// truth — so the picker cannot drift from the enum again. It used to
+    /// duplicate the list locally, which silently swallowed the 3.1 reorder
+    /// that put open gate (the new default) first: the enum changed, the
+    /// picker didn't. `supportedRecordingAspects()` returns a Set, so the
+    /// device filter is order-agnostic and leaves `surfacedCases`' order
+    /// intact. `.wide` is always supported; only `.square` is gated on the
+    /// device declaring 1:1.
     private var availableAspects: [RecordingAspect] {
-        let canonical: [RecordingAspect] = [.wide, .classic, .square, .openGate]
+        let canonical: [RecordingAspect] = RecordingAspect.surfacedCases
         let supported = CameraStore.supportedRecordingAspects()
         return canonical.filter { supported.contains($0) }
     }

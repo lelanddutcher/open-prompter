@@ -108,6 +108,48 @@ final class PreviewView: UIView {
     /// nil, the rotation falls back to the `dynamicDimensions` KVO read.
     var requestedDynamicAspectRaw: String?
 
+    /// The app's `AVCaptureDevice.RotationCoordinator` wrapper (3.1). Supplies
+    /// the live preview-angle DELTA from the portrait reference — the fix for
+    /// "the PiP preview doesn't rotate when the phone does". The view also
+    /// registers its layer with the box: the coordinator returns 0° for
+    /// preview unless the layer it was built with is actually in a view
+    /// hierarchy, so attach/detach is load-bearing.
+    private weak var rotationBox: RotationCoordinatorBox?
+
+    /// Attach to the box and start following its angle updates. Called when
+    /// the view enters a window; the symmetric detach happens on leaving.
+    func bindRotationBox(_ box: RotationCoordinatorBox?) {
+        guard box !== rotationBox else { return }
+        rotationBox?.removeAngleObserver(self)
+        rotationBox?.detachPreviewLayer(previewLayer)
+        rotationBox = box
+        if window != nil { attachToRotationBox() }
+    }
+
+    private func attachToRotationBox() {
+        guard let rotationBox else { return }
+        rotationBox.attachPreviewLayer(previewLayer)
+        // Re-apply the connection angle on every coordinator move. This is a
+        // direct CoreAnimation write rather than a SwiftUI state hop: routing
+        // it through a `body` re-evaluation would rebuild the representable
+        // for every device wobble, and `updateUIView` churn on the preview is
+        // exactly what caused the "PiP tile goes black" regressions.
+        rotationBox.addAngleObserver(self) { [weak self] in
+            self?.applyOrientationDependentRotation()
+        }
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            attachToRotationBox()
+        } else {
+            rotationBox?.removeAngleObserver(self)
+            rotationBox?.detachPreviewLayer(previewLayer)
+        }
+        applyOrientationDependentRotation()
+    }
+
     /// Apply the preview-layer connection's `videoRotationAngle` based on
     /// the user's current `RecordingAspect` AND the actual buffer shape
     /// iOS produces after the dynamic-aspect reshape.
@@ -175,18 +217,28 @@ final class PreviewView: UIView {
         let device = OrientationPolicy.DeviceGenerationHint.from(
             modelIdentifier: OrientationPolicy.currentDeviceModelIdentifier
         )
+        // 3.1: the verified portrait row PLUS the coordinator's live delta.
+        // The delta is 0 whenever the interface is portrait (or whenever the
+        // coordinator is unavailable / uncalibrated / the layer is off-screen),
+        // so every previously-verified portrait angle is preserved exactly.
+        let previewDelta = rotationBox?.previewDeltaDegrees ?? 0
         let targetAngle = OrientationPolicy.previewRotationAngle(
             for: aspect,
             bufferShape: shape,
-            device: device
+            device: device,
+            previewDeltaDegrees: previewDelta
         )
 
         #if DEBUG
         behindLog.info(
-            "preview rotation: aspect=\(aspect.rawValue, privacy: .public) shape=\(shape.rawValue, privacy: .public) device=\(device.rawValue, privacy: .public) source=\(sourceTag, privacy: .public) angle=\(targetAngle, privacy: .public)"
+            "preview rotation: aspect=\(aspect.rawValue, privacy: .public) shape=\(shape.rawValue, privacy: .public) device=\(device.rawValue, privacy: .public) source=\(sourceTag, privacy: .public) delta=\(previewDelta, privacy: .public) angle=\(targetAngle, privacy: .public)"
         )
         #endif
 
+        // The connection only accepts 0/90/180/270 and refuses anything it
+        // reports unsupported; `previewRotationAngle` already normalises into
+        // that set, but the support probe is per-angle so we re-ask.
+        guard connection.isVideoRotationAngleSupported(targetAngle) else { return }
         if connection.videoRotationAngle != targetAngle {
             connection.videoRotationAngle = targetAngle
         }
@@ -224,6 +276,10 @@ struct CameraPreview: UIViewRepresentable {
     /// (re-attaches KVO if the device input wasn't attached before) and
     /// `applyOrientationDependentRotation` (re-reads `dynamicDimensions`).
     var sessionConfigurationVersion: Int = 0
+    /// The camera store's `AVCaptureDevice.RotationCoordinator` wrapper.
+    /// Optional so previews/tests can mount without one (they then get the
+    /// zero-delta portrait behaviour).
+    var rotationBox: RotationCoordinatorBox?
 
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
@@ -231,6 +287,7 @@ struct CameraPreview: UIViewRepresentable {
         view.previewLayer.videoGravity = gravity
         view.requestedDynamicAspectRaw = requestedDynamicAspectRaw
         view.backgroundColor = .black
+        view.bindRotationBox(rotationBox)
         applyPreviewRotation(to: view)
         applyMirrorTransform(to: view)
         view.refreshDynamicDimensionsObservation()
@@ -246,6 +303,7 @@ struct CameraPreview: UIViewRepresentable {
         // but the same UIView is reused if SwiftUI deems identity stable).
         uiView.previewLayer.videoGravity = gravity
         uiView.requestedDynamicAspectRaw = requestedDynamicAspectRaw
+        uiView.bindRotationBox(rotationBox)
         applyPreviewRotation(to: uiView)
         applyMirrorTransform(to: uiView)
         // Re-bind the iOS 26 dynamic-dimensions observer in case the input

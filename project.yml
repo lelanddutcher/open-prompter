@@ -16,7 +16,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.10"
-    MARKETING_VERSION: "3.0"
+    MARKETING_VERSION: "3.1"
     CURRENT_PROJECT_VERSION: "1"
     DEVELOPMENT_TEAM: PKUE74YS72
     CODE_SIGN_STYLE: Automatic
@@ -75,7 +75,26 @@ targets:
           UIImageName: ""
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
-        UIRequiresFullScreen: false
+        # TRUE as of 3.1, when iPad shipped.
+        #
+        # `false` opts into iPad multitasking, which Apple requires be paired
+        # with ALL FOUR orientations — and omitting PortraitUpsideDown emits
+        # "All interface orientations must be supported unless the app requires
+        # full screen", i.e. ITMS-90474 at upload. Verified by A/B: the warning
+        # appears only with TARGETED_DEVICE_FAMILY "1,2".
+        #
+        # We do NOT fix that by adding PortraitUpsideDown, because
+        # `RotationCoordinatorBox.interfaceIsPortrait()` reads
+        # `currentPhysicalHold()`, which folds upside-down INTO `.portrait`.
+        # Supporting the orientation without splitting that first would latch
+        # the portrait rotation reference against a 180°-rotated interface, and
+        # a subsequent landscape take would come out 180° from correct — the
+        # exact double-rotation class 3.1 exists to eliminate.
+        #
+        # Requiring full screen is also the honest product answer: a
+        # teleprompter is a full-screen instrument. Split View is revisitable
+        # in 3.2 alongside a real `.portraitUpsideDown` hold case.
+        UIRequiresFullScreen: true
         UIStatusBarHidden: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
@@ -123,7 +142,10 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.openprompter.ios
-        TARGETED_DEVICE_FAMILY: "1"
+        # 1 = iPhone, 2 = iPad. iPad added in 3.2: an iPad on a teleprompter
+        # mount is the classic studio rig, and it also unlocks running natively
+        # on Apple Silicon Macs as a "Designed for iPad" app.
+        TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_ENTITLEMENTS: OpenPrompter/OpenPrompter.entitlements
         CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -166,7 +188,10 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.openprompter.ios.liveactivity
-        TARGETED_DEVICE_FAMILY: "1"
+        # 1 = iPhone, 2 = iPad. iPad added in 3.2: an iPad on a teleprompter
+        # mount is the classic studio rig, and it also unlocks running natively
+        # on Apple Silicon Macs as a "Designed for iPad" app.
+        TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
         SWIFT_VERSION: "5.10"
         GENERATE_INFOPLIST_FILE: NO
@@ -179,7 +204,10 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.openprompter.ios.tests
-        TARGETED_DEVICE_FAMILY: "1"
+        # 1 = iPhone, 2 = iPad. iPad added in 3.2: an iPad on a teleprompter
+        # mount is the classic studio rig, and it also unlocks running natively
+        # on Apple Silicon Macs as a "Designed for iPad" app.
+        TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: YES
     dependencies:

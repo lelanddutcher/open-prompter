@@ -24,6 +24,17 @@ struct PrompterTopBarView: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            // Back sits TRAILING (3.2). iPadOS draws its window-control pill
+            // in the top-LEADING corner whenever the app is in a window rather
+            // than full screen, and it covered this button — leaving no way
+            // out of the prompter. Trailing clears it on every platform and
+            // window size with no device check and no window-state detection,
+            // and it keeps the top bar flush so the reading line stays under
+            // the lens (see the eye-line note at the call site). Trailing is
+            // also where close/done lives in an iOS modal, so it reads
+            // correctly on iPhone too.
+            Spacer(minLength: 6)
+
             Button(action: { state.closeScript() }) {
                 // 44pt outer hit target per Apple HIG; inner capsule is
                 // drawn at the visual size we want (36×32) so the chrome
@@ -37,8 +48,6 @@ struct PrompterTopBarView: View {
                     .contentShape(Rectangle())
             }
             .accessibilityLabel("Back to library")
-
-            Spacer(minLength: 6)
         }
         .padding(.horizontal, 10)
     }

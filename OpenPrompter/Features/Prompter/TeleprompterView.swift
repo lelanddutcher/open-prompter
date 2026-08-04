@@ -130,6 +130,12 @@ struct TeleprompterView: View {
         PrompterFont(rawValue: prompterFontRaw) ?? .default
     }
 
+    /// Left-edge reading-progress bar visibility (3.1). Same @AppStorage
+    /// reasoning as the font above — Settings is modal from the library, so a
+    /// stored VM copy would go stale on an already-open prompter. Default
+    /// `true` matches the registration domain (= today's behavior).
+    @AppStorage(PrefKey.showReadingProgressBar.rawValue) private var showReadingProgressBar: Bool = true
+
     /// Resolved enum from the @AppStorage raw string. Falls back to `.off`
     /// for an unknown value (downgrade safety).
     private var cameraStyle: CameraStyle {
@@ -195,11 +201,15 @@ struct TeleprompterView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // Left-edge read-position bar (classic green) — a page-scrollbar
         // "where am I in the script" glance. Mounted outside the mirrored
-        // text so it never flips; purely informational.
+        // text so it never flips; purely informational. Optional as of 3.1
+        // (Settings → reading); read via @AppStorage so the toggle applies to
+        // an already-open prompter without a re-mount.
         .overlay(alignment: .leading) {
-            ReadingProgressBar(fraction: vm.readFraction)
-                .padding(.leading, 3)
-                .padding(.vertical, 6)
+            if showReadingProgressBar {
+                ReadingProgressBar(fraction: vm.readFraction)
+                    .padding(.leading, 3)
+                    .padding(.vertical, 6)
+            }
         }
         // Read PipTile's hidden state so any future "dim peer chrome when
         // the tile is tucked away" affordance has a hook. The camera
@@ -272,6 +282,17 @@ struct TeleprompterView: View {
                     onVoiceTap: handleVoiceTap
                 )
             }
+            // 3.2: cap the bottom chrome on iPad. Uncapped, the chip strip and
+            // the PLAY/VOICE row stretch the full ~1366pt of a 13-inch panel,
+            // which both looks like a blown-up phone app and pushes the
+            // controls out to the far edges where they are awkward to reach on
+            // a mounted iPad. No-op on iPhone.
+            // Match the SCRIPT COLUMN's measure exactly. A narrower chrome
+            // than the text column bisects every reading line — crisp at the
+            // edges, obscured in the middle — which is how the first version
+            // of this cap shipped. Same width means the chrome covers exactly
+            // what it sits over.
+            .padContentWidth(scriptColumnMaxWidth)
             .padding(.bottom, 6)
             .opacity(vm.focus || cameraPromoted ? 0.0 : 1.0)
             .allowsHitTesting(!vm.focus)
@@ -757,7 +778,21 @@ struct TeleprompterView: View {
                 }
             }
         }
+        .onAppear {
+            // Keep the display awake while a script is open.
+            //
+            // Reading a teleprompter is the one activity where the user
+            // deliberately does NOT touch the screen, so iOS auto-lock fires
+            // mid-take and the script vanishes — the single worst failure this
+            // app can have, and it was unhandled anywhere until 3.2. Scoped to
+            // the prompter (not the whole app) and cleared in `.onDisappear`,
+            // so the library and Settings sleep normally.
+            UIApplication.shared.isIdleTimerDisabled = true
+        }
         .onDisappear {
+            // Let the screen sleep again once we leave the prompter. Paired
+            // with the enable in `.onAppear` — see the note there.
+            UIApplication.shared.isIdleTimerDisabled = false
             mediaSource?.stop()
             gcKeyboardSource?.stop()
             gcMouseSource?.stop()
@@ -803,6 +838,30 @@ struct TeleprompterView: View {
         )
     }
 
+    /// Readable line length for the script column (3.2).
+    ///
+    /// Uncapped, each line of script runs the full width of whatever it is
+    /// given — ~1366pt on a 13-inch iPad — so the eye has to traverse the
+    /// entire panel per line. That is the opposite of what a teleprompter is
+    /// for, and it is why long measures are avoided in typesetting generally.
+    ///
+    /// Scales with the reader's chosen font size so characters-per-line stays
+    /// roughly constant as they scale text, rather than pinning an absolute
+    /// width that only suits one size.
+    ///
+    /// Keyed to WIDTH, not device: `maxWidth` is an upper bound, so any
+    /// container narrower than the cap (a phone in portrait, a narrow iPad
+    /// window, a small Mac window) simply fills and the cap is inert. That
+    /// keeps this correct as iPad/Mac windowing converges, where the device
+    /// idiom no longer predicts available width.
+    ///
+    /// NOTE: this now also applies in iPhone LANDSCAPE, where ~844pt of width
+    /// previously produced very long lines. That is a deliberate behavior
+    /// change from the phone-only era — flagged for review.
+    private var scriptColumnMaxWidth: CGFloat {
+        max(560, CGFloat(vm.fontSize) * 12)
+    }
+
     @ViewBuilder
     private var scrollingText: some View {
         GeometryReader { geo in
@@ -832,7 +891,8 @@ struct TeleprompterView: View {
                             )
                     }
                 }
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: scriptColumnMaxWidth)
+                .frame(maxWidth: .infinity)   // center the capped column
                 .padding(.horizontal, 24)
                 // Top padding lets the first line start roughly mid-viewport (eye-line).
                 // Bottom padding lets the last line scroll up past the middle.

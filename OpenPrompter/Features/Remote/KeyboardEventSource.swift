@@ -98,10 +98,21 @@ final class KeyboardEventSource: RemoteEventSource {
         case .pageDown:   return .pageDown
         default:
             // Single-character keys come through `press.characters`. SwiftUI
-            // does not tell us whether a digit/symbol came from the top row
-            // or keypad; GameController does, so it owns the precise 10-key
-            // path. This fallback still makes digits and keypad-style
-            // symbols learnable before GCKeyboard has attached.
+            // does NOT report whether a character came from the top row or the
+            // numeric keypad — only GameController carries that identity, so
+            // GameController owns the precise 10-key path.
+            //
+            // Letters and digits are safe here because they resolve to the
+            // GENERIC `.letter` / `.digit` cases, which say nothing about
+            // physical origin.
+            //
+            // Symbols are deliberately NOT mapped. Attributing a bare "-" or
+            // "=" to `.keypadMinus` / `.keypadEqual` would mislabel an ordinary
+            // keyboard's top-row keys as "Keypad …" in Settings, and because
+            // `.keypadMinus` ships bound to speedDown by default, a plain
+            // keyboard's minus key would silently become a speed control.
+            // Better to return nil and let the GameController path — which
+            // knows the real key code — own every keypad binding.
             let chars = press.characters.lowercased()
             if let c = chars.first, chars.count == 1, c.isLetter {
                 return .letter(c)
@@ -109,15 +120,7 @@ final class KeyboardEventSource: RemoteEventSource {
             if let c = chars.first, chars.count == 1, c.isNumber {
                 return .digit(c)
             }
-            switch chars {
-            case "+": return .keypadPlus
-            case "-": return .keypadMinus
-            case "*": return .keypadMultiply
-            case "/": return .keypadDivide
-            case ".": return .keypadDecimal
-            case "=": return .keypadEqual
-            default:  return nil
-            }
+            return nil
         }
     }
 }

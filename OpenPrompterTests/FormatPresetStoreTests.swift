@@ -17,6 +17,14 @@
 //  Scaffolding mirrors RecordingAspectTests: snapshot + restore the touched
 //  standard-defaults keys so the rest of the suite sees pristine state.
 //
+//  HERMETICITY RULE (learned the hard way): the mirror tests below must NEVER
+//  touch `NSUbiquitousKeyValueStore.default` or `UserDefaults.standard`. The
+//  real ubiquitous store silently no-ops when no iCloud account is signed in,
+//  so an assertion against it passes on a long-lived simulator and fails on
+//  every clean machine — which is exactly how an outside contributor's first
+//  clone of this repo greeted them with a red suite (2026-08-04). Use the
+//  injected `FakeKeyValueStore` + a scratch `UserDefaults(suiteName:)`.
+//
 
 import XCTest
 @testable import OpenPrompter
@@ -157,28 +165,103 @@ final class FormatPresetStoreTests: XCTestCase {
 
     // MARK: - iCloud mirror + registration default
 
+    /// Distinct suite per call so writes from one test can't leak into
+    /// another — matches the `RemoteBindingStoreTests` convention.
+    private func makeDefaults() -> UserDefaults {
+        let suiteName = "FormatPresetStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        return defaults
+    }
+
+    /// In-memory stand-in for `NSUbiquitousKeyValueStore`.
+    ///
+    /// The real store silently no-ops with no iCloud account signed in, so the
+    /// previous version of this test — which pushed to
+    /// `NSUbiquitousKeyValueStore.default` and read back — failed on any clean
+    /// machine while passing on a long-lived simulator. Reported by an outside
+    /// contributor who cloned the repo (2026-08-04). Never assert mirror
+    /// behavior against the real store.
+    private final class FakeKeyValueStore: KeyValueStoring {
+        private(set) var storage: [String: Any] = [:]
+        private(set) var synchronizeCount = 0
+
+        func object(forKey aKey: String) -> Any? { storage[aKey] }
+
+        func set(_ anObject: Any?, forKey aKey: String) {
+            if let anObject {
+                storage[aKey] = anObject
+            } else {
+                storage.removeValue(forKey: aKey)
+            }
+        }
+
+        @discardableResult
+        func synchronize() -> Bool {
+            synchronizeCount += 1
+            return true
+        }
+    }
+
+    /// The list itself is the contract, so assert it directly — no I/O, no
+    /// ambient state, no inference from a cloud round-trip.
     func testMirrorKeyListIncludesPromptKeysExcludesCoachMark() {
-        // Reach the private mirroredKeys list through the pull/push behavior:
-        // set a prompt key, push, and assert it landed in the ubiquitous
-        // store; assert the coach-mark key does NOT.
-        let kv = NSUbiquitousKeyValueStore.default
-        kv.removeObject(forKey: PrefKey.formatPromptFormatOverride.rawValue)
-        kv.removeObject(forKey: PrefKey.coachMarkFormatShown.rawValue)
+        let keys = UbiquitousPrefsMirror.mirroredKeys
 
-        UserDefaults.standard.set("mirror me", forKey: PrefKey.formatPromptFormatOverride.rawValue)
-        UserDefaults.standard.set(true, forKey: PrefKey.coachMarkFormatShown.rawValue)
+        XCTAssertTrue(keys.contains(.formatPromptFormatOverride),
+                      "Format prompt override must mirror across devices.")
+        XCTAssertTrue(keys.contains(.formatPromptCleanupOverride),
+                      "Cleanup prompt override must mirror across devices.")
+        XCTAssertTrue(keys.contains(.formatPromptCustom),
+                      "Custom prompt must mirror across devices.")
+        XCTAssertTrue(keys.contains(.formatCustomName),
+                      "The custom preset name travels with its prompt.")
 
-        UbiquitousPrefsMirror.pushToCloud()
+        XCTAssertFalse(keys.contains(.coachMarkFormatShown),
+                       "The Format coach-mark flag must stay device-local.")
+        XCTAssertFalse(keys.contains(.labsFormat),
+                       "The Format labs flag is a per-device capability toggle.")
+    }
 
-        XCTAssertEqual(kv.string(forKey: PrefKey.formatPromptFormatOverride.rawValue),
+    /// Push behavior, exercised hermetically against a fake store + a scratch
+    /// defaults suite. Covers what the old cloud round-trip intended to.
+    func testPushToCloudMirrorsPromptKeyButNotCoachMark() {
+        let defaults = makeDefaults()
+        let kv = FakeKeyValueStore()
+
+        defaults.set("mirror me", forKey: PrefKey.formatPromptFormatOverride.rawValue)
+        defaults.set(true, forKey: PrefKey.coachMarkFormatShown.rawValue)
+
+        UbiquitousPrefsMirror.pushToCloud(to: kv, from: defaults)
+
+        XCTAssertEqual(kv.object(forKey: PrefKey.formatPromptFormatOverride.rawValue) as? String,
                        "mirror me",
-                       "Format prompt override must be mirrored to iCloud KVS.")
+                       "Format prompt override must be pushed to the ubiquitous store.")
         XCTAssertNil(kv.object(forKey: PrefKey.coachMarkFormatShown.rawValue),
-                     "The Format coach-mark flag must stay device-local (not mirrored).")
+                     "The Format coach-mark flag must never leave the device.")
+        XCTAssertEqual(kv.synchronizeCount, 1, "Push should synchronize exactly once.")
+    }
 
-        // Cleanup KVS so we don't leave test junk in the ubiquitous store.
-        kv.removeObject(forKey: PrefKey.formatPromptFormatOverride.rawValue)
-        UserDefaults.standard.removeObject(forKey: PrefKey.coachMarkFormatShown.rawValue)
+    /// Pull direction — previously untested entirely.
+    func testPullFromCloudWritesMirroredKeysIntoDefaults() {
+        let defaults = makeDefaults()
+        let kv = FakeKeyValueStore()
+
+        kv.set("from another device", forKey: PrefKey.formatPromptCustom.rawValue)
+        kv.set(true, forKey: PrefKey.coachMarkFormatShown.rawValue)
+
+        UbiquitousPrefsMirror.pullFromCloud(from: kv, into: defaults)
+
+        XCTAssertEqual(defaults.string(forKey: PrefKey.formatPromptCustom.rawValue),
+                       "from another device",
+                       "A mirrored key arriving from iCloud must land in defaults.")
+        // NOT `XCTAssertNil`: `Prefs` registers `coachMarkFormatShown` as
+        // `false` (Prefs.swift), and the registration domain is process-wide,
+        // so `object(forKey:)` resolves to 0 for ANY UserDefaults instance —
+        // the key is never absent. The real contract is that the cloud's
+        // `true` did not overwrite it.
+        XCTAssertFalse(defaults.bool(forKey: PrefKey.coachMarkFormatShown.rawValue),
+                       "A non-mirrored key must not be written even if present in KVS.")
     }
 
     func testLabsFormatRegistrationDefaultIsDebugOn() {

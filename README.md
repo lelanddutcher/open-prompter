@@ -35,14 +35,17 @@ open prompter is the whole feature set, free, MIT-licensed forever. it reads the
 - **six legibility-tuned fonts** built in: Atkinson Hyperlegible (default), Lexend, System Sans, Verdana, New York (Serif), and the brand monospace.
 - **adjustable scroll speed** (5–200 px/s) and font size (16–160 pt) so dense scripts AND eye-line reads both work.
 - **focus mode** dims the chrome for clean recording — a single eye button brings it back.
-- **left-edge reading-progress bar** — a slim green marker shows how far you are through the script at a glance, like a page scrollbar.
+- **left-edge reading-progress bar** — a slim green marker shows how far you are through the script at a glance, like a page scrollbar. turn it off in settings if you'd rather not see it.
+- **iPhone and iPad** — same app, laid out for the screen it's on. an iPad on a teleprompter mount is the classic studio rig; the script column keeps a readable line length instead of stretching across the whole panel.
+- **the screen stays awake** while a script is open — reading is the one thing you do without touching the phone.
 - **automatic landscape ↔ portrait** — hold the phone whichever way you're shooting and the prompter *and* the recording follow. the aspect picker sets shape; your grip sets orientation.
 - **full-bleed prompter** — no UI chrome fighting your eye-line. on iOS 26 the controls render in Liquid Glass.
 
 ## camera and recording
 
 - **front camera lives inside the app.** picture-in-picture tile floats over the script while you read; tap it to promote to a full-screen camera preview, tap minimize to collapse it back.
-- **five aspect ratios:** 9:16 vertical, 1:1 square, 4:3 classic, 16:9 horizontal, and **open gate**.
+- **four aspect ratios:** **open gate** (the default — the widest your camera captures, never a crop), plus 16:9, 4:3 classic, and 1:1 square.
+- **mirror the recorded file** — optional, off by default. flips the saved video left-to-right the way snapchat and the stock selfie camera do, so it matches what you saw while reading. separate from the on-screen mirror chip, which only flips the display for beam-splitter rigs.
 - **open gate on iPhone 17** captures the full 1:1 front sensor at 3840 × 3840. perform your script once, crop a 9:16 / 1:1 / 16:9 from the same take in your editor. no reshoot for every platform. (older iPhones record at the maximum frame their sensor exposes — the square-headroom re-crop trick is iPhone 17-only.)
 - **save next to the script** — toggle in Settings → Recording. when on, the .mov writes to the same folder as the .md so iCloud delivers the take to your mac next to the script. no Photos library hunt, no AirDrop dance.
 - **standard or high-bitrate HEVC**, sized for quality + efficiency. true 24p frame rate or 30p or 60p (if you're feeling wild).
@@ -62,7 +65,9 @@ paste a messy transcript or a wall of notes and let **Format** reshape it into c
 
 ## bluetooth remote
 
-pair any Bluetooth keyboard, media remote, or presentation clicker and bind buttons to play, pause, mirror, jump-to-start, and other prompter actions. a **"learn your remote" wizard** maps each button by having you press it. keyboards, media / consumer-control keys, and mouse-class remotes (D-pad clickers that present as a pointer) all flow through one unified event bus. volume-button capture is opt-in (Settings → Remote) so the volume rocker still works as a volume rocker by default.
+pair any Bluetooth keyboard, media remote, or presentation clicker and bind buttons to play, pause, mirror, jump to the top or the end of the script, and other prompter actions. a **"learn your remote" wizard** maps each button by having you press it — including keys we've never heard of, so a programmable or DIY controller works too. keyboards, numeric keypads, media / consumer-control keys, and mouse-class remotes all flow through one unified event bus. volume-button capture is opt-in (Settings → Remote) so the volume rocker still works as a volume rocker by default.
+
+> **the best remote for this app is a cheap Bluetooth 10-key.** it pairs as a real keyboard, so it keeps working whatever has focus; every key sends a distinct code, so you get ~17 bindable buttons; and the keys are big enough to hit by feel while you look at the lens. purpose-built "camera remotes" usually expose exactly one usable button — their d-pads are pointers, which iOS doesn't hand to apps.
 
 ## what it parses
 

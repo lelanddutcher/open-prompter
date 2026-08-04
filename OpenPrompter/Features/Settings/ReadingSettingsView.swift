@@ -26,6 +26,7 @@ struct ReadingSettingsView: View {
     @State private var vMirrorDefault: Bool = Prefs.vMirrorDefault
     @State private var appearance: Prefs.Appearance = Prefs.appearance
     @State private var prompterFont: String = Prefs.prompterFont.rawValue
+    @State private var showReadingProgressBar: Bool = Prefs.showReadingProgressBar
 
     var body: some View {
         Form {
@@ -61,6 +62,20 @@ struct ReadingSettingsView: View {
                 Text("also hides camera cues and stage directions like [Cut to: …], (beat), and ALL-CAPS shot notes (WIDE SHOT, CUT TO:) from the reading flow. your file is never changed.")
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.dim)
+            }
+
+            Section("progress") {
+                Toggle(isOn: $showReadingProgressBar) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("reading-progress bar")
+                        Text("thin green line down the left edge showing how far into the script you are")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.dim)
+                    }
+                }
+                .onChange(of: showReadingProgressBar) { _, new in
+                    Prefs.showReadingProgressBar = new
+                }
             }
 
             Section("defaults") {

@@ -111,11 +111,16 @@ struct CaptureContext: Codable {
     let pickerAspectRaw: String
     /// Human-readable picker label (e.g. `"9:16 vertical"`).
     let pickerAspectName: String
-    /// Mirror state at self-test time. Mirror is preview-only — the file
-    /// is never mirrored — but knowing this is useful for orientation
-    /// regression when both rotation and mirror were on simultaneously.
+    /// In-prompter mirror chip state at self-test time. That mirror is
+    /// PREVIEW/TEXT-only and never touches the file — see
+    /// `mirrorRecordedVideo` for the one that does — but knowing it is useful
+    /// for orientation regression when both were on simultaneously.
     let mirrorHorizontal: Bool
     let mirrorVertical: Bool
+    /// `Prefs.recordingMirrorVideo` (3.1 item 3) — the SELFIE-MIRROR that DOES
+    /// affect the written file, as a horizontal flip composed into the video
+    /// track's `preferredTransform`. Distinct from `mirrorHorizontal` above.
+    let mirrorRecordedVideo: Bool
     /// `utsname.machine` identifier (e.g. `"iPhone18,2"` for iPhone 17
     /// Pro Max). Drives device-class lookups in `OrientationPolicy`.
     let deviceModelIdentifier: String
@@ -152,6 +157,34 @@ struct CaptureContext: Codable {
     /// pins during the handedness-constant roundtrips (§5).
     /// `"portrait"` | `"landscapeLeft"` | `"landscapeRight"`.
     let capturedHold: String
+
+    // MARK: - Rotation coordinator (3.1 item 4)
+    //
+    // These four fields are the whole landscape diagnostic. If a landscape
+    // take comes back wrong, read them FIRST — they say whether the OS was
+    // even consulted, and what it answered.
+
+    /// `AVCaptureDevice.RotationCoordinator`'s live capture angle delta from
+    /// the portrait reference, in degrees. `0` for a portrait take BY
+    /// CONSTRUCTION (the reference re-latches whenever the interface is
+    /// upright), so a portrait self-test showing anything else means the latch
+    /// is broken.
+    let rotationCaptureDeltaDegrees: Double
+    /// The same delta for the PREVIEW connection. Drives the PiP tile.
+    let rotationPreviewDeltaDegrees: Double
+    /// True once a portrait reference has been observed — i.e. the deltas can
+    /// be trusted. False means the app has not been seen upright since launch
+    /// and every delta is a safe `0` (today's behaviour), NOT a wrong guess.
+    let rotationIsCalibrated: Bool
+    /// Whether a preview layer was in the view hierarchy at RECORD time.
+    /// The coordinator returns 0° for preview without one, so a `false` here
+    /// explains a zero preview delta.
+    let rotationHasPreviewLayer: Bool
+    /// True when the four fields above were captured AT REC TAP (the normal
+    /// case). False means no take has been recorded since install and they
+    /// fell back to a live read — in which case they describe the phone's pose
+    /// right now, NOT the recording, and must not be used to diagnose it.
+    let rotationValuesAreFromRecordTime: Bool
 }
 
 /// Per-aspect expectation vs. actual file dims/transform. Computed from
@@ -381,10 +414,27 @@ enum RecordingSelfTest {
             width: videoWidth,
             height: videoHeight
         ) ?? .landscape
+        // 3.1: the expected transform is the verified base composed with the
+        // coordinator's live capture delta and the selfie-mirror flag — the
+        // exact expression `RecordingSession` evaluates at writer bring-up. A
+        // mismatch here now means the delta moved between the take and the
+        // self-test (the user rotated after recording), which the JSON's
+        // `rotationCaptureDeltaDegrees` makes visible rather than mysterious.
+        // RECORD-TIME delta, matching every other rotation field in the report.
+        // Reading the LIVE delta here made the expectation describe the phone's
+        // pose at button-tap: record in landscape, walk to Settings holding the
+        // phone upright, and the expectation was computed at delta 0 while the
+        // file legitimately carried +90 — so `transformMatches` reported FALSE
+        // on a correctly-rotated file, and the detail string printed a
+        // captureDelta that had not been used to build the expectation it just
+        // failed. That is the same measure-the-wrong-moment defect the
+        // record-time stash was introduced to remove, left behind in the one
+        // line that decides pass/fail.
         let expectedTransform = OrientationPolicy.writerTransform(
             for: pickerAspect,
-            hold: capturedHold,
-            bufferShape: bufferShape
+            captureDeltaDegrees: CGFloat(context.rotationCaptureDeltaDegrees),
+            bufferShape: bufferShape,
+            mirrored: Prefs.recordingMirrorVideo
         )
         let expectedTransformArray: [Double] = [
             Double(expectedTransform.a), Double(expectedTransform.b),
@@ -455,7 +505,35 @@ enum RecordingSelfTest {
         assertions.append(.init(
             name: "transform matches OrientationPolicy for aspect '\(context.pickerAspectRaw)'",
             passed: transformMatches,
-            detail: "expected \(expectedTransformArray), got \(preferredTransform)"
+            detail: "expected \(expectedTransformArray), got \(preferredTransform) "
+                + "(hold=\(context.capturedHold), captureDelta=\(context.rotationCaptureDeltaDegrees)°, "
+                + "mirrorRecordedVideo=\(context.mirrorRecordedVideo))"
+        ))
+        // 3.1 item 4 — the landscape diagnostic, in one row.
+        //
+        // Read this FIRST when a landscape take comes back wrong, because it
+        // says which of the two very different failures happened:
+        //   • NOT calibrated  → the coordinator was never seen upright, every
+        //     delta was a safe 0, and the file is simply UNROTATED. Fix: open
+        //     the app in portrait once, then re-record.
+        //   • calibrated, portrait hold, delta ≠ 0 → the portrait latch is
+        //     BROKEN and portrait output is at risk. This is the serious one.
+        //   • calibrated, sideways hold, delta 0 → the interface never
+        //     rotated (rotation lock on), which is working as intended.
+        let deltaMatchesHold = context.capturedHold == "portrait"
+            ? context.rotationCaptureDeltaDegrees == 0
+            : true
+        assertions.append(.init(
+            name: "rotation coordinator: portrait hold implies zero delta",
+            passed: deltaMatchesHold,
+            detail: "calibrated=\(context.rotationIsCalibrated) "
+                + "hold=\(context.capturedHold) "
+                + "captureDelta=\(context.rotationCaptureDeltaDegrees)° "
+                + "previewDelta=\(context.rotationPreviewDeltaDegrees)° "
+                + "previewLayerAttached=\(context.rotationHasPreviewLayer)"
+                + (context.rotationIsCalibrated
+                   ? ""
+                   : " — NOT CALIBRATED: no portrait reference observed yet, so every delta is a safe 0 (unrotated), not a wrong guess")
         ))
         // SKIP this assertion entirely for .openGate (expectedAspectRatio == 0
         // = "playback aspect is device-dependent, can't predict"). Including
@@ -718,11 +796,14 @@ enum RecordingSelfTest {
         }
 
         let modelIdentifier = OrientationPolicy.currentDeviceModelIdentifier
+        let rotation = OrientationPolicy.rotationSource
+        let stashed = RecordingSelfTestStash.recordTimeRotation()
         return CaptureContext(
             pickerAspectRaw: aspectRaw,
             pickerAspectName: aspect.displayName,
             mirrorHorizontal: Prefs.hMirrorDefault,
             mirrorVertical: Prefs.vMirrorDefault,
+            mirrorRecordedVideo: Prefs.recordingMirrorVideo,
             deviceModelIdentifier: modelIdentifier,
             deviceGenerationHint: OrientationPolicy.DeviceGenerationHint
                 .from(modelIdentifier: modelIdentifier).rawValue,
@@ -736,7 +817,25 @@ enum RecordingSelfTest {
                                            // — but at self-test time the session
                                            // may already be torn down. Best-
                                            // effort.
-            capturedHold: OrientationPolicy.currentPhysicalHold().rawValue  // V3 §07
+            // RECORD-TIME values, not live ones. Sampling these when the user
+            // taps "run self-test" describes the pose at button-tap — by which
+            // point they have rotated upright to reach the button — so a
+            // landscape take reported `portrait / 0°` regardless of what
+            // happened during the recording. That made the one diagnostic
+            // built to explain landscape actively misleading. `stashed` is
+            // captured at REC tap; the live read survives only as a fallback
+            // for a device that has not recorded since install.
+            capturedHold: stashed?.hold
+                ?? OrientationPolicy.currentPhysicalHold().rawValue,
+            rotationCaptureDeltaDegrees: stashed?.captureDelta
+                ?? Double(rotation?.captureDeltaDegrees ?? 0),
+            rotationPreviewDeltaDegrees: stashed?.previewDelta
+                ?? Double(rotation?.previewDeltaDegrees ?? 0),
+            rotationIsCalibrated: stashed?.isCalibrated
+                ?? (rotation?.isCalibrated ?? false),
+            rotationHasPreviewLayer: stashed?.hasPreviewLayer
+                ?? (rotation?.hasPreviewLayer ?? false),
+            rotationValuesAreFromRecordTime: stashed != nil
         )
     }
 

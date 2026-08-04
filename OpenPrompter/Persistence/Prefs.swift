@@ -25,6 +25,9 @@ enum PrefKey: String, CaseIterable {
     case vMirrorDefault = "pref.vMirrorDefault"
     case focusDefault = "pref.focusDefault"
     case aggressiveStripping = "pref.aggressiveStripping"
+    /// Show the left-edge reading-progress bar. Default ON = today's
+    /// behavior (3.1).
+    case showReadingProgressBar = "pref.showReadingProgressBar"
     /// Stage-direction / camera-cue display stripping (V3 sprint item 4).
     /// When on (default), the aggressive rules also strip broadened stage
     /// directions and camera cues — `[Cut to: …]`, `(beat)`, ALL-CAPS shot
@@ -122,10 +125,10 @@ enum PrefKey: String, CaseIterable {
     /// so the chip doesn't fire the system prompt twice in a single take.
     case recordingPhotosPermissionAsked = "pref.recording.photosPermissionAsked"
     /// Recording aspect SHAPE. Raw value of `RecordingAspect`. New users
-    /// default to `"ratio16x9"` (= `.wide`, the merged 16:9 shape that
-    /// auto-orients to 9:16 vertical when held upright, V3 §07); existing
-    /// users who already touched the recording feature are migrated to
-    /// `"openGate"` by `migrateRecordingAspectToOpenGate(in:domain:)`, and a
+    /// default to `"openGate"` (3.1 — the full-sensor readout, the only shape
+    /// that is never a crop and never OS-gated); existing users who already
+    /// touched the recording feature are migrated to the SAME value by
+    /// `migrateRecordingAspectToOpenGate(in:domain:)`, and a
     /// persisted legacy `"ratio9x16"` is collapsed to `"ratio16x9"` by
     /// `migrateVerticalAspectToWideShape(in:domain:)` so their behaviour
     /// doesn't change unexpectedly. Mirrored to iCloud KVS.
@@ -145,6 +148,12 @@ enum PrefKey: String, CaseIterable {
     /// these as scrubber ticks). Default ON. Independent of the metadata
     /// track above. Mirrored to iCloud KVS.
     case recordingMarkerChapterTrack = "pref.recording.marker.chapterTrack"
+    /// Mirror the RECORDED FILE horizontally, the way Snapchat and the stock
+    /// selfie camera do — so the take matches what the speaker saw in the
+    /// preview. Distinct from the in-prompter mirror chip, which flips only
+    /// the on-screen text/preview for beam-splitter rigs and never touches the
+    /// written file. Default OFF = today's true-image output (3.1).
+    case recordingMirrorVideo = "pref.recording.mirrorVideo"
 
     // MARK: - On-device Format (V3 item C)
 
@@ -227,6 +236,7 @@ enum PrefKey: String, CaseIterable {
         case .vMirrorDefault: return false
         case .focusDefault: return false
         case .aggressiveStripping: return true
+        case .showReadingProgressBar: return true   // visible, as shipped
         case .stripStageDirections: return true
         case .lastFileURL: return ""
         case .onboardingCompleted: return false
@@ -265,20 +275,22 @@ enum PrefKey: String, CaseIterable {
             // 2.5.0 hotfix: graduated. See `labsBluetoothRemote` above.
             return true
         case .recordingPhotosPermissionAsked: return false
-        // The registration-domain default is "ratio16x9" (= `.wide`, the
-        // merged 16:9 shape) — fresh installs land on the widescreen shape,
-        // which auto-orients to 9:16 vertical when held upright (the
-        // social-share first impression is preserved, V3 §07). Existing users
-        // with a recording history get migrated to "openGate" by
-        // `migrateRecordingAspectToOpenGate(in:domain:)` BEFORE registration
-        // happens, so this default only applies to truly new users.
-        case .recordingAspect: return "ratio16x9"
+        // The registration-domain default is "openGate" (3.1) — fresh installs
+        // land on the full-sensor readout. 16:9 held this slot through 3.0 but
+        // is a CROP on any front sensor that isn't natively 16:9, which is a
+        // surprising first-record aspect off the iPhone 17 family. Open gate
+        // has no `requiresIOS26` constraint, so it is honored everywhere.
+        // Existing users with a recording history are ALSO pinned to "openGate"
+        // by `migrateRecordingAspectToOpenGate(in:domain:)` BEFORE registration
+        // happens — same value, so new and existing installs now converge.
+        case .recordingAspect: return "openGate"
         case .coachMarkRecordingAspectShown: return false
         // Video markers (V3 headline). BOTH output shapes on by default —
         // the feature is the founder's explicit ask and both an NLE marker
         // track and Photos scrubber ticks are wanted out of the box.
         case .recordingMarkerMetadataTrack: return true
         case .recordingMarkerChapterTrack: return true
+        case .recordingMirrorVideo: return false   // true image, as shipped
         // On-device Format (V3 item C). Labs flag defaults ON in DEBUG, OFF
         // in Release until it graduates — matches the other labs* flags'
         // pre-graduation shape (they were flipped to true only after the
@@ -381,8 +393,10 @@ enum Prefs {
     /// One-shot migration: existing users who already touched the recording
     /// feature get pinned to `"openGate"` so the picker introduction doesn't
     /// silently change the shape of their next recording. Brand-new installs
-    /// fall through and pick up the registration-domain default
-    /// (`"ratio9x16"`) — the new social-share-friendly first impression.
+    /// fall through and pick up the registration-domain default — which as of
+    /// 3.1 is ALSO `"openGate"`, so the two paths now agree. Keep the
+    /// migration anyway: it PERSISTS the value for existing users, which is
+    /// what protects them if the registration default ever moves again.
     ///
     /// "Existing user" is inferred from any of `recordingQuality`,
     /// `recordingFramerate`, or `cameraStyle` having been written explicitly
@@ -402,7 +416,7 @@ enum Prefs {
         let persistent = store.persistentDomain(forName: domain) ?? [:]
         // Already wrote an aspect — nothing to do.
         guard persistent[aspectKey] == nil else { return }
-        // First-run user — let the registration default ("ratio9x16") apply.
+        // First-run user — let the registration default ("openGate") apply.
         let isExistingUser = persistent[qualityKey] != nil
             || persistent[framerateKey] != nil
             || persistent[cameraStyleKey] != nil
@@ -652,6 +666,19 @@ enum Prefs {
         set { defaults.set(newValue, forKey: PrefKey.recordingSaveToScriptFolder.rawValue) }
     }
 
+    /// Mirror the recorded file horizontally (selfie-style). See the PrefKey
+    /// doc — this is the FILE, not the on-screen mirror chip.
+    static var recordingMirrorVideo: Bool {
+        get { defaults.bool(forKey: PrefKey.recordingMirrorVideo.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.recordingMirrorVideo.rawValue) }
+    }
+
+    /// Show the left-edge reading-progress bar.
+    static var showReadingProgressBar: Bool {
+        get { defaults.bool(forKey: PrefKey.showReadingProgressBar.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.showReadingProgressBar.rawValue) }
+    }
+
     /// Whether to write the in-file timed-metadata marker track (NLE-read).
     /// Default ON via the registration domain (`defaultValue == true`), so
     /// `defaults.bool` returns true until the user explicitly turns it off.
@@ -678,14 +705,14 @@ enum Prefs {
     }
 
     /// Recording aspect ratio raw value. Reads always fall back to
-    /// `"ratio16x9"` (= `.wide`, the new-user default) if the stored value is
+    /// `"openGate"` (the new-user default as of 3.1) if the stored value is
     /// missing or unknown — the migration runs at app launch, so production
     /// reads after `Prefs.register()` have already resolved the existing-user
-    /// case to `"openGate"` and any legacy `"ratio9x16"` to `"ratio16x9"`.
+    /// case to `"openGate"` too, and any legacy `"ratio9x16"` to `"ratio16x9"`.
     /// Settings reads through this as a `RecordingAspect` enum
     /// (`.canonicalShape` collapses a stray legacy value). V3 §07.
     static var recordingAspect: String {
-        get { defaults.string(forKey: PrefKey.recordingAspect.rawValue) ?? "ratio16x9" }
+        get { defaults.string(forKey: PrefKey.recordingAspect.rawValue) ?? "openGate" }
         set { defaults.set(newValue, forKey: PrefKey.recordingAspect.rawValue) }
     }
 

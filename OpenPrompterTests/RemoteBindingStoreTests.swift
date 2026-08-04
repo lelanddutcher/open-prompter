@@ -155,4 +155,42 @@ final class RemoteBindingStoreTests: XCTestCase {
         XCTAssertEqual(store.event(for: .space), .playPause)
         // The unknown entry was dropped without affecting the rest.
     }
+
+    // MARK: - rawKey catch-all (3.2)
+    //
+    // Any GCKeyCode with no named case now falls back to `.rawKey` instead of
+    // being dropped before `onCapture`, which previously left the
+    // learn-your-remote wizard waiting forever on function keys, Home/End, and
+    // most punctuation — and made programmable DIY controllers unbindable.
+
+    func testRawKeyIDRoundTrips() {
+        let key = RemoteKey.rawKey(104)             // 0x68 = F13
+        XCTAssertEqual(key.id, "kb.raw.104")
+        XCTAssertEqual(RemoteBindingStore.keyFromID("kb.raw.104"), key,
+                       "A rawKey binding must survive a persistence round trip.")
+    }
+
+    func testRawKeyIsLabelledForThePicker() {
+        // An unlabelled key would render blank in the bindings list.
+        XCTAssertFalse(RemoteKey.rawKey(104).displayName.isEmpty)
+        XCTAssertEqual(RemoteKey.rawKey(104).displayName, "Key 0x68")
+    }
+
+    func testRawKeyBindsAndResolvesLikeAnyOtherKey() {
+        let defaults = makeDefaults()
+        let store = RemoteBindingStore(defaults: defaults)
+        let f13 = RemoteKey.rawKey(104)
+
+        store.setBinding(.jumpToEnd, for: f13)
+        XCTAssertEqual(store.event(for: f13), .jumpToEnd)
+
+        // And survives a fresh store reading the same defaults.
+        let reloaded = RemoteBindingStore(defaults: defaults)
+        XCTAssertEqual(reloaded.event(for: f13), .jumpToEnd,
+                       "A rawKey binding must persist across store instances.")
+    }
+
+    func testDistinctRawKeyCodesAreDistinctKeys() {
+        XCTAssertNotEqual(RemoteKey.rawKey(104), RemoteKey.rawKey(105))
+    }
 }

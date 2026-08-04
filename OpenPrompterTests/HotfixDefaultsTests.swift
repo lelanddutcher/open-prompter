@@ -89,6 +89,93 @@ final class HotfixDefaultsTests: XCTestCase {
         )
     }
 
+    // MARK: - Recording aspect (3.1: open gate is the shipping default)
+
+    /// 3.1 flipped the fresh-install aspect from `"ratio16x9"` (`.wide`) to
+    /// `"openGate"`. 16:9 is a CROP on any front sensor that isn't natively
+    /// 16:9, so off the iPhone 17 family it was a surprising first-record
+    /// aspect. Open gate carries no `requiresIOS26` constraint — it is
+    /// honored on every device and OS we ship to. Brittle on purpose.
+    func test_recordingAspect_registrationDefault_isOpenGate() {
+        XCTAssertEqual(
+            PrefKey.recordingAspect.defaultValue as? String,
+            "openGate",
+            "Fresh installs must default to open gate (3.1). 16:9 is a crop on non-native sensors."
+        )
+    }
+
+    /// A fresh registration with no persisted value must resolve to
+    /// `"openGate"` — this is the read path `CameraStore` / `OrientationPolicy`
+    /// take on first launch.
+    func test_recordingAspect_freshRegistration_resolvesToOpenGate() {
+        let suiteName = "HotfixDefaultsTests.recordingAspect.\(UUID().uuidString)"
+        guard let store = UserDefaults(suiteName: suiteName) else {
+            XCTFail("could not create isolated UserDefaults suite")
+            return
+        }
+        defer { store.removePersistentDomain(forName: suiteName) }
+        store.register(defaults: [
+            PrefKey.recordingAspect.rawValue: PrefKey.recordingAspect.defaultValue
+        ])
+        XCTAssertEqual(
+            store.string(forKey: PrefKey.recordingAspect.rawValue),
+            "openGate",
+            "A fresh registration with no persisted value must resolve the aspect to open gate."
+        )
+    }
+
+    // MARK: - Reading-progress bar (3.1: optional, default ON)
+
+    /// The left-edge reading-progress bar became optional in 3.1. Default ON
+    /// preserves the shipped behavior — an existing user who upgrades must
+    /// not have the bar silently disappear.
+    func test_showReadingProgressBar_registrationDefault_isTrue() {
+        XCTAssertEqual(
+            PrefKey.showReadingProgressBar.defaultValue as? Bool,
+            true,
+            "The reading-progress bar must default ON — turning it off by default would silently change the prompter for every upgrading user."
+        )
+    }
+
+    /// Fresh registration resolves to `true`, matching the registration
+    /// default. This is the value `TeleprompterView`'s `@AppStorage` sees
+    /// before the user ever visits Settings.
+    func test_showReadingProgressBar_freshRegistration_resolvesToTrue() {
+        let suiteName = "HotfixDefaultsTests.progressBar.\(UUID().uuidString)"
+        guard let store = UserDefaults(suiteName: suiteName) else {
+            XCTFail("could not create isolated UserDefaults suite")
+            return
+        }
+        defer { store.removePersistentDomain(forName: suiteName) }
+        store.register(defaults: [
+            PrefKey.showReadingProgressBar.rawValue: PrefKey.showReadingProgressBar.defaultValue
+        ])
+        XCTAssertTrue(
+            store.bool(forKey: PrefKey.showReadingProgressBar.rawValue),
+            "A fresh registration with no persisted value must show the progress bar."
+        )
+    }
+
+    /// The `Prefs.showReadingProgressBar` accessor round-trips both ways.
+    /// Snapshot/restore the standard-defaults key so the rest of the suite
+    /// sees pristine state.
+    func test_showReadingProgressBar_roundTrips() {
+        let store = UserDefaults.standard
+        let key = PrefKey.showReadingProgressBar.rawValue
+        let saved = store.object(forKey: key)
+        defer {
+            if let saved { store.set(saved, forKey: key) } else { store.removeObject(forKey: key) }
+        }
+
+        Prefs.showReadingProgressBar = false
+        XCTAssertFalse(Prefs.showReadingProgressBar, "Setting false must read back false.")
+        XCTAssertFalse(store.bool(forKey: key), "The write must land on the backing key.")
+
+        Prefs.showReadingProgressBar = true
+        XCTAssertTrue(Prefs.showReadingProgressBar, "Setting true must read back true.")
+        XCTAssertTrue(store.bool(forKey: key), "The write must land on the backing key.")
+    }
+
     // MARK: - Permission usage strings
 
     /// Every permission that `PermissionPrimer.requestAllIfNeeded()`

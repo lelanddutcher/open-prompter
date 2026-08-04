@@ -142,27 +142,48 @@ final class OrientationPipelineTests: XCTestCase {
         XCTAssertEqual(t.d, 0, accuracy: 1e-6)
     }
 
-    // MARK: - V3 §07 MANDATORY anti-regression guard
+    // MARK: - 3.1 MANDATORY anti-regression guard
     //
-    // The single load-bearing guarantee: the portrait-hold 3-arg composition
-    // MUST equal the verified 2-arg transform for every (shape × bufferShape)
-    // cell. If auto-orientation ever changes portrait output — the one thing
-    // V3 §07 forbids — this fails at unit-test time, before any device build.
-    // The safety argument is `x ∘ identity == x`.
+    // THE single load-bearing guarantee of the RotationCoordinator adoption:
+    // a ZERO capture delta must reproduce the verified 2-arg transform for
+    // every (shape × bufferShape) cell, EXACTLY — not approximately. A zero
+    // delta is what every portrait take produces (the coordinator's portrait
+    // reference is re-latched whenever the interface is upright) and what
+    // every uncalibrated / camera-off / unit-test take produces. So this test
+    // is the proof that portrait output cannot change.
+    //
+    // Asserted with `==` on the whole transform rather than component-wise
+    // accuracy: `holdRotation(deltaDegrees: 0)` returns `.identity` by an
+    // early return, and `x.concatenating(.identity)` is exact, so there is no
+    // floating-point slack to allow for. If someone "simplifies" that early
+    // return into `CGAffineTransform(rotationAngle: 0)` the result is still
+    // mathematically identity but no longer bit-exact, and this test says so.
 
-    func testPortraitHoldEqualsVerifiedBaseForEveryShape() {
-        let shapes: [RecordingAspect] = [.wide, .classic, .square, .openGate]
+    func testZeroDeltaEqualsVerifiedBaseForEveryShape() {
+        let shapes: [RecordingAspect] = [.wide, .classic, .square, .openGate, .legacyVertical9x16]
         let buffers: [OrientationPolicy.BufferShape] = [.portrait, .landscape, .square]
         for shape in shapes {
             for buffer in buffers {
                 let verified = OrientationPolicy.writerTransform(       // 2-arg, untouched
-                    for: shape, bufferShape: buffer)
-                let composed = OrientationPolicy.writerTransform(       // 3-arg, portrait hold
-                    for: shape, hold: .portrait, bufferShape: buffer)
-                XCTAssertEqual(composed.a, verified.a, accuracy: 0.0001, "\(shape) × \(buffer): a")
-                XCTAssertEqual(composed.b, verified.b, accuracy: 0.0001, "\(shape) × \(buffer): b")
-                XCTAssertEqual(composed.c, verified.c, accuracy: 0.0001, "\(shape) × \(buffer): c")
-                XCTAssertEqual(composed.d, verified.d, accuracy: 0.0001, "\(shape) × \(buffer): d")
+                    for: shape.canonicalShape, bufferShape: buffer)
+                let composed = OrientationPolicy.writerTransform(       // coordinator form
+                    for: shape, captureDeltaDegrees: 0, bufferShape: buffer)
+                XCTAssertEqual(composed, verified, "\(shape) × \(buffer) must be bit-identical at zero delta")
+            }
+        }
+    }
+
+    /// The un-mirrored default must ALSO be bit-identical — the selfie-mirror
+    /// feature must not perturb the verified path when it is off (its `Prefs`
+    /// default). Guards against an "always compose the flip, with scale 1"
+    /// refactor that would introduce float noise into every recording.
+    func testMirrorOffIsBitIdenticalToVerifiedBase() {
+        for shape in [RecordingAspect.wide, .classic, .square, .openGate] {
+            for buffer in [OrientationPolicy.BufferShape.portrait, .landscape, .square] {
+                let verified = OrientationPolicy.writerTransform(for: shape, bufferShape: buffer)
+                let composed = OrientationPolicy.writerTransform(
+                    for: shape, captureDeltaDegrees: 0, bufferShape: buffer, mirrored: false)
+                XCTAssertEqual(composed, verified, "\(shape) × \(buffer) with mirror off")
             }
         }
     }
@@ -172,7 +193,7 @@ final class OrientationPipelineTests: XCTestCase {
     /// against a "cleanup" that flips `.wide` into the portrait-intent branch.
     func testWideShapePortraitBufferIsVerifiedPlusPiOverTwo() {
         let t = OrientationPolicy.writerTransform(
-            for: .wide, hold: .portrait, bufferShape: .portrait)
+            for: .wide, captureDeltaDegrees: 0, bufferShape: .portrait)
         XCTAssertEqual(t.a, 0, accuracy: 0.0001)
         XCTAssertEqual(t.b, 1, accuracy: 0.0001)   // +π/2 rotation: a=0,b=1,c=-1,d=0
         XCTAssertEqual(t.c, -1, accuracy: 0.0001)
@@ -183,38 +204,161 @@ final class OrientationPipelineTests: XCTestCase {
     func testLegacyVerticalAliasResolvesToWide() {
         for buffer in [OrientationPolicy.BufferShape.portrait, .landscape, .square] {
             let aliased = OrientationPolicy.writerTransform(
-                for: .legacyVertical9x16, hold: .portrait, bufferShape: buffer)
+                for: .legacyVertical9x16, captureDeltaDegrees: 0, bufferShape: buffer)
             let wide = OrientationPolicy.writerTransform(
-                for: .wide, hold: .portrait, bufferShape: buffer)
-            XCTAssertEqual(aliased.a, wide.a, accuracy: 0.0001, "\(buffer): a")
-            XCTAssertEqual(aliased.b, wide.b, accuracy: 0.0001, "\(buffer): b")
-            XCTAssertEqual(aliased.c, wide.c, accuracy: 0.0001, "\(buffer): c")
-            XCTAssertEqual(aliased.d, wide.d, accuracy: 0.0001, "\(buffer): d")
+                for: .wide, captureDeltaDegrees: 0, bufferShape: buffer)
+            XCTAssertEqual(aliased, wide, "\(buffer)")
         }
     }
 
-    /// holdRotation(.portrait) is identity — the composition hinge.
-    func testHoldRotationPortraitIsIdentity() {
-        XCTAssertTrue(OrientationPolicy.holdRotation(for: .portrait).isIdentity)
+    // MARK: - 3.1 delta math (replaces the deleted _UNVERIFIED constants)
+
+    /// Zero delta is identity — the composition hinge everything else rests on.
+    func testHoldRotationZeroDeltaIsIdentity() {
+        XCTAssertTrue(OrientationPolicy.holdRotation(deltaDegrees: 0).isIdentity)
+        // Values that FOLD to zero must also land on identity, not on a
+        // rotation-by-360 that is only approximately identity.
+        XCTAssertTrue(OrientationPolicy.holdRotation(deltaDegrees: 360).isIdentity)
+        XCTAssertTrue(OrientationPolicy.holdRotation(deltaDegrees: -360).isIdentity)
     }
 
-    /// The landscape holds compose a non-identity ±π/2 on top of the base.
-    /// We assert the constants' magnitude (both are ±π/2) and that they are
-    /// opposite handedness — NOT a specific sign, which ships UNVERIFIED and
-    /// is pinned on device (§5). Locking a sign here would freeze a guess.
-    func testLandscapeHoldRotationsAreOppositeSignedRightAngles() {
-        let left = OrientationPolicy.holdRotation(for: .landscapeLeft)
-        let right = OrientationPolicy.holdRotation(for: .landscapeRight)
-        // A ±90° rotation has a=0, d=0, |b|=1, |c|=1.
-        for (label, t) in [("left", left), ("right", right)] {
-            XCTAssertEqual(t.a, 0, accuracy: 0.0001, "\(label): a")
-            XCTAssertEqual(t.d, 0, accuracy: 0.0001, "\(label): d")
-            XCTAssertEqual(abs(t.b), 1, accuracy: 0.0001, "\(label): |b|")
-            XCTAssertEqual(abs(t.c), 1, accuracy: 0.0001, "\(label): |c|")
+    /// A ±90 delta produces the matching quarter-turn, with the SIGN carried
+    /// straight through from the coordinator. The degrees→radians mapping is
+    /// positive because AVFoundation's `videoRotationAngle` and QuickTime's
+    /// `preferredTransform` agree on handedness: a portrait iPhone video is
+    /// simultaneously `videoRotationAngle = 90` and `preferredTransform =
+    /// [0, 1, -1, 0]`, which is `CGAffineTransform(rotationAngle: +π/2)`.
+    func testHoldRotationQuarterTurnsCarryTheCoordinatorSign() {
+        let plus = OrientationPolicy.holdRotation(deltaDegrees: 90)
+        XCTAssertEqual(plus.a, 0, accuracy: 1e-9)
+        XCTAssertEqual(plus.b, 1, accuracy: 1e-9)
+        XCTAssertEqual(plus.c, -1, accuracy: 1e-9)
+        XCTAssertEqual(plus.d, 0, accuracy: 1e-9)
+
+        let minus = OrientationPolicy.holdRotation(deltaDegrees: -90)
+        XCTAssertEqual(minus.a, 0, accuracy: 1e-9)
+        XCTAssertEqual(minus.b, -1, accuracy: 1e-9)
+        XCTAssertEqual(minus.c, 1, accuracy: 1e-9)
+        XCTAssertEqual(minus.d, 0, accuracy: 1e-9)
+
+        // The two sideways holds are opposite handedness — the property the
+        // deleted `HOLD_LANDSCAPE_*_UNVERIFIED` pair used to assert by hand.
+        XCTAssertEqual(plus.b, -minus.b, accuracy: 1e-9)
+    }
+
+    /// Delta folding: the coordinator vends absolute angles in `{0,90,180,270}`
+    /// and we subtract two of them, so raw differences can be ±270. Those MUST
+    /// fold to the equivalent ±90 or the file rotates three quarter-turns the
+    /// wrong way — precisely the "multiplied" symptom this work replaced.
+    func testNormalizedDeltaDegreesFoldsIntoSignedHalfTurn() {
+        XCTAssertEqual(OrientationPolicy.normalizedDeltaDegrees(0), 0)
+        XCTAssertEqual(OrientationPolicy.normalizedDeltaDegrees(90), 90)
+        XCTAssertEqual(OrientationPolicy.normalizedDeltaDegrees(-90), -90)
+        XCTAssertEqual(OrientationPolicy.normalizedDeltaDegrees(180), 180)
+        // 0 − 270 (portrait reference 270, live 0) must read as +90.
+        XCTAssertEqual(OrientationPolicy.normalizedDeltaDegrees(-270), 90)
+        // 270 − 0 must read as -90.
+        XCTAssertEqual(OrientationPolicy.normalizedDeltaDegrees(270), -90)
+        XCTAssertEqual(OrientationPolicy.normalizedDeltaDegrees(360), 0)
+        XCTAssertEqual(OrientationPolicy.normalizedDeltaDegrees(-180), 180)
+        // Junk in, safe zero out.
+        XCTAssertEqual(OrientationPolicy.normalizedDeltaDegrees(.nan), 0)
+        XCTAssertEqual(OrientationPolicy.normalizedDeltaDegrees(.infinity), 0)
+    }
+
+    /// `AVCaptureConnection.videoRotationAngle` only accepts `{0,90,180,270}`.
+    func testNormalizedConnectionAngleStaysInTheAcceptedSet() {
+        XCTAssertEqual(OrientationPolicy.normalizedConnectionAngle(0), 0)
+        XCTAssertEqual(OrientationPolicy.normalizedConnectionAngle(-90), 270)
+        XCTAssertEqual(OrientationPolicy.normalizedConnectionAngle(360), 0)
+        XCTAssertEqual(OrientationPolicy.normalizedConnectionAngle(450), 90)
+        XCTAssertEqual(OrientationPolicy.normalizedConnectionAngle(-450), 270)
+        XCTAssertEqual(OrientationPolicy.normalizedConnectionAngle(.nan), 0)
+        for raw in stride(from: -720.0, through: 720.0, by: 90.0) {
+            let angle = OrientationPolicy.normalizedConnectionAngle(CGFloat(raw))
+            XCTAssertTrue([0, 90, 180, 270].contains(angle), "\(raw) → \(angle)")
         }
-        // Opposite handedness: left.b and right.b have opposite signs.
-        XCTAssertEqual(left.b, -right.b, accuracy: 0.0001,
-                       "landscapeLeft and landscapeRight must be opposite handedness")
+    }
+
+    /// A sideways delta composes ON TOP of the verified base — it never
+    /// replaces it. Pinning the composed result for the two shapes whose base
+    /// differs proves the base still contributes.
+    func testSidewaysDeltaComposesOnTopOfTheVerifiedBase() {
+        // .classic on a landscape buffer has base +π/2; +90 more = 180.
+        let classic = OrientationPolicy.writerTransform(
+            for: .classic, captureDeltaDegrees: 90, bufferShape: .landscape)
+        XCTAssertEqual(classic.a, -1, accuracy: 1e-9)
+        XCTAssertEqual(classic.b, 0, accuracy: 1e-9)
+        XCTAssertEqual(classic.c, 0, accuracy: 1e-9)
+        XCTAssertEqual(classic.d, -1, accuracy: 1e-9)
+
+        // .wide on a landscape buffer has base identity; +90 = a quarter turn.
+        let wide = OrientationPolicy.writerTransform(
+            for: .wide, captureDeltaDegrees: 90, bufferShape: .landscape)
+        XCTAssertEqual(wide.a, 0, accuracy: 1e-9)
+        XCTAssertEqual(wide.b, 1, accuracy: 1e-9)
+
+        // ...and -90 from the same base is the opposite quarter turn, so the
+        // two sideways holds can never collapse onto each other.
+        let wideOther = OrientationPolicy.writerTransform(
+            for: .wide, captureDeltaDegrees: -90, bufferShape: .landscape)
+        XCTAssertEqual(wideOther.b, -wide.b, accuracy: 1e-9)
+    }
+
+    // MARK: - 3.1 selfie-mirror composition (item 3)
+
+    /// Mirror is applied LAST, flipping the already-upright display frame
+    /// about its vertical axis. With an identity base that is a pure x-flip.
+    func testMirrorOnIdentityBaseIsPureHorizontalFlip() {
+        let t = OrientationPolicy.writerTransform(
+            for: .wide, captureDeltaDegrees: 0, bufferShape: .landscape, mirrored: true)
+        XCTAssertEqual(t.a, -1, accuracy: 1e-9)
+        XCTAssertEqual(t.b, 0, accuracy: 1e-9)
+        XCTAssertEqual(t.c, 0, accuracy: 1e-9)
+        XCTAssertEqual(t.d, 1, accuracy: 1e-9)
+    }
+
+    /// Mirror composed after a +π/2 base gives [0, 1, 1, 0] — still a
+    /// dimension-swapping transform, but with a negative determinant.
+    func testMirrorAfterQuarterTurnStillSwapsPlaybackDimensions() {
+        let t = OrientationPolicy.writerTransform(
+            for: .classic, captureDeltaDegrees: 0, bufferShape: .landscape, mirrored: true)
+        XCTAssertEqual(t.a, 0, accuracy: 1e-9)
+        XCTAssertEqual(t.b, 1, accuracy: 1e-9)
+        XCTAssertEqual(t.c, 1, accuracy: 1e-9)
+        XCTAssertEqual(t.d, 0, accuracy: 1e-9)
+
+        // The self-test's playback math must survive the flip: a mirrored
+        // 4032×3024 landscape buffer still plays 3024×4032 portrait.
+        let (w, h) = RecordingSelfTest.playbackDimensions(
+            encodedWidth: 4032, encodedHeight: 3024,
+            transform: [Double(t.a), Double(t.b), Double(t.c), Double(t.d)]
+        )
+        XCTAssertEqual(w, 3024)
+        XCTAssertEqual(h, 4032)
+    }
+
+    /// Mirroring must be an involution: flipping twice is the un-mirrored
+    /// transform. Cheap proof that the flip is a clean reflection and hasn't
+    /// picked up a rotation component.
+    func testMirrorIsItsOwnInverse() {
+        for shape in [RecordingAspect.wide, .classic, .square, .openGate] {
+            for delta in [CGFloat(0), 90, -90, 180] {
+                let plain = OrientationPolicy.writerTransform(
+                    for: shape, captureDeltaDegrees: delta, bufferShape: .landscape)
+                let mirrored = OrientationPolicy.writerTransform(
+                    for: shape, captureDeltaDegrees: delta, bufferShape: .landscape, mirrored: true)
+                let twice = mirrored.concatenating(OrientationPolicy.horizontalFlip)
+                XCTAssertEqual(twice.a, plain.a, accuracy: 1e-9, "\(shape) Δ\(delta): a")
+                XCTAssertEqual(twice.b, plain.b, accuracy: 1e-9, "\(shape) Δ\(delta): b")
+                XCTAssertEqual(twice.c, plain.c, accuracy: 1e-9, "\(shape) Δ\(delta): c")
+                XCTAssertEqual(twice.d, plain.d, accuracy: 1e-9, "\(shape) Δ\(delta): d")
+                // A mirror flips handedness — determinant must change sign.
+                let detPlain = plain.a * plain.d - plain.b * plain.c
+                let detMirror = mirrored.a * mirrored.d - mirrored.b * mirrored.c
+                XCTAssertEqual(detMirror, -detPlain, accuracy: 1e-9, "\(shape) Δ\(delta): determinant")
+            }
+        }
     }
 
     // MARK: - previewRotationAngle (always 0°)
@@ -228,18 +372,77 @@ final class OrientationPipelineTests: XCTestCase {
     //   - 0° on square: correct
     // Hence 0° for all (aspect × bufferShape) pairs.
 
-    func testPreviewAngleAlwaysZero() {
+    func testPreviewAngleZeroDeltaMatchesVerifiedSquareFrontSensorRow() {
         let aspects: [RecordingAspect] = [
             .wide, .classic, .square, .openGate
         ]
         let shapes: [OrientationPolicy.BufferShape] = [.landscape, .portrait, .square]
         for aspect in aspects {
             for shape in shapes {
+                // Explicit device + explicit zero delta: the verified portrait
+                // answer for the iPhone-17 class, unchanged by 3.1.
+                XCTAssertEqual(
+                    OrientationPolicy.previewRotationAngle(
+                        for: aspect, bufferShape: shape,
+                        device: .squareFrontSensor, previewDeltaDegrees: 0
+                    ),
+                    0,
+                    "\(aspect) × \(shape) must be 0° at zero delta"
+                )
+                // ...and the terse 2-arg overload must agree with the explicit
+                // zero-delta form for whatever device the test host reports.
+                let live = OrientationPolicy.DeviceGenerationHint.from(
+                    modelIdentifier: OrientationPolicy.currentDeviceModelIdentifier
+                )
                 XCTAssertEqual(
                     OrientationPolicy.previewRotationAngle(for: aspect, bufferShape: shape),
-                    0,
-                    "\(aspect) × \(shape) must be 0° — let AVCaptureVideoPreviewLayer auto-handle"
+                    OrientationPolicy.previewRotationAngle(
+                        for: aspect, bufferShape: shape, device: live, previewDeltaDegrees: 0
+                    ),
+                    "\(aspect) × \(shape): 2-arg overload must be the zero-delta answer"
                 )
+            }
+        }
+    }
+
+    /// The preview half of the 3.1 fix: a non-zero coordinator delta rotates
+    /// the connection off the verified portrait row, and always lands in the
+    /// `{0,90,180,270}` set `AVCaptureConnection` accepts.
+    func testPreviewAngleFollowsTheCoordinatorDelta() {
+        // squareFrontSensor base is 0, so the delta IS the angle (mod 360).
+        XCTAssertEqual(
+            OrientationPolicy.previewRotationAngle(
+                for: .openGate, bufferShape: .square,
+                device: .squareFrontSensor, previewDeltaDegrees: 90),
+            90
+        )
+        XCTAssertEqual(
+            OrientationPolicy.previewRotationAngle(
+                for: .openGate, bufferShape: .square,
+                device: .squareFrontSensor, previewDeltaDegrees: -90),
+            270
+        )
+        XCTAssertEqual(
+            OrientationPolicy.previewRotationAngle(
+                for: .openGate, bufferShape: .square,
+                device: .squareFrontSensor, previewDeltaDegrees: 180),
+            180
+        )
+        // The wideFrontSensor row is a non-zero placeholder; the delta must
+        // compose onto it rather than replace it.
+        let base = OrientationPolicy.basePreviewRotationAngle(device: .wideFrontSensor)
+        XCTAssertEqual(
+            OrientationPolicy.previewRotationAngle(
+                for: .openGate, bufferShape: .square,
+                device: .wideFrontSensor, previewDeltaDegrees: 90),
+            OrientationPolicy.normalizedConnectionAngle(base + 90)
+        )
+        // Every combination stays inside the accepted set.
+        for device in [OrientationPolicy.DeviceGenerationHint.squareFrontSensor, .wideFrontSensor, .unknown] {
+            for delta in [CGFloat(0), 90, -90, 180, 270, -270] {
+                let angle = OrientationPolicy.previewRotationAngle(
+                    for: .wide, bufferShape: .portrait, device: device, previewDeltaDegrees: delta)
+                XCTAssertTrue([0, 90, 180, 270].contains(angle), "\(device) Δ\(delta) → \(angle)")
             }
         }
     }
@@ -312,7 +515,7 @@ final class OrientationPipelineTests: XCTestCase {
                 continue
             }
             let xform = OrientationPolicy.writerTransform(
-                for: shape, hold: .portrait, bufferShape: bufferShape)
+                for: shape, captureDeltaDegrees: 0, bufferShape: bufferShape)
             let transformArray: [Double] = [
                 Double(xform.a), Double(xform.b), Double(xform.c), Double(xform.d)
             ]
@@ -473,5 +676,240 @@ final class OrientationPipelineTests: XCTestCase {
 
         let leftBright = BrightnessGrid(topLeft: 0.9, topRight: 0.1, bottomLeft: 0.9, bottomRight: 0.1, center: 0.5)
         XCTAssertTrue(leftBright.gradientSummary.contains("left-bright"))
+    }
+}
+
+// MARK: - RotationCoordinatorBox (3.1 item 4)
+//
+// The box is the ONLY place that turns Apple's absolute
+// `AVCaptureDevice.RotationCoordinator` angles into the deltas the rest of the
+// app consumes. A simulator cannot rotate a real camera, so these tests drive
+// the same `ingest` path through `_testSetAngles`, which takes the interface
+// orientation as an explicit parameter instead of reading the live scene.
+//
+// The absolute angle values used below (90 in portrait, 0/180 sideways) are
+// ILLUSTRATIVE, not pinned: the entire point of the delta design is that the
+// absolute values cancel. Every assertion is about a DIFFERENCE.
+
+@MainActor
+final class RotationCoordinatorBoxTests: XCTestCase {
+
+    private func makeBox(withLayer: Bool = true) -> RotationCoordinatorBox {
+        let box = RotationCoordinatorBox(suppressDeviceWork: true)
+        box._testSetPretendBound(true)
+        box._testSetHasPreviewLayer(withLayer)
+        return box
+    }
+
+    /// Nothing observed yet ⇒ no reference ⇒ zero deltas ⇒ downstream gets
+    /// today's verified portrait behaviour. This is the "app launched
+    /// sideways and has never been upright" case, and it must degrade to
+    /// SAFE (uncorrected) rather than to a guess.
+    func testUncalibratedBoxPublishesZeroDeltas() {
+        let box = makeBox()
+        XCTAssertFalse(box.isCalibrated)
+        XCTAssertEqual(box.captureDeltaDegrees, 0)
+        XCTAssertEqual(box.previewDeltaDegrees, 0)
+
+        // Even after a sideways observation, with no portrait reference we
+        // must NOT invent one.
+        box._testSetAngles(preview: 180, capture: 0, interfacePortrait: false)
+        XCTAssertFalse(box.isCalibrated)
+        XCTAssertEqual(box.captureDeltaDegrees, 0)
+        XCTAssertEqual(box.previewDeltaDegrees, 0)
+    }
+
+    // MARK: - The capture→preview fallback (3.1, device-driven)
+    //
+    // On iPhone 17 Pro Max / iOS 27, `videoRotationAngleForHorizonLevelPreview`
+    // tracks the device while `...ForHorizonLevelCapture` stays pinned at its
+    // portrait value, so the writer received a zero correction and landscape
+    // files came out 90° off. `captureDeltaDegrees` therefore falls back to the
+    // preview delta when its own is zero. These tests exist because the
+    // original suite drove `preview:` and `capture:` to the SAME value in every
+    // case, so the fallback branch was never reached by any test.
+
+    /// The real device shape: capture pinned, preview moving. The capture delta
+    /// must adopt the preview's answer rather than reporting no rotation.
+    func testCaptureDeltaFallsBackToPreviewWhenCaptureAngleIsPinned() {
+        let box = makeBox()
+        box._testSetHasPreviewLayer(true)
+        // Upright: both angles latch as the reference.
+        box._testSetAngles(preview: 90, capture: 90, interfacePortrait: true)
+        XCTAssertEqual(box.captureDeltaDegrees, 0, "Portrait must stay at zero.")
+
+        // Turned sideways: preview moves, capture does not (the device bug).
+        box._testSetAngles(preview: 180, capture: 90, interfacePortrait: false)
+        XCTAssertEqual(box.previewDeltaDegrees, 90)
+        XCTAssertEqual(box.captureDeltaDegrees, 90,
+                       "With its own delta pinned at 0, capture must adopt the preview delta.")
+    }
+
+    /// The fallback must never manufacture a rotation in portrait — that is the
+    /// anti-regression hinge, and the fallback is the one thing that could
+    /// break it.
+    func testFallbackCannotIntroduceRotationInPortrait() {
+        let box = makeBox()
+        box._testSetHasPreviewLayer(true)
+        box._testSetAngles(preview: 90, capture: 90, interfacePortrait: true)
+        XCTAssertEqual(box.captureDeltaDegrees, 0)
+        XCTAssertEqual(box.previewDeltaDegrees, 0,
+                       "Both references re-latch in portrait, so neither delta can be non-zero.")
+    }
+
+    /// Where the capture angle DOES vary (other device classes, future OS), its
+    /// own value must win — the preview delta is a fallback, not a replacement.
+    func testOwnCaptureDeltaWinsWhenItIsNonZero() {
+        let box = makeBox()
+        box._testSetHasPreviewLayer(true)
+        box._testSetAngles(preview: 90, capture: 90, interfacePortrait: true)
+        box._testSetAngles(preview: 180, capture: 180, interfacePortrait: false)
+        XCTAssertEqual(box.captureDeltaDegrees, 90,
+                       "A working capture angle must not be overridden by the preview.")
+    }
+
+    /// No preview layer means the coordinator's preview angle is a meaningless
+    /// 0, so the fallback must stay silent rather than differencing garbage.
+    func testFallbackStaysZeroWithoutAPreviewLayer() {
+        let box = makeBox()
+        box._testSetHasPreviewLayer(false)
+        box._testSetAngles(preview: 90, capture: 90, interfacePortrait: true)
+        box._testSetAngles(preview: 180, capture: 90, interfacePortrait: false)
+        XCTAssertEqual(box.previewDeltaDegrees, 0)
+        XCTAssertEqual(box.captureDeltaDegrees, 0,
+                       "Uncorrected is safe; a differenced meaningless angle is not.")
+    }
+
+    /// Observing while the interface is portrait latches the reference and
+    /// pins the delta at exactly zero — the anti-regression hinge.
+    func testPortraitObservationLatchesReferenceAndZeroesDeltas() {
+        let box = makeBox()
+        box._testSetAngles(preview: 90, capture: 90, interfacePortrait: true)
+        XCTAssertTrue(box.isCalibrated)
+        XCTAssertEqual(box.captureDeltaDegrees, 0)
+        XCTAssertEqual(box.previewDeltaDegrees, 0)
+        XCTAssertEqual(box.referenceCaptureDegrees, 90)
+        XCTAssertEqual(box.referencePreviewDegrees, 90)
+    }
+
+    /// Rotating sideways after calibration yields the coordinator's own
+    /// signed delta — magnitude AND sign from the OS, nothing pinned by us.
+    func testSidewaysDeltaIsTheDifferenceFromThePortraitReference() {
+        let box = makeBox()
+        box._testSetAngles(preview: 90, capture: 90, interfacePortrait: true)
+        box._testSetAngles(preview: 180, capture: 180, interfacePortrait: false)
+        XCTAssertEqual(box.captureDeltaDegrees, 90)
+        XCTAssertEqual(box.previewDeltaDegrees, 90)
+
+        // The other sideways hold is the opposite sign, without us saying so.
+        box._testSetAngles(preview: 0, capture: 0, interfacePortrait: false)
+        XCTAssertEqual(box.captureDeltaDegrees, -90)
+        XCTAssertEqual(box.previewDeltaDegrees, -90)
+    }
+
+    /// The reference cancels whatever absolute zero point the OS uses. Same
+    /// physical rotation, three different absolute conventions, one answer.
+    func testAbsoluteAngleConventionCancelsOut() {
+        for portraitReference in [CGFloat(0), 90, 180, 270] {
+            let box = makeBox()
+            box._testSetAngles(
+                preview: portraitReference, capture: portraitReference, interfacePortrait: true)
+            let sideways = OrientationPolicy.normalizedConnectionAngle(portraitReference + 90)
+            box._testSetAngles(preview: sideways, capture: sideways, interfacePortrait: false)
+            XCTAssertEqual(box.captureDeltaDegrees, 90,
+                           "reference \(portraitReference) must not change the delta")
+        }
+    }
+
+    /// Wrap-around: a reference of 270 with a live angle of 0 is a +90 turn,
+    /// not a -270 one. Getting this wrong is three quarter-turns of error —
+    /// the exact "multiplied" symptom the 3.1 work replaced.
+    func testDeltaFoldsAcrossTheWrapPoint() {
+        let box = makeBox()
+        box._testSetAngles(preview: 270, capture: 270, interfacePortrait: true)
+        box._testSetAngles(preview: 0, capture: 0, interfacePortrait: false)
+        XCTAssertEqual(box.captureDeltaDegrees, 90)
+        XCTAssertEqual(box.previewDeltaDegrees, 90)
+    }
+
+    /// Returning to portrait re-latches, so the delta snaps back to zero even
+    /// if the OS's absolute angle drifted (different device, different camera).
+    func testReturningToPortraitReLatchesToZero() {
+        let box = makeBox()
+        box._testSetAngles(preview: 90, capture: 90, interfacePortrait: true)
+        box._testSetAngles(preview: 180, capture: 180, interfacePortrait: false)
+        XCTAssertEqual(box.captureDeltaDegrees, 90)
+        box._testSetAngles(preview: 270, capture: 270, interfacePortrait: true)
+        XCTAssertEqual(box.captureDeltaDegrees, 0)
+        XCTAssertEqual(box.previewDeltaDegrees, 0)
+    }
+
+    /// ROTATION LOCK. With the interface pinned portrait, every observation
+    /// re-latches, so the delta stays 0 and recordings stay portrait — today's
+    /// behaviour, which is what locking rotation asks for.
+    func testRotationLockedInterfaceKeepsDeltasAtZero() {
+        let box = makeBox()
+        for capture in [CGFloat(90), 180, 270, 0, 90] {
+            box._testSetAngles(preview: capture, capture: capture, interfacePortrait: true)
+            XCTAssertEqual(box.captureDeltaDegrees, 0, "locked interface, capture \(capture)")
+        }
+    }
+
+    /// With no preview layer in the hierarchy the coordinator documents that
+    /// its preview angle is a meaningless 0, so we must neither latch it as a
+    /// reference nor difference against one. The CAPTURE half is layer-
+    /// independent and must keep working.
+    func testPreviewDeltaIsSuppressedWithoutALayerButCaptureIsNot() {
+        let box = makeBox(withLayer: false)
+        box._testSetAngles(preview: 0, capture: 90, interfacePortrait: true)
+        XCTAssertNil(box.referencePreviewDegrees)
+        XCTAssertEqual(box.referenceCaptureDegrees, 90)
+
+        box._testSetAngles(preview: 0, capture: 180, interfacePortrait: false)
+        XCTAssertEqual(box.previewDeltaDegrees, 0, "no layer ⇒ no preview delta")
+        XCTAssertEqual(box.captureDeltaDegrees, 90, "capture delta is layer-independent")
+    }
+
+    /// An unbound box (camera off) publishes nothing, whatever it last saw.
+    func testUnboundBoxPublishesZeroDeltas() {
+        let box = makeBox()
+        box._testSetAngles(preview: 90, capture: 90, interfacePortrait: true)
+        box._testSetAngles(preview: 180, capture: 180, interfacePortrait: false)
+        XCTAssertEqual(box.captureDeltaDegrees, 90)
+        box._testSetPretendBound(false)
+        XCTAssertEqual(box.captureDeltaDegrees, 0)
+        XCTAssertEqual(box.previewDeltaDegrees, 0)
+    }
+
+    /// Angle observers are how the preview connection learns to re-apply its
+    /// rotation without a SwiftUI round trip. Registration fires immediately
+    /// (so a late registrant catches up) and again on every change.
+    func testAngleObserverFiresOnRegistrationAndOnChange() {
+        let box = makeBox()
+        let owner = NSObject()
+        var fires = 0
+        box.addAngleObserver(owner) { fires += 1 }
+        XCTAssertEqual(fires, 1, "registration must fire once immediately")
+        box._testSetAngles(preview: 90, capture: 90, interfacePortrait: true)
+        XCTAssertEqual(fires, 2)
+        box.removeAngleObserver(owner)
+        box._testSetAngles(preview: 180, capture: 180, interfacePortrait: false)
+        XCTAssertEqual(fires, 2, "removed observer must not fire")
+    }
+
+    /// End-to-end through the policy: a calibrated box driven sideways must
+    /// produce a writer transform that differs from the portrait one, and a
+    /// portrait box must reproduce the verified base exactly.
+    func testBoxDeltaFeedsThePolicyEndToEnd() {
+        let box = makeBox()
+        box._testSetAngles(preview: 90, capture: 90, interfacePortrait: true)
+        let portrait = OrientationPolicy.writerTransform(
+            for: .classic, captureDeltaDegrees: box.captureDeltaDegrees, bufferShape: .landscape)
+        XCTAssertEqual(portrait, OrientationPolicy.writerTransform(for: .classic, bufferShape: .landscape))
+
+        box._testSetAngles(preview: 180, capture: 180, interfacePortrait: false)
+        let sideways = OrientationPolicy.writerTransform(
+            for: .classic, captureDeltaDegrees: box.captureDeltaDegrees, bufferShape: .landscape)
+        XCTAssertNotEqual(sideways, portrait, "a sideways hold must change the transform")
     }
 }

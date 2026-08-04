@@ -188,16 +188,24 @@ final class RecordingSession {
         /// Capture initial save destinations at start-of-take so a Settings
         /// flip mid-recording doesn't change the destination list.
         var lockedDestinations: SaveDestinations = .default
-        /// The physical hold captured ONCE at REC tap (V3 §07). The recording's
-        /// orientation must be stable for the whole take — Photos/QuickTime
-        /// have no concept of mid-file orientation change for a single track —
-        /// so we snapshot the hold synchronously at the moment the user commits
-        /// to the take (mirroring `lockedDestinations`), never per-frame and
-        /// never from a device-orientation notification. Read in
-        /// `lazilyStartWriterOnFirstSample` to compose the writer transform.
-        /// Defaults `.portrait` — the identity-hold path that reproduces
-        /// today's verified pipeline byte-for-byte.
-        var lockedHold: OrientationPolicy.PhysicalHold = .portrait
+        /// Extra writer rotation for this take, in `AVCaptureConnection`
+        /// degrees relative to a portrait hold, sourced from
+        /// `AVCaptureDevice.RotationCoordinator` (3.1). Replaces the old
+        /// `lockedHold` + hand-pinned `HOLD_LANDSCAPE_*_UNVERIFIED` constants,
+        /// which double-rotated landscape files.
+        ///
+        /// Captured ONCE, on the main actor, and then frozen: a `.mov` track
+        /// carries a single `preferredTransform`, so a file's orientation
+        /// cannot change mid-take no matter what the device does. We latch at
+        /// REC tap and re-latch in `beginRecording` (which is where a
+        /// countdown lands), so rotating during the countdown is honoured
+        /// while rotating mid-take is not — the latter being a QuickTime
+        /// limitation, not a policy choice. The live PREVIEW does follow the
+        /// device continuously; that is the half users actually see.
+        ///
+        /// Defaults `0` ⇒ `holdRotation(deltaDegrees: 0) == .identity` ⇒
+        /// portrait output byte-identical to the verified pipeline.
+        var lockedCaptureDeltaDegrees: CGFloat = 0
         var sampleBufferRouter: SampleBufferRouter?
         /// Buffer dimensions the writer was configured with — populated by
         /// `lazilyStartWriterOnFirstSample` once the first frame's
@@ -337,21 +345,40 @@ final class RecordingSession {
         }
 
         // Lock save destinations now — the user may flip Settings mid-take
-        // and we want the original choice to win. Lock the physical hold in
-        // the SAME block (V3 §07): the hold is the phone's interface
-        // orientation at the moment the user committed to the take, read
-        // synchronously on the main actor. The countdown path funnels through
-        // here before `beginRecording`, so a locked-in-advance hold is correct
-        // even with a 3-second countdown.
+        // and we want the original choice to win. Lock the rotation delta in
+        // the SAME block (3.1): it is the coordinator's capture angle relative
+        // to portrait at the moment the user committed to the take, read
+        // synchronously on the main actor (the writer path runs off-actor and
+        // must never reach for `OrientationPolicy.rotationSource` itself).
+        // `beginRecording` re-latches so a countdown take picks up a rotation
+        // that happened during the count.
         let destinations = SaveDestinations(
             photos: true,
             scriptFolder: Prefs.recordingSaveToScriptFolder
         )
-        let hold = OrientationPolicy.currentPhysicalHold()
+        let captureDelta = OrientationPolicy.currentCaptureDeltaDegrees
         writerStateLock.withLock {
             $0.lockedDestinations = destinations
-            $0.lockedHold = hold
+            $0.lockedCaptureDeltaDegrees = captureDelta
         }
+        #if DEBUG
+        // Stash what was true AT RECORD TIME for the self-test.
+        //
+        // The self-test runs minutes later, from Settings, with the phone
+        // back in the user's hand — so reading the hold or the live rotation
+        // deltas THEN reports the pose at button-tap, not during the take. A
+        // landscape recording therefore came back labelled "portrait,
+        // captureDelta=0" no matter what actually happened, which is exactly
+        // backwards for the one diagnostic that exists to explain landscape.
+        let rotationBox = OrientationPolicy.rotationSource
+        RecordingSelfTestStash.captureRecordTimeRotation(
+            hold: OrientationPolicy.currentPhysicalHold().rawValue,
+            captureDelta: Double(captureDelta),
+            previewDelta: Double(OrientationPolicy.currentPreviewDeltaDegrees),
+            isCalibrated: rotationBox?.isCalibrated ?? false,
+            hasPreviewLayer: rotationBox?.hasPreviewLayer ?? false
+        )
+        #endif
 
         let countdown = RecordingCountdown(rawValue: Prefs.recordingCountdown) ?? .three
         if countdown.seconds <= 0 {
@@ -483,6 +510,26 @@ final class RecordingSession {
         let started = Date()
         // Reset per-take flags before we publish the recording phase.
         state.micUnavailableForThisTake = false
+        // Re-latch the rotation delta as late as we still can on the main
+        // actor. `tapREC` already captured one, but a countdown take can sit
+        // here for three seconds and the user may well have turned the phone
+        // during the count — this is the value the writer actually uses.
+        let captureDelta = OrientationPolicy.currentCaptureDeltaDegrees
+        writerStateLock.withLock { $0.lockedCaptureDeltaDegrees = captureDelta }
+        #if DEBUG
+        // Re-stash for the self-test at the SAME instant the writer's value is
+        // latched, so the diagnostic can never disagree with what was actually
+        // applied to the file. (The `tapREC` stash covers a zero-countdown
+        // take; this one is what a 3-second countdown take reports.)
+        let rotationBoxAtStart = OrientationPolicy.rotationSource
+        RecordingSelfTestStash.captureRecordTimeRotation(
+            hold: OrientationPolicy.currentPhysicalHold().rawValue,
+            captureDelta: Double(captureDelta),
+            previewDelta: Double(OrientationPolicy.currentPreviewDeltaDegrees),
+            isCalibrated: rotationBoxAtStart?.isCalibrated ?? false,
+            hasPreviewLayer: rotationBoxAtStart?.hasPreviewLayer ?? false
+        )
+        #endif
         writerStateLock.withLock { $0.recordingStartedAt = started }
         state.phase = .recording(startedAt: started)
         startLiveActivityIfNeeded(phase: .recording(startedAt: started))
@@ -757,17 +804,35 @@ final class RecordingSession {
             width: writerWidth,
             height: writerHeight
         ) ?? .landscape  // Defensive default — buffer dims should be valid here.
-        // V3 §07: the writer transform is now a COMPOSITION of the physical
-        // hold (locked at REC tap) and the verified per-(shape, bufferShape)
-        // base. `lockedHold == .portrait` (the default and the upright case)
-        // composes with identity, so portrait output is byte-identical to
-        // today's verified pipeline. Read the hold synchronously from the
-        // locked writer state — never probe device orientation here.
-        let hold = writerStateLock.withLock { $0.lockedHold }
+        // 3.1: the writer transform is a COMPOSITION of the verified
+        // per-(shape, bufferShape) base, the `RotationCoordinator` delta
+        // locked on the main actor at REC tap / `beginRecording`, and the
+        // optional selfie-mirror flip. A zero delta (every portrait take, and
+        // every take with no coordinator) composes with identity, so portrait
+        // output is byte-identical to the pass-13g-verified pipeline.
+        //
+        // Read the delta from the locked writer state — this function runs on
+        // the recording queue and must never touch main-actor state.
+        //
+        // MIRROR (3.1 item 3): `Prefs.recordingMirrorVideo` is read here, the
+        // same way quality / framerate / aspect already are. This is the
+        // FILE mirror (selfie-style), which is a different thing from the
+        // in-prompter mirror chip — that one only flips what is on screen for
+        // beam-splitter rigs and never touches the recording. The flip is a
+        // `preferredTransform` flag, so it costs no pixels; the trade-off is
+        // that an editor which ignores `preferredTransform` will show the
+        // true (un-mirrored) image. Photos, QuickTime and AVFoundation all
+        // honour it. If a downstream NLE is ever reported ignoring it, the
+        // fallback is connection-level `isVideoMirrored` — which is pixel
+        // level and universally honoured, but per this file's orientation
+        // history inverts rotation handedness and would put the whole
+        // verified transform table back in play.
+        let captureDelta = writerStateLock.withLock { $0.lockedCaptureDeltaDegrees }
         videoInput.transform = OrientationPolicy.writerTransform(
             for: OrientationPolicy.current,   // .canonicalShape applied inside
-            hold: hold,
-            bufferShape: bufferShape
+            captureDeltaDegrees: captureDelta,
+            bufferShape: bufferShape,
+            mirrored: Prefs.recordingMirrorVideo
         )
 
         // Audio input — AAC, voiceover bitrate.

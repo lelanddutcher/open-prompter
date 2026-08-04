@@ -13,8 +13,30 @@
 
 import Foundation
 
+/// Minimal key-value-store abstraction so the mirror can be exercised without
+/// touching the real iCloud store. `NSUbiquitousKeyValueStore` satisfies it
+/// as-is (the signatures match); tests inject an in-memory fake.
+///
+/// WHY THIS EXISTS: `NSUbiquitousKeyValueStore` silently no-ops when no iCloud
+/// account is signed in, so a test asserting against the real store fails on
+/// any clean machine — reported by an outside contributor who cloned the repo
+/// (2026-08-04). It passed here only because a long-lived simulator masked it.
+/// This seam keeps mirror tests hermetic. The APP path is unchanged: every
+/// parameter below defaults to the real store.
+protocol KeyValueStoring: AnyObject {
+    func object(forKey aKey: String) -> Any?
+    func set(_ anObject: Any?, forKey aKey: String)
+    @discardableResult
+    func synchronize() -> Bool
+}
+
+extension NSUbiquitousKeyValueStore: KeyValueStoring {}
+
 enum UbiquitousPrefsMirror {
-    private static let mirroredKeys: [PrefKey] = [
+    /// Keys mirrored between `UserDefaults` and iCloud KVS. Deliberately
+    /// `internal` rather than `private` so tests can assert the list DIRECTLY
+    /// instead of inferring its contents from a live cloud round-trip.
+    static let mirroredKeys: [PrefKey] = [
         .defaultSpeed,
         .defaultFont,
         .prompterFont,
@@ -54,6 +76,11 @@ enum UbiquitousPrefsMirror {
         .recordingIndicator,
         .recordingSaveToScriptFolder,
         .recordingAspect,
+        // 3.1: both are cross-device preferences, not per-device capability
+        // flags — a creator who wants selfie-mirrored takes, or who hides the
+        // progress bar, expects that to follow them.
+        .recordingMirrorVideo,
+        .showReadingProgressBar,
         // Video markers (V3 headline). Both marker-output toggles travel with
         // the user — a creator's "write markers" preference is not per-device.
         .recordingMarkerMetadataTrack,
@@ -88,10 +115,13 @@ enum UbiquitousPrefsMirror {
         pullFromCloud()
     }
 
-    /// Push current local preferences to iCloud.
-    static func pushToCloud() {
-        let kv = NSUbiquitousKeyValueStore.default
-        let defaults = UserDefaults.standard
+    /// Push current local preferences to iCloud. Both stores are injectable
+    /// (defaulting to the real ones) purely so tests can run hermetically —
+    /// the app calls this with no arguments and behaves exactly as before.
+    static func pushToCloud(
+        to kv: any KeyValueStoring = NSUbiquitousKeyValueStore.default,
+        from defaults: UserDefaults = .standard
+    ) {
         for key in mirroredKeys {
             if let value = defaults.object(forKey: key.rawValue) {
                 kv.set(value, forKey: key.rawValue)
@@ -102,9 +132,11 @@ enum UbiquitousPrefsMirror {
 
     /// Pull iCloud values into UserDefaults, overwriting local.
     /// Only called on external change notifications, not blindly.
-    static func pullFromCloud() {
-        let kv = NSUbiquitousKeyValueStore.default
-        let defaults = UserDefaults.standard
+    /// Injectable for the same test-hermeticity reason as `pushToCloud`.
+    static func pullFromCloud(
+        from kv: any KeyValueStoring = NSUbiquitousKeyValueStore.default,
+        into defaults: UserDefaults = .standard
+    ) {
         for key in mirroredKeys {
             if let value = kv.object(forKey: key.rawValue) {
                 defaults.set(value, forKey: key.rawValue)
