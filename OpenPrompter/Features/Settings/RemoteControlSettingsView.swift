@@ -177,8 +177,8 @@ struct RemoteControlSettingsView: View {
             }
 
             Section("advanced bindings") {
-                ForEach(visibleBindings, id: \.key.id) { entry in
-                    bindingRow(for: entry.key, currentEvent: entry.event)
+                ForEach(visibleKeys, id: \.id) { key in
+                    bindingRow(for: key)
                 }
                 .disabled(!remoteEnabled)
 
@@ -230,32 +230,41 @@ struct RemoteControlSettingsView: View {
         }
     }
 
-    /// All current bindings, with volume keys filtered out unless the
-    /// volume opt-in is active. Sorted for stable display.
-    private var visibleBindings: [(key: RemoteKey, event: RemoteEvent)] {
-        bindings.allBindings.filter { entry in
-            if entry.key.requiresVolumeOptIn {
+    /// All supported binding rows, including known keys that are currently
+    /// unbound. Extras from persisted/user-created bindings are appended so
+    /// forward-compatible keys are not hidden.
+    private var visibleKeys: [RemoteKey] {
+        let base = RemoteBindingStore.configurableKeys.filter { key in
+            if key.requiresVolumeOptIn {
                 return useVolumeButtons
             }
             return true
         }
+        let extras = bindings.allBindings
+            .map(\.key)
+            .filter { key in
+                !base.contains(key) && (!key.requiresVolumeOptIn || useVolumeButtons)
+            }
+            .sorted { $0.id < $1.id }
+        return base + extras
     }
 
     @ViewBuilder
-    private func bindingRow(for key: RemoteKey, currentEvent: RemoteEvent) -> some View {
+    private func bindingRow(for key: RemoteKey) -> some View {
         HStack(spacing: 12) {
             Text(key.displayName)
                 .font(.system(size: 14, weight: .semibold))
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             Picker("", selection: Binding(
-                get: { currentEvent },
+                get: { bindings.event(for: key) },
                 set: { newEvent in
                     bindings.setBinding(newEvent, for: key)
                 }
             )) {
+                Text("Unbound").tag(nil as RemoteEvent?)
                 ForEach(RemoteEvent.allCases, id: \.self) { event in
-                    Text(event.displayName).tag(event)
+                    Text(event.displayName).tag(Optional(event))
                 }
             }
             .labelsHidden()

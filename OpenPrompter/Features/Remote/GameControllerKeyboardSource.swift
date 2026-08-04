@@ -170,14 +170,15 @@ final class GameControllerKeyboardSource: RemoteEventSource {
         bus.publish(event)
     }
 
-    /// `GCKeyCode → RemoteKey`. Covers the navigation keys the presenter
-    /// remotes emit plus the letter keys we bind by default (b/m/r/j/k) and
-    /// the full a–z range so remapping to any letter works. Unmapped
-    /// keycodes (function keys, modifiers, punctuation) return `nil`.
+    /// `GCKeyCode → RemoteKey`. Covers the navigation keys presenter remotes
+    /// emit, letter keys, top-row digits, and distinct keypad / 10-key codes.
+    /// Unmapped keycodes (function keys, modifiers, unrelated punctuation)
+    /// return `nil`.
     static func remoteKey(from code: GCKeyCode) -> RemoteKey? {
         switch code {
         case .spacebar:      return .space
-        case .returnOrEnter, .keypadEnter: return .return
+        case .returnOrEnter: return .return
+        case .keypadEnter:   return .keypadEnter
         case .escape:        return .escape
         case .tab:           return .tab
         case .upArrow:       return .arrowUp
@@ -186,9 +187,22 @@ final class GameControllerKeyboardSource: RemoteEventSource {
         case .rightArrow:    return .arrowRight
         case .pageUp:        return .pageUp
         case .pageDown:      return .pageDown
+        case .keypadNumLock: return .keypadNumLock
+        case .keypadSlash:   return .keypadDivide
+        case .keypadAsterisk: return .keypadMultiply
+        case .keypadHyphen:  return .keypadMinus
+        case .keypadPlus:    return .keypadPlus
+        case .keypadPeriod:  return .keypadDecimal
+        case .keypadEqualSign: return .keypadEqual
         default:
             if let letter = Self.letter(from: code) {
                 return .letter(letter)
+            }
+            if let digit = Self.digit(from: code) {
+                return .digit(digit)
+            }
+            if let digit = Self.keypadDigit(from: code) {
+                return .keypadDigit(digit)
             }
             return nil
         }
@@ -226,6 +240,43 @@ final class GameControllerKeyboardSource: RemoteEventSource {
         case .keyY: return "y"
         case .keyZ: return "z"
         default:    return nil
+        }
+    }
+
+    /// Map top-row number keys to `.digit` so they can be bound separately
+    /// from a numeric keypad. Shifted symbols still arrive as the same HID
+    /// key code through GameController.
+    static func digit(from code: GCKeyCode) -> Character? {
+        switch code {
+        case .zero:  return "0"
+        case .one:   return "1"
+        case .two:   return "2"
+        case .three: return "3"
+        case .four:  return "4"
+        case .five:  return "5"
+        case .six:   return "6"
+        case .seven: return "7"
+        case .eight: return "8"
+        case .nine:  return "9"
+        default:     return nil
+        }
+    }
+
+    /// Map numeric keypad keys to distinct `.keypadDigit` bindings. This is
+    /// the path a Bluetooth 10-key uses when Num Lock is on.
+    static func keypadDigit(from code: GCKeyCode) -> Character? {
+        switch code {
+        case .keypad0: return "0"
+        case .keypad1: return "1"
+        case .keypad2: return "2"
+        case .keypad3: return "3"
+        case .keypad4: return "4"
+        case .keypad5: return "5"
+        case .keypad6: return "6"
+        case .keypad7: return "7"
+        case .keypad8: return "8"
+        case .keypad9: return "9"
+        default:       return nil
         }
     }
 }

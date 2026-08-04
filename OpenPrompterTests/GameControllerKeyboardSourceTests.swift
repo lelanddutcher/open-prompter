@@ -29,7 +29,6 @@ final class GameControllerKeyboardSourceTests: XCTestCase {
     func testNavigationKeysMap() {
         XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .spacebar), .space)
         XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .returnOrEnter), .return)
-        XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .keypadEnter), .return)
         XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .escape), .escape)
         XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .tab), .tab)
         XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .upArrow), .arrowUp)
@@ -38,6 +37,28 @@ final class GameControllerKeyboardSourceTests: XCTestCase {
         XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .rightArrow), .arrowRight)
         XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .pageUp), .pageUp)
         XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .pageDown), .pageDown)
+    }
+
+    // MARK: - 10-key / digit mapping
+
+    func testDigitKeysMap() {
+        XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .one), .digit("1"))
+        XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .zero), .digit("0"))
+        XCTAssertEqual(GameControllerKeyboardSource.digit(from: .nine), "9")
+    }
+
+    func testKeypadKeysMap() {
+        XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .keypadEnter), .keypadEnter)
+        XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .keypadPlus), .keypadPlus)
+        XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .keypadHyphen), .keypadMinus)
+        XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .keypadSlash), .keypadDivide)
+        XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .keypadAsterisk), .keypadMultiply)
+        XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .keypadPeriod), .keypadDecimal)
+        XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .keypadEqualSign), .keypadEqual)
+        XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .keypadNumLock), .keypadNumLock)
+        XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .keypad1), .keypadDigit("1"))
+        XCTAssertEqual(GameControllerKeyboardSource.remoteKey(from: .keypad0), .keypadDigit("0"))
+        XCTAssertEqual(GameControllerKeyboardSource.keypadDigit(from: .keypad9), "9")
     }
 
     // MARK: - Letter mapping
@@ -86,5 +107,20 @@ final class GameControllerKeyboardSourceTests: XCTestCase {
         source.handle(keyCode: .keyZ)
         XCTAssertEqual(captured, [.letter("z")],
                        "capture must run before the binding lookup so unmapped keys surface")
+    }
+
+    func testHandlePublishesDefaultKeypadSpeedEvents() async {
+        let store = makeStore()
+        let bus = RemoteEventBus()
+        let source = GameControllerKeyboardSource(bus: bus, store: store)
+
+        var iterator = bus.events.makeAsyncIterator()
+        source.handle(keyCode: .keypadPlus)
+        let up = await iterator.next()
+        source.handle(keyCode: .keypadHyphen)
+        let down = await iterator.next()
+
+        XCTAssertEqual(up, .speedUp)
+        XCTAssertEqual(down, .speedDown)
     }
 }
