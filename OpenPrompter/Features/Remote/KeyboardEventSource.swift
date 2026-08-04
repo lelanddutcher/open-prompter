@@ -97,12 +97,27 @@ final class KeyboardEventSource: RemoteEventSource {
         case .pageUp:     return .pageUp
         case .pageDown:   return .pageDown
         default:
-            // Single-character keys come through `press.characters`.
+            // Single-character keys come through `press.characters`. SwiftUI
+            // does not tell us whether a digit/symbol came from the top row
+            // or keypad; GameController does, so it owns the precise 10-key
+            // path. This fallback still makes digits and keypad-style
+            // symbols learnable before GCKeyboard has attached.
             let chars = press.characters.lowercased()
             if let c = chars.first, chars.count == 1, c.isLetter {
                 return .letter(c)
             }
-            return nil
+            if let c = chars.first, chars.count == 1, c.isNumber {
+                return .digit(c)
+            }
+            switch chars {
+            case "+": return .keypadPlus
+            case "-": return .keypadMinus
+            case "*": return .keypadMultiply
+            case "/": return .keypadDivide
+            case ".": return .keypadDecimal
+            case "=": return .keypadEqual
+            default:  return nil
+            }
         }
     }
 }

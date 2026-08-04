@@ -39,6 +39,10 @@ final class RemoteBindingStoreTests: XCTestCase {
         XCTAssertEqual(store.event(for: .pageDown), .jumpForward)
         XCTAssertEqual(store.event(for: .letter("j")), .speedDown)
         XCTAssertEqual(store.event(for: .letter("k")), .speedUp)
+        XCTAssertEqual(store.event(for: .keypadEnter), .playPause)
+        XCTAssertEqual(store.event(for: .keypadMinus), .speedDown)
+        XCTAssertEqual(store.event(for: .keypadPlus), .speedUp)
+        XCTAssertNil(store.event(for: .keypadDigit("1")))
     }
 
     func testPointerButtonDefaults() {
@@ -107,7 +111,12 @@ final class RemoteBindingStoreTests: XCTestCase {
             .space, .return, .escape, .tab,
             .arrowUp, .arrowDown, .arrowLeft, .arrowRight,
             .pageUp, .pageDown,
+            .digit("0"), .digit("5"), .digit("9"),
             .letter("a"), .letter("b"), .letter("z"),
+            .keypadDigit("0"), .keypadDigit("5"), .keypadDigit("9"),
+            .keypadNumLock, .keypadDivide, .keypadMultiply,
+            .keypadMinus, .keypadPlus, .keypadEnter,
+            .keypadDecimal, .keypadEqual,
             .mediaPlayPause, .mediaNextTrack, .mediaPrevTrack,
             .volumeUp, .volumeDown,
             .mouseClick, .mouseRightClick, .mouseMiddleClick

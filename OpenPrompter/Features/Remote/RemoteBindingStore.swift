@@ -39,7 +39,17 @@ enum RemoteKey: Hashable, Identifiable, Sendable {
     case arrowRight
     case pageUp
     case pageDown
+    case digit(Character)
     case letter(Character)
+    case keypadDigit(Character)
+    case keypadNumLock
+    case keypadDivide
+    case keypadMultiply
+    case keypadMinus
+    case keypadPlus
+    case keypadEnter
+    case keypadDecimal
+    case keypadEqual
 
     // MARK: Media keys (MPRemoteCommandCenter)
     case mediaPlayPause
@@ -75,7 +85,17 @@ enum RemoteKey: Hashable, Identifiable, Sendable {
         case .arrowRight:      return "kb.right"
         case .pageUp:          return "kb.pageup"
         case .pageDown:        return "kb.pagedown"
+        case .digit(let c):    return "kb.digit.\(c)"
         case .letter(let c):   return "kb.letter.\(Character(c.lowercased()))"
+        case .keypadDigit(let c): return "kb.keypad.\(c)"
+        case .keypadNumLock:   return "kb.keypad.numlock"
+        case .keypadDivide:    return "kb.keypad.divide"
+        case .keypadMultiply:  return "kb.keypad.multiply"
+        case .keypadMinus:     return "kb.keypad.minus"
+        case .keypadPlus:      return "kb.keypad.plus"
+        case .keypadEnter:     return "kb.keypad.enter"
+        case .keypadDecimal:   return "kb.keypad.decimal"
+        case .keypadEqual:     return "kb.keypad.equal"
         case .mediaPlayPause:  return "media.playpause"
         case .mediaNextTrack:  return "media.next"
         case .mediaPrevTrack:  return "media.prev"
@@ -100,7 +120,17 @@ enum RemoteKey: Hashable, Identifiable, Sendable {
         case .arrowRight:      return "Right arrow"
         case .pageUp:          return "Page Up"
         case .pageDown:        return "Page Down"
+        case .digit(let c):    return String(c)
         case .letter(let c):   return String(c).uppercased()
+        case .keypadDigit(let c): return "Keypad \(c)"
+        case .keypadNumLock:   return "Keypad Num Lock / Clear"
+        case .keypadDivide:    return "Keypad /"
+        case .keypadMultiply:  return "Keypad *"
+        case .keypadMinus:     return "Keypad -"
+        case .keypadPlus:      return "Keypad +"
+        case .keypadEnter:     return "Keypad Enter"
+        case .keypadDecimal:   return "Keypad ."
+        case .keypadEqual:     return "Keypad ="
         case .mediaPlayPause:  return "Play / Pause (media key)"
         case .mediaNextTrack:  return "Next track (media key)"
         case .mediaPrevTrack:  return "Previous track (media key)"
@@ -162,6 +192,13 @@ final class RemoteBindingStore {
         // keyboard after the arrows were repurposed for navigation.
         .letter("j"):    .speedDown,
         .letter("k"):    .speedUp,
+        // Bluetooth 10-key pads usually emit distinct keypad key codes.
+        // Keep +/- useful out of the box while leaving the number keys
+        // visible and bindable in Settings without assigning opinions to all
+        // ten digits.
+        .keypadEnter:    .playPause,
+        .keypadPlus:     .speedUp,
+        .keypadMinus:    .speedDown,
         // Media keys — Satechi R2 et al. emit play/pause + skip on the
         // MPRemoteCommandCenter pathway. Default to play/pause on all
         // three; user can remap.
@@ -180,6 +217,25 @@ final class RemoteBindingStore {
         .mouseClick:       .playPause,
         .mouseRightClick:  .jumpToStart,
         .mouseMiddleClick: .mirrorToggle
+    ]
+
+    /// Keys that the Settings UI should expose even when currently unbound.
+    /// `allBindings` intentionally remains "currently bound only" for lookup
+    /// semantics; this table is the editable surface for known physical keys.
+    static let configurableKeys: [RemoteKey] = [
+        .space, .return, .escape, .tab,
+        .arrowUp, .arrowDown, .arrowLeft, .arrowRight,
+        .pageUp, .pageDown,
+        .digit("0"), .digit("1"), .digit("2"), .digit("3"), .digit("4"),
+        .digit("5"), .digit("6"), .digit("7"), .digit("8"), .digit("9"),
+        .letter("b"), .letter("j"), .letter("k"), .letter("m"), .letter("r"),
+        .keypadNumLock, .keypadDivide, .keypadMultiply, .keypadMinus, .keypadPlus,
+        .keypadEnter, .keypadDecimal, .keypadEqual,
+        .keypadDigit("0"), .keypadDigit("1"), .keypadDigit("2"), .keypadDigit("3"), .keypadDigit("4"),
+        .keypadDigit("5"), .keypadDigit("6"), .keypadDigit("7"), .keypadDigit("8"), .keypadDigit("9"),
+        .mediaPlayPause, .mediaNextTrack, .mediaPrevTrack,
+        .volumeUp, .volumeDown,
+        .mouseClick, .mouseRightClick, .mouseMiddleClick
     ]
 
     private(set) var bindings: [RemoteKey: RemoteEvent] = [:]
@@ -272,6 +328,14 @@ final class RemoteBindingStore {
         case "kb.right":          return .arrowRight
         case "kb.pageup":         return .pageUp
         case "kb.pagedown":       return .pageDown
+        case "kb.keypad.numlock": return .keypadNumLock
+        case "kb.keypad.divide":  return .keypadDivide
+        case "kb.keypad.multiply": return .keypadMultiply
+        case "kb.keypad.minus":   return .keypadMinus
+        case "kb.keypad.plus":    return .keypadPlus
+        case "kb.keypad.enter":   return .keypadEnter
+        case "kb.keypad.decimal": return .keypadDecimal
+        case "kb.keypad.equal":   return .keypadEqual
         case "media.playpause":   return .mediaPlayPause
         case "media.next":        return .mediaNextTrack
         case "media.prev":        return .mediaPrevTrack
@@ -281,10 +345,22 @@ final class RemoteBindingStore {
         case "mouse.rightclick":  return .mouseRightClick
         case "mouse.middleclick": return .mouseMiddleClick
         default:
+            if id.hasPrefix("kb.digit.") {
+                let suffix = id.dropFirst("kb.digit.".count)
+                if suffix.count == 1, let c = suffix.first, c.isNumber {
+                    return .digit(c)
+                }
+            }
             if id.hasPrefix("kb.letter.") {
                 let suffix = id.dropFirst("kb.letter.".count)
                 if suffix.count == 1, let c = suffix.first {
                     return .letter(c)
+                }
+            }
+            if id.hasPrefix("kb.keypad.") {
+                let suffix = id.dropFirst("kb.keypad.".count)
+                if suffix.count == 1, let c = suffix.first, c.isNumber {
+                    return .keypadDigit(c)
                 }
             }
             return nil
