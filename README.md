@@ -67,8 +67,6 @@ paste a messy transcript or a wall of notes and let **Format** reshape it into c
 
 pair any Bluetooth keyboard, media remote, or presentation clicker and bind buttons to play, pause, mirror, jump to the top or the end of the script, and other prompter actions. a **"learn your remote" wizard** maps each button by having you press it — including keys we've never heard of, so a programmable or DIY controller works too. keyboards, numeric keypads, media / consumer-control keys, and mouse-class remotes all flow through one unified event bus. volume-button capture is opt-in (Settings → Remote) so the volume rocker still works as a volume rocker by default.
 
-> **the best remote for this app is a cheap Bluetooth 10-key.** it pairs as a real keyboard, so it keeps working whatever has focus; every key sends a distinct code, so you get ~17 bindable buttons; and the keys are big enough to hit by feel while you look at the lens. purpose-built "camera remotes" usually expose exactly one usable button — their d-pads are pointers, which iOS doesn't hand to apps.
-
 ## what it parses
 
 real markdown:
