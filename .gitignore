@@ -66,3 +66,13 @@ script read audio/
 
 # Internal dev handoff doc — kept local, not public (device UDIDs + process notes).
 CLAUDE.md
+
+# The detail split out of CLAUDE.md on 2026-08-08 to get it under budget.
+# Ignored for the same reason CLAUDE.md is: these carry device UDIDs, the deploy
+# loop, and internal process notes, and this repo is public. Mirrored to
+# ~/Developer/.state/openprompter/docs/ so losing the directory does not lose them.
+#
+# NOTE: docs/camera-and-recording.md contains no credentials or strategy — it is
+# pure iOS API archaeology and would genuinely help contributors. Publishing that
+# one file is a live question for the repo owner, not a decision made here.
+docs/
