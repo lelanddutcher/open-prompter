@@ -225,7 +225,7 @@ enum OrientationPolicy {
         }
     }
 
-    /// !!! UNVERIFIED, DEVICE-BLOCKED PLACEHOLDER (V3 Design 06 / GitHub #2) !!!
+    /// !!! PENDING ON-DEVICE CONFIRMATION (V3 Design 06 / GitHub #2 + #7) !!!
     ///
     /// Preview `videoRotationAngle` (DEGREES) for the `.wideFrontSensor`
     /// generation class (iPhone 16 / 15 / 14 / 13 / SE — any 4:3-front-sensor
@@ -233,19 +233,20 @@ enum OrientationPolicy {
     /// 90° and locked"; the recorded FILE plays back correct, so this is a
     /// PREVIEW-only defect and the writer transforms are untouched.
     ///
-    /// We do NOT own an iPhone 13 Pro, so we CANNOT confirm the correct angle
-    /// here. This constant is the single data row the #2 reporter must confirm
-    /// (see V3 Design 06 §5 — ship the DEBUG angle-cycler, ask the reporter
-    /// which of 0/90/180/270 lands upright, then set this and drop `_UNVERIFIED`).
+    /// Value = `90`, triangulated from two independent field reports:
+    ///   - GitHub #2 (iPhone 13 Pro): at the pre-3.1 angle of `0`, the preview
+    ///     was "rotated 90°" ⇒ a +90° correction lands upright.
+    ///   - GitHub #7 (iPhone 15 Pro Max) + follow-up iPhone 14 report: at the
+    ///     shipped 3.1 value of `270`, the preview is UPSIDE DOWN ⇒ the true
+    ///     value is 180° away: `270 + 180 = 450 ≡ 90`.
+    /// Both reports agree on `90`. The earlier `270` working hypothesis (an
+    /// auto-mirror handedness inversion guess) is DISPROVEN by #7.
     ///
-    /// Working hypothesis = `270`: the selfie preview connection auto-mirrors
-    /// (`automaticallyAdjustsVideoMirroring == true`), which inverts rotation
-    /// handedness, so the mirror-inverted 90° (= 270°) is the most likely
-    /// upright value given a "rotated 90°" report. This is a HYPOTHESIS to
-    /// test with the reporter, NOT a known-good value.
-    ///
+    /// The DEBUG angle-cycler (Settings → Labs → "wide-front preview angle")
+    /// remains as the final confirmation tool: once an affected-device owner
+    /// confirms `90` is upright on hardware, drop `_UNVERIFIED` from the name.
     /// Do NOT present this number as verified anywhere in shipping copy.
-    static let PREVIEW_ANGLE_WIDE_FRONT_UNVERIFIED: CGFloat = 270
+    static let PREVIEW_ANGLE_WIDE_FRONT_UNVERIFIED: CGFloat = 90
 
     /// Coarse front-camera generation class. The ONLY thing the preview
     /// rotation policy branches on beyond `(aspect, bufferShape)`. Derived
@@ -504,9 +505,9 @@ enum OrientationPolicy {
     ///   re-verifying on a 1:1-front-sensor device.
     /// - `.wideFrontSensor`: GitHub #2 (iPhone 13 Pro, 4:3 front sensor) shows
     ///   the preview rotated 90° and locked — the layer's built-in auto-rotation
-    ///   does NOT land upright for this sensor class. The angle is UNVERIFIED /
-    ///   device-blocked; see `PREVIEW_ANGLE_WIDE_FRONT_UNVERIFIED` and the
-    ///   confirmation loop in V3 Design 06 §5.
+    ///   does NOT land upright for this sensor class. The angle is `90`,
+    ///   triangulated from #2 and #7 field reports but not yet confirmed by us
+    ///   on hardware; see `PREVIEW_ANGLE_WIDE_FRONT_UNVERIFIED`.
     ///
     /// QA REVIEWER FOCUS: the DEVICE axis was added ONLY to this preview
     /// function. `writerTransform` is untouched (recording is verified correct
@@ -533,8 +534,9 @@ enum OrientationPolicy {
 
     /// The PORTRAIT-hold preview angle per device class. This is the pinned
     /// table — pass-13e verified `0` for `.squareFrontSensor`; `.wideFrontSensor`
-    /// is still the GitHub #2 placeholder. Split out of `previewRotationAngle`
-    /// so the delta composition can't be confused with the table itself.
+    /// is the GitHub #2/#7 row (`90`, pending on-device confirmation). Split out
+    /// of `previewRotationAngle` so the delta composition can't be confused
+    /// with the table itself.
     static func basePreviewRotationAngle(device: DeviceGenerationHint) -> CGFloat {
         switch device {
         case .squareFrontSensor, .unknown:
@@ -659,9 +661,9 @@ enum OrientationPolicy {
     }
 
     /// Advance the DEBUG wide-front angle-cycler one step:
-    /// `nil (hypothesis) → 0 → 90 → 180 → 270 → nil`. Returns the new value so
-    /// the caller can surface it. This is the closed-loop tool for the #2
-    /// reporter to find the upright angle live (V3 Design 06 §5).
+    /// `nil (ship default) → 0 → 90 → 180 → 270 → nil`. Returns the new value so
+    /// the caller can surface it. This is the closed-loop tool for confirming
+    /// the wide-front angle live on an affected device (V3 Design 06 §5).
     @discardableResult
     static func cycleDebugWideFrontPreviewAngle() -> CGFloat? {
         let next: CGFloat?
@@ -670,7 +672,7 @@ enum OrientationPolicy {
         case .some(0):    next = 90
         case .some(90):   next = 180
         case .some(180):  next = 270
-        default:          next = nil   // 270 or any other → back to hypothesis
+        default:          next = nil   // 270 or any other → back to ship default
         }
         debugWideFrontPreviewAngleOverride = next
         return next
