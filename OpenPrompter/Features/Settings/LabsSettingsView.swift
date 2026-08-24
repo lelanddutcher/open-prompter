@@ -186,13 +186,14 @@ struct LabsSettingsView: View {
             .foregroundStyle(Theme.dim)
     }
 
-    /// Wide-front (iPhone-13-Pro-class) preview angle-cycler. GitHub #2: the
-    /// 4:3-front-sensor preview renders rotated 90° and locked, and we don't
-    /// own the device to confirm the corrective angle. This row cycles the
-    /// `.wideFrontSensor` preview override through nil→0→90→180→270→nil so the
-    /// #2 reporter can find the upright value live, then we bake it into
-    /// `OrientationPolicy.PREVIEW_ANGLE_WIDE_FRONT_UNVERIFIED`. No-op on
-    /// `.squareFrontSensor` devices (the founder's iPhone 17).
+    /// Wide-front (iPhone-16-and-older) preview angle-cycler. GitHub #2 (13
+    /// Pro: "rotated 90°") and #7 (15 Pro Max: "upside down" at the old 270°
+    /// hypothesis) triangulate the upright `.wideFrontSensor` angle to 90°,
+    /// now the shipped default. This row cycles an override through
+    /// nil→0→90→180→270→nil so an affected-device owner can confirm 90° live
+    /// (or find a different value if their device disagrees), then we drop
+    /// `_UNVERIFIED` from `OrientationPolicy.PREVIEW_ANGLE_WIDE_FRONT_UNVERIFIED`.
+    /// No-op on `.squareFrontSensor` devices (the founder's iPhone 17).
     @ViewBuilder
     private var wideFrontPreviewAngleRow: some View {
         let hint = OrientationPolicy.DeviceGenerationHint.from(
@@ -204,11 +205,11 @@ struct LabsSettingsView: View {
             HStack {
                 Text("wide-front preview angle")
                 Spacer()
-                Text(wideFrontPreviewAngleOverride.map { "\(Int($0))°" } ?? "hypothesis (270°)")
+                Text(wideFrontPreviewAngleOverride.map { "\(Int($0))°" } ?? "default (90°)")
                     .foregroundStyle(Theme.dim)
             }
         }
-        Text("debug only. github #2: iphone 13 pro (4:3 front sensor) preview is rotated 90° + locked. cycle the override to find the upright angle on that device class, then confirm it. this device is classified '\(hint.rawValue)'\(hint == .wideFrontSensor ? "" : " — cycling is a no-op here").")
+        Text("debug only. github #2 + #7: wide-front (4:3) front-sensor previews (iphone 16 and older) render rotated; field reports triangulate the upright angle to 90°, now the shipped default. cycle the override to confirm on an affected device. this device is classified '\(hint.rawValue)'\(hint == .wideFrontSensor ? "" : " — cycling is a no-op here").")
             .font(.system(size: 12))
             .foregroundStyle(Theme.dim)
     }
