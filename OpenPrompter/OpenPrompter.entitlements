@@ -4,7 +4,7 @@
 <dict>
 	<key>com.apple.developer.icloud-container-identifiers</key>
 	<array>
-		<string>iCloud.us.seelye.openprompter.ios</string>
+		<string>iCloud.app.openprompter.ios</string>
 	</array>
 	<key>com.apple.developer.icloud-services</key>
 	<array>
@@ -12,9 +12,9 @@
 	</array>
 	<key>com.apple.developer.ubiquity-container-identifiers</key>
 	<array>
-		<string>iCloud.us.seelye.openprompter.ios</string>
+		<string>iCloud.app.openprompter.ios</string>
 	</array>
 	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
-	<string>$(TeamIdentifierPrefix)us.seelye.openprompter.ios</string>
+	<string>$(TeamIdentifierPrefix)app.openprompter.ios</string>
 </dict>
 </plist>
