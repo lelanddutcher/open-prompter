@@ -80,6 +80,12 @@ struct LabsSettingsView: View {
     /// UNVERIFIED hypothesis. See V3 Design 06 §5.
     @State private var wideFrontPreviewAngleOverride: CGFloat? =
         OrientationPolicy.debugWideFrontPreviewAngleOverride
+
+    /// On-prompter voice-follow diagnostics overlay. Plain UserDefaults key
+    /// (not a PrefKey) — a DEBUG diagnostic surface, not a user preference.
+    /// Default ON so dogfood builds show the readout unless opted out.
+    @AppStorage("debug.voice.followDiagnostics")
+    private var voiceFollowDiagnostics: Bool = true
     #endif
 
     /// Live availability of the on-device Format model, one-lined for the Labs
@@ -149,6 +155,9 @@ struct LabsSettingsView: View {
                 // classified .wideFrontSensor; on the founder's iPhone 17
                 // (.squareFrontSensor) it's a no-op.
                 wideFrontPreviewAngleRow
+
+                // Voice-follow diagnostics overlay toggle — DEBUG only.
+                voiceFollowDiagnosticsRow
                 #endif
             }
         }
@@ -209,6 +218,18 @@ struct LabsSettingsView: View {
             }
         }
         Text("debug only. github #2: iphone 13 pro (4:3 front sensor) preview is rotated 90° + locked. cycle the override to find the upright angle on that device class, then confirm it. this device is classified '\(hint.rawValue)'\(hint == .wideFrontSensor ? "" : " — cycling is a no-op here").")
+            .font(.system(size: 12))
+            .foregroundStyle(Theme.dim)
+    }
+
+    /// Voice-follow diagnostics overlay toggle (DEBUG). Gates the three-line
+    /// on-prompter readout (match verdict / aim path / chase state) used for
+    /// on-device diagnosis of the voice-follow pipeline. Default ON; flip off
+    /// for a clean prompter screen.
+    @ViewBuilder
+    private var voiceFollowDiagnosticsRow: some View {
+        Toggle("voice-follow diagnostics", isOn: $voiceFollowDiagnostics)
+        Text("debug only. shows the three-line match/aim/chase readout on the prompter while voice tracking is active — the tool used to diagnose the read-line stranding fix. harmless to leave on; never ships in release builds.")
             .font(.system(size: 12))
             .foregroundStyle(Theme.dim)
     }

@@ -76,6 +76,13 @@ struct TeleprompterView: View {
     @AppStorage("pref.voice.boxBottomFraction")
     private var voiceFeatherFraction: Double = 0.18
 
+    /// Voice-follow chase-speed ceiling as a multiple of font size.
+    /// Read live via @AppStorage so the Settings slider applies to an
+    /// already-open prompter (Settings is modal from the library — a
+    /// stored VM copy would go stale). Default 6.0, the 2.0.x value.
+    @AppStorage(PrefKey.voiceFollowSpeedFactor.rawValue)
+    private var voiceFollowSpeedFactor: Double = 6.0
+
     /// Mirror of `PipTile.hidden` published via `PipHiddenPreferenceKey`.
     /// Cosmetic only — `PipTile` now owns its own `CameraPreview` so the
     /// chevron-hidden state doesn't gate any camera mount up here. The
@@ -97,6 +104,27 @@ struct TeleprompterView: View {
     /// here (not on the view model) because it's a gesture-recognizer
     /// transient — no need to outlive the gesture.
     @State private var manualScrollBaseline: CGFloat? = nil
+
+    #if DEBUG
+    /// Live voice-follow diagnostics (DEBUG only, on-device). Three short
+    /// lines drawn at the bottom of the prompter while voice tracking is
+    /// active: the aligner's latest verdict, how the scroll target was
+    /// computed, and the per-frame chase state. Exists so stalls can be
+    /// diagnosed on hardware without Console.app. Throttled to ~4 Hz in
+    /// the tick so the 60 Hz TimelineView doesn't churn the body.
+    @State private var voiceDiagMatch: String = "match: —"
+    @State private var voiceDiagAim: String = "aim: —"
+    @State private var voiceDiagTick: String = "tick: —"
+    @State private var lastVoiceDiagTickUpdate: Date = .distantPast
+
+    /// Master switch for the overlay. Mirrors the Settings → Labs toggle;
+    /// default ON so dogfood builds show diagnostics unless the user opts
+    /// out. Plain UserDefaults key (not a PrefKey) — a DEBUG diagnostic
+    /// surface, not a user preference (same pattern as the wide-front
+    /// angle-cycler key).
+    @AppStorage("debug.voice.followDiagnostics")
+    private var voiceFollowDiagnostics: Bool = true
+    #endif
 
     // Live-read prefs that gate which sources are active. UserDefaults-backed
     // so a Settings change applies on the next prompter open without a
@@ -236,6 +264,27 @@ struct TeleprompterView: View {
                 )
             }
         }
+        #if DEBUG
+        // Voice-follow diagnostics — three monospaced lines pinned just
+        // under the top bar while tracking is active. DEBUG only;
+        // toggleable via Settings → Labs → "voice-follow diagnostics".
+        .overlay(alignment: .topLeading) {
+            if appState.voiceTracker.isActive && voiceFollowDiagnostics {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(voiceDiagMatch)
+                    Text(voiceDiagAim)
+                    Text(voiceDiagTick)
+                }
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(Theme.green)
+                .padding(8)
+                .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 6))
+                .padding(.leading, 12)
+                .padding(.top, 110)
+                .allowsHitTesting(false)
+            }
+        }
+        #endif
         .overlay(alignment: .top) {
             VStack(spacing: 6) {
                 PrompterTopBarView(vm: vm)
@@ -1673,7 +1722,12 @@ struct TeleprompterView: View {
         // drag ends — otherwise a match arriving mid-drag would
         // re-set the lerp target and the velocity controller would
         // pull scroll away from where the user is dragging.
-        if manualScrollBaseline != nil { return }
+        if manualScrollBaseline != nil {
+            #if DEBUG
+            voiceDiagAim = "aim: SKIPPED (manual drag baseline held)"
+            #endif
+            return
+        }
         // Refresh the visible-range with current geometry FIRST. The
         // aligner uses it on the next match. Without this, a font-
         // size change would race the next match with stale geometry.
@@ -1712,6 +1766,9 @@ struct TeleprompterView: View {
            let frame = vm.blockFrames[location.blockIndex] {
             let baselineNudge = CGFloat(vm.fontSize) * 0.5
             cursorContentY = frame.minY + CGFloat(location.fraction) * frame.height + baselineNudge
+            #if DEBUG
+            voiceDiagAim = "aim: block[\(location.blockIndex)] f=\(String(format: "%.2f", location.fraction)) cy=\(Int(cursorContentY))"
+            #endif
         } else if let fraction = appState.voiceTracker.cursorScriptFraction {
             // Linear-by-char fallback for the legacy `loadScript(_:)`
             // path (tests, mostly) — accounts for top/bottom padding
@@ -1720,13 +1777,22 @@ struct TeleprompterView: View {
             let bottomPad = vm.viewportHeight * 0.8
             let bodyHeight = max(0, vm.contentHeight - topPad - bottomPad)
             cursorContentY = topPad + CGFloat(fraction) * bodyHeight
+            #if DEBUG
+            voiceDiagAim = "aim: LINEAR-fallback f=\(String(format: "%.3f", fraction)) cy=\(Int(cursorContentY)) (blockFrames=\(vm.blockFrames.count))"
+            #endif
         } else {
+            #if DEBUG
+            voiceDiagAim = "aim: NO POSITION (no block frame, no fraction)"
+            #endif
             return
         }
         let readY = vm.viewportHeight * CGFloat(voiceReadFraction)
         // Always aim for matched word at the READ line.
         let target = cursorContentY - readY
         vm.voiceTargetOffset = max(0, target)
+        #if DEBUG
+        voiceDiagAim += " → tgt \(Int(max(0, target)))"
+        #endif
     }
 
     /// Per-frame ticker — handles BOTH play auto-scroll AND voice-
@@ -1789,16 +1855,20 @@ struct TeleprompterView: View {
                 bodyTopPad: topPadTick,
                 bodyHeight: bodyHeightTick
             )
-            // Silence detection: if no successful match in the last
-            // 1.0s, halt momentum so a paused user can scroll back to
-            // re-read a section without the prompter pulling forward.
-            // Tightened from 1.5s → 1.0s so the scroll settles sooner when
-            // you stop speaking ("stagnant until words" — dogfood feedback).
-            // The next match sets a fresh target and the velocity controller
-            // ramps up smoothly from zero.
+            // Silence handling: if no successful match in the last 1.0s,
+            // release the scroll so a paused user can scroll back to
+            // re-read a section without the prompter pulling forward —
+            // BUT only once the scroll has CONVERGED on the last
+            // acknowledged word. Pre-fix, the halt nil'd the target
+            // mid-approach: any pause over 1.0s froze the scroll before
+            // the matched word reached READ, stranding acknowledged text
+            // mid-screen (the "words won't line up with the READ line"
+            // report). Now an in-flight approach always finishes; the
+            // release still happens once settled, and the drag handler
+            // nils the target on touch, so scroll-back stays free.
             let elapsedSinceMatch = Date().timeIntervalSince(appState.voiceTracker.lastMatchTime)
-            if elapsedSinceMatch > 1.0 {
-                if vm.voiceTargetOffset != nil {
+            if elapsedSinceMatch > 1.0, let pendingTarget = vm.voiceTargetOffset {
+                if abs(pendingTarget - vm.scroller.offset) < 4 {
                     vm.voiceTargetOffset = nil
                     vm.scroller.resetVoiceVelocity()
                 }
@@ -1819,10 +1889,25 @@ struct TeleprompterView: View {
                 // line is ~45pt tall; at 64pt it's ~90pt. Reading
                 // pace (lines/sec) is roughly font-independent, so
                 // velocity in pt/sec must scale with line height.
-                // 6 × fontSize gives ~4 lines/sec ceiling at any
-                // size. Floor of 150 to avoid pathologically slow
-                // catch-up at tiny fonts.
-                let maxVel: CGFloat = max(150, CGFloat(vm.fontSize) * 6)
+                // The multiplier is user-tunable (Settings → reading →
+                // voice follow speed); 6× ≈ ~4 lines/sec ceiling and is
+                // the shipped default. Floor of 150 to avoid
+                // pathologically slow catch-up at tiny fonts.
+                let maxVel: CGFloat = max(150, CGFloat(vm.fontSize) * CGFloat(voiceFollowSpeedFactor))
+                // Catch-up floor: how far the acknowledged word sits
+                // BELOW the READ line, in points. When it falls past
+                // mid-screen, ramp in a minimum chase velocity (0 →
+                // 60% of maxVel by the three-quarter mark) so the
+                // scroll recovers briskly instead of asymptoting
+                // toward the target. Above mid-screen the plain
+                // P-controller feel is unchanged.
+                let readY = vm.viewportHeight * CGFloat(voiceReadFraction)
+                let lag = target - vm.scroller.offset
+                let halfway = vm.viewportHeight * 0.5 - readY
+                let urgency = lag > halfway
+                    ? min(1, (lag - halfway) / (vm.viewportHeight * 0.25))
+                    : 0
+                let minVelocity = maxVel * 0.6 * urgency
                 // FEATHER distance drives the controller's responsiveness:
                 // tighter feather → snappier P-gain + higher velocityAlpha
                 // (cursor stays in lockstep with recognized words);
@@ -1833,9 +1918,27 @@ struct TeleprompterView: View {
                     dt: dt,
                     maxOffset: vm.maxScrollOffset,
                     featherFraction: feather,
-                    maxVelocity: maxVel
+                    maxVelocity: maxVel,
+                    minVelocity: minVelocity
                 )
             }
+            #if DEBUG
+            // Throttled (~4 Hz) diagnostics refresh — see voiceDiag* state.
+            if now.timeIntervalSince(lastVoiceDiagTickUpdate) > 0.25 {
+                lastVoiceDiagTickUpdate = now
+                let t = appState.voiceTracker
+                let tgtString = vm.voiceTargetOffset.map { String(Int($0)) } ?? "nil"
+                let deltaString = vm.voiceTargetOffset.map { String(Int($0 - vm.scroller.offset)) } ?? "—"
+                voiceDiagTick = "off \(Int(vm.scroller.offset)) tgt \(tgtString) Δ\(deltaString) age \(String(format: "%.1f", elapsedSinceMatch))s"
+                if let m = t.lastMatch {
+                    let vr = t.visibleTokenRange.map { "\($0.lowerBound)..\($0.upperBound)" } ?? "nil"
+                    voiceDiagMatch = "\(m.matched ? "MATCH" : "NO-MATCH") cur \(t.currentCursor) conf \(String(format: "%.2f", m.confidence)) vr \(vr)"
+                    if !m.matched {
+                        voiceDiagMatch += "\n" + m.rationale
+                    }
+                }
+            }
+            #endif
         } else {
             vm.lastVoiceTickAt = nil
             vm.scroller.resetVoiceVelocity()

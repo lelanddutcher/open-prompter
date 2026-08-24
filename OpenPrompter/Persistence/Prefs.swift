@@ -195,6 +195,14 @@ enum PrefKey: String, CaseIterable {
     /// `#if DEBUG`, matching the `labsFormat` pre-graduation shape.
     case voiceUseSpeechAnalyzer = "pref.voice.useSpeechAnalyzer"
 
+    /// Voice-follow chase-speed ceiling, expressed as a multiple of the
+    /// current font size (pt/s). The per-frame voice tick caps scroll
+    /// velocity at `max(150, fontSize × factor)`; the same ceiling scales
+    /// the catch-up floor that engages when the acknowledged word falls
+    /// below mid-screen. Default 6.0 — the value the 2.0.x tuning shipped
+    /// with. Device-local (NOT mirrored), matching the voice engine pref.
+    case voiceFollowSpeedFactor = "pref.voice.followSpeedFactor"
+
     // MARK: - App Store review prompt (Feature 8)
     //
     // Counters + bookkeeping for `SKStoreReviewController.requestReview(in:)`.
@@ -317,6 +325,7 @@ enum PrefKey: String, CaseIterable {
             #else
             return false
             #endif
+        case .voiceFollowSpeedFactor: return 6.0
         case .coachMarkFormatShown: return false
         case .reviewRecordingsCompleted: return 0
         case .reviewPlaySessionsCompleted: return 0
@@ -737,6 +746,13 @@ enum Prefs {
     static var voiceUseSpeechAnalyzer: Bool {
         get { defaults.bool(forKey: PrefKey.voiceUseSpeechAnalyzer.rawValue) }
         set { defaults.set(newValue, forKey: PrefKey.voiceUseSpeechAnalyzer.rawValue) }
+    }
+
+    /// Voice-follow chase-speed ceiling as a multiple of font size (pt/s).
+    /// Device-local (NOT mirrored). Default 6.0 via the registration domain.
+    static var voiceFollowSpeedFactor: Double {
+        get { defaults.double(forKey: PrefKey.voiceFollowSpeedFactor.rawValue) }
+        set { defaults.set(newValue, forKey: PrefKey.voiceFollowSpeedFactor.rawValue) }
     }
 
     /// Resolved prompt for the "Format" preset: the user override if

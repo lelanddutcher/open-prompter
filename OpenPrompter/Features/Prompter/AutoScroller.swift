@@ -115,12 +115,20 @@ final class AutoScroller {
     ///   smoother glide" intuition went unsatisfied. This parameter
     ///   wires the BOT (now FEATHER) cursor into actual behavior.
     /// - `maxVelocity`: hard ceiling on scroll velocity in pt/sec.
+    /// - `minVelocity`: forward catch-up floor in pt/sec (0 = off). When
+    ///   the acknowledged word lags far below the READ line, the pure
+    ///   P-controller crawls asymptotically; the view passes a floor so
+    ///   the chase covers ground briskly. Applied AFTER the low-pass, so
+    ///   it responds on frame 1, and only while `distance > 0` (never
+    ///   pushes backward or past the target — the clamp below still
+    ///   governs).
     func voiceTrackingTick(
         target: CGFloat,
         dt: TimeInterval,
         maxOffset: CGFloat,
         featherFraction: CGFloat = 0.13,
-        maxVelocity: CGFloat = 200
+        maxVelocity: CGFloat = 200,
+        minVelocity: CGFloat = 0
     ) {
         let clampedTarget = min(max(0, target), maxOffset)
         let distance = clampedTarget - offset
@@ -248,7 +256,18 @@ final class AutoScroller {
         let pVelocity = distance * gain
         voiceVelocity = voiceVelocity * (1 - velocityAlpha)
                       + pVelocity * velocityAlpha
-        let combinedVel = max(-maxVelocity, min(maxVelocity, momentumComponent + voiceVelocity))
+        var combinedVel = max(-maxVelocity, min(maxVelocity, momentumComponent + voiceVelocity))
+
+        // Catch-up floor: when the acknowledged word sits far below READ,
+        // the smoothed P-velocity is deliberately small near the target —
+        // great for landing softly, terrible for recovering a big lag.
+        // The floor overrides the smoothing (frame-1 response) but never
+        // the ceiling, and only applies while chasing forward. Gated on
+        // `distance > minVelocity × dt` so a floor step can never overshoot
+        // the target and oscillate around it.
+        if minVelocity > 0, distance > minVelocity * CGFloat(dt) {
+            combinedVel = max(combinedVel, min(minVelocity, maxVelocity))
+        }
 
         // Integrate position.
         let proposed = offset + combinedVel * CGFloat(dt)

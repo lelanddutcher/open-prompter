@@ -30,7 +30,7 @@ open prompter is the whole feature set, free, MIT-licensed forever. it reads the
 
 ## the reading experience
 
-- **voice tracking** — on-device speech recognition follows what you actually said, so the page advances when you do. nothing leaves the phone, ever. it primes the recognizer with a **script-biased vocabulary** built from your own words, so names and jargon match reliably; a draggable reading-band indicator (READ/FEATHER handles) lands the matched word exactly where you want; velocity-controlled scroll with momentum accelerates and decelerates with your pace; and silence detection settles the scroll if you stop talking for ~1s so you can scroll back to re-read.
+- **voice tracking** — on-device speech recognition follows what you actually said, so the page advances when you do. nothing leaves the phone, ever. it primes the recognizer with a **script-biased vocabulary** built from your own words, so names and jargon match reliably; a draggable reading-band indicator (READ/FEATHER handles) lands the matched word exactly where you want; velocity-controlled scroll with momentum accelerates and decelerates with your pace; when you pause, the scroll finishes landing your last word on the READ line before settling, so you can scroll back to re-read without a fight; and a catch-up floor plus a chase-speed slider (settings → reading) control how briskly it recovers when you fall behind.
 - **horizontal AND vertical mirror**, independently, for beam-splitter teleprompter rigs.
 - **six legibility-tuned fonts** built in: Atkinson Hyperlegible (default), Lexend, System Sans, Verdana, New York (Serif), and the brand monospace.
 - **adjustable scroll speed** (5–200 px/s) and font size (16–160 pt) so dense scripts AND eye-line reads both work.
