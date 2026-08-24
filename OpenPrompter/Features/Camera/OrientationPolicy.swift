@@ -542,17 +542,16 @@ enum OrientationPolicy {
         case .squareFrontSensor, .unknown:
             return 0
         case .wideFrontSensor:
-            #if DEBUG
-            // DEBUG angle-cycler override (Settings → Labs → "wide-front
-            // preview angle"). When the founder / #2 reporter cycles the angle
-            // to find the upright value, this returns their chosen degrees
-            // instead of the placeholder. `nil` = no override = ship the
-            // hypothesis. Release builds ALWAYS use the placeholder (the
-            // override read is compiled out below).
-            if let override = debugWideFrontPreviewAngleOverride {
+            // User-settable angle override (Settings → Labs → "wide-front
+            // preview angle"). SHIPS IN RELEASE as of #7/#8: the affected
+            // devices (iPhone 16 and older) are ones we do not own, so the
+            // shipped default is triangulated from field reports rather than
+            // confirmed on hardware. If it is wrong for some device we have not
+            // heard from, that user can correct their own preview instead of
+            // waiting for a release. `nil` = no override = use the default.
+            if let override = wideFrontPreviewAngleOverride {
                 return override
             }
-            #endif
             return PREVIEW_ANGLE_WIDE_FRONT_UNVERIFIED
         }
     }
@@ -634,28 +633,27 @@ enum OrientationPolicy {
         }.joined()
     }
 
-    #if DEBUG
-    /// UserDefaults key backing the DEBUG wide-front preview angle-cycler.
+    /// UserDefaults key backing the wide-front preview angle-cycler.
     /// Namespaced so it never collides with a `PrefKey`. Not a `PrefKey` case
     /// on purpose — it's a DEBUG diagnostic surface, not a user preference.
-    private static let debugWideFrontAngleKey = "debug.orientation.wideFrontPreviewAngle"
+    private static let wideFrontAngleKey = "debug.orientation.wideFrontPreviewAngle"
 
     /// Current DEBUG override for the `.wideFrontSensor` preview angle, or
     /// `nil` when no override is active (ship the hypothesis). Stored as a
     /// sentinel: absent / negative = no override; 0/90/180/270 = override.
-    static var debugWideFrontPreviewAngleOverride: CGFloat? {
+    static var wideFrontPreviewAngleOverride: CGFloat? {
         get {
             let defaults = UserDefaults.standard
-            guard defaults.object(forKey: debugWideFrontAngleKey) != nil else { return nil }
-            let stored = defaults.double(forKey: debugWideFrontAngleKey)
+            guard defaults.object(forKey: wideFrontAngleKey) != nil else { return nil }
+            let stored = defaults.double(forKey: wideFrontAngleKey)
             return stored < 0 ? nil : CGFloat(stored)
         }
         set {
             let defaults = UserDefaults.standard
             if let newValue {
-                defaults.set(Double(newValue), forKey: debugWideFrontAngleKey)
+                defaults.set(Double(newValue), forKey: wideFrontAngleKey)
             } else {
-                defaults.removeObject(forKey: debugWideFrontAngleKey)
+                defaults.removeObject(forKey: wideFrontAngleKey)
             }
         }
     }
@@ -665,17 +663,16 @@ enum OrientationPolicy {
     /// the caller can surface it. This is the closed-loop tool for confirming
     /// the wide-front angle live on an affected device (V3 Design 06 §5).
     @discardableResult
-    static func cycleDebugWideFrontPreviewAngle() -> CGFloat? {
+    static func cycleWideFrontPreviewAngle() -> CGFloat? {
         let next: CGFloat?
-        switch debugWideFrontPreviewAngleOverride {
+        switch wideFrontPreviewAngleOverride {
         case .none:       next = 0
         case .some(0):    next = 90
         case .some(90):   next = 180
         case .some(180):  next = 270
         default:          next = nil   // 270 or any other → back to ship default
         }
-        debugWideFrontPreviewAngleOverride = next
+        wideFrontPreviewAngleOverride = next
         return next
     }
-    #endif
 }

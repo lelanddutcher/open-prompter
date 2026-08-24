@@ -75,12 +75,13 @@ struct LabsSettingsView: View {
     @State private var selfTestAlertMessage: String = ""
     @State private var selfTestAlertVisible: Bool = false
 
-    /// Mirrors `OrientationPolicy.debugWideFrontPreviewAngleOverride` so the
-    /// angle-cycler row re-renders its label when tapped. `nil` = ship the
-    /// UNVERIFIED hypothesis. See V3 Design 06 §5.
-    @State private var wideFrontPreviewAngleOverride: CGFloat? =
-        OrientationPolicy.debugWideFrontPreviewAngleOverride
     #endif
+
+    /// Mirrors `OrientationPolicy.wideFrontPreviewAngleOverride` so the
+    /// angle-cycler row re-renders its label when tapped. `nil` = use the
+    /// shipped default. NOT behind `#if DEBUG` — this row ships (see the row).
+    @State private var wideFrontPreviewAngleOverride: CGFloat? =
+        OrientationPolicy.wideFrontPreviewAngleOverride
 
     /// Live availability of the on-device Format model, one-lined for the Labs
     /// diagnostics row. Resolves the real formatter on iOS 26+, the noop below —
@@ -142,14 +143,15 @@ struct LabsSettingsView: View {
                 // entirely on iOS < 26 (the toggle would be a no-op).
                 speechAnalyzerEngineRow
 
-                // Wide-front preview angle-cycler — DEBUG only. The closed-loop
-                // tool for confirming the iPhone-13-Pro-class preview angle
-                // (GitHub #2 / V3 Design 06 §5). Cycles the .wideFrontSensor
-                // override nil→0→90→180→270→nil. Only affects devices
-                // classified .wideFrontSensor; on the founder's iPhone 17
-                // (.squareFrontSensor) it's a no-op.
-                wideFrontPreviewAngleRow
                 #endif
+
+                // Wide-front preview angle-cycler — SHIPS IN RELEASE (#7/#8).
+                // The affected devices (iPhone 16 and older) are ones we do not
+                // own, so the shipped 90° default is triangulated from field
+                // reports, not confirmed by us. This row lets an affected user
+                // correct their own preview instead of waiting for a release.
+                // No-op on .squareFrontSensor (iPhone 17 family).
+                wideFrontPreviewAngleRow
             }
         }
         .navigationTitle("labs")
@@ -160,6 +162,35 @@ struct LabsSettingsView: View {
                actions: { Button("OK", role: .cancel) {} },
                message: { Text(selfTestAlertMessage) })
         #endif
+    }
+
+    /// Wide-front (iPhone-16-and-older) preview angle-cycler. SHIPS IN
+    /// RELEASE — see the body comment at the call site. GitHub #2 (13
+    /// Pro: "rotated 90°") and #7 (15 Pro Max: "upside down" at the old 270°
+    /// hypothesis) triangulate the upright `.wideFrontSensor` angle to 90°,
+    /// now the shipped default. This row cycles an override through
+    /// nil→0→90→180→270→nil so an affected-device owner can confirm 90° live
+    /// (or find a different value if their device disagrees), then we drop
+    /// `_UNVERIFIED` from `OrientationPolicy.PREVIEW_ANGLE_WIDE_FRONT_UNVERIFIED`.
+    /// No-op on `.squareFrontSensor` devices (the founder's iPhone 17).
+    @ViewBuilder
+    private var wideFrontPreviewAngleRow: some View {
+        let hint = OrientationPolicy.DeviceGenerationHint.from(
+            modelIdentifier: OrientationPolicy.currentDeviceModelIdentifier
+        )
+        Button {
+            wideFrontPreviewAngleOverride = OrientationPolicy.cycleWideFrontPreviewAngle()
+        } label: {
+            HStack {
+                Text("wide-front preview angle")
+                Spacer()
+                Text(wideFrontPreviewAngleOverride.map { "\(Int($0))°" } ?? "default (90°)")
+                    .foregroundStyle(Theme.dim)
+            }
+        }
+        Text("if the picture-in-picture camera preview looks rotated or upside down on your phone, tap to cycle through 0° / 90° / 180° / 270° until it looks right. your choice is remembered. only the preview is affected — recorded video is always saved upright. this device is classified '\(hint.rawValue)'\(hint == .wideFrontSensor ? "" : " — cycling does nothing here, your preview already uses the verified angle").")
+            .font(.system(size: 12))
+            .foregroundStyle(Theme.dim)
     }
 
     #if DEBUG
@@ -186,33 +217,6 @@ struct LabsSettingsView: View {
             .foregroundStyle(Theme.dim)
     }
 
-    /// Wide-front (iPhone-16-and-older) preview angle-cycler. GitHub #2 (13
-    /// Pro: "rotated 90°") and #7 (15 Pro Max: "upside down" at the old 270°
-    /// hypothesis) triangulate the upright `.wideFrontSensor` angle to 90°,
-    /// now the shipped default. This row cycles an override through
-    /// nil→0→90→180→270→nil so an affected-device owner can confirm 90° live
-    /// (or find a different value if their device disagrees), then we drop
-    /// `_UNVERIFIED` from `OrientationPolicy.PREVIEW_ANGLE_WIDE_FRONT_UNVERIFIED`.
-    /// No-op on `.squareFrontSensor` devices (the founder's iPhone 17).
-    @ViewBuilder
-    private var wideFrontPreviewAngleRow: some View {
-        let hint = OrientationPolicy.DeviceGenerationHint.from(
-            modelIdentifier: OrientationPolicy.currentDeviceModelIdentifier
-        )
-        Button {
-            wideFrontPreviewAngleOverride = OrientationPolicy.cycleDebugWideFrontPreviewAngle()
-        } label: {
-            HStack {
-                Text("wide-front preview angle")
-                Spacer()
-                Text(wideFrontPreviewAngleOverride.map { "\(Int($0))°" } ?? "default (90°)")
-                    .foregroundStyle(Theme.dim)
-            }
-        }
-        Text("debug only. github #2 + #7: wide-front (4:3) front-sensor previews (iphone 16 and older) render rotated; field reports triangulate the upright angle to 90°, now the shipped default. cycle the override to confirm on an affected device. this device is classified '\(hint.rawValue)'\(hint == .wideFrontSensor ? "" : " — cycling is a no-op here").")
-            .font(.system(size: 12))
-            .foregroundStyle(Theme.dim)
-    }
 
     private func runSelfTest() {
         selfTestRunning = true

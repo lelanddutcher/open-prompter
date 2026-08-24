@@ -257,15 +257,15 @@ final class DeviceGenerationHintTests: XCTestCase {
         }
 
         // Start from a known "no override" state.
-        OrientationPolicy.debugWideFrontPreviewAngleOverride = nil
-        XCTAssertNil(OrientationPolicy.debugWideFrontPreviewAngleOverride)
+        OrientationPolicy.wideFrontPreviewAngleOverride = nil
+        XCTAssertNil(OrientationPolicy.wideFrontPreviewAngleOverride)
 
         // nil → 0 → 90 → 180 → 270 → nil
-        XCTAssertEqual(OrientationPolicy.cycleDebugWideFrontPreviewAngle(), 0)
-        XCTAssertEqual(OrientationPolicy.cycleDebugWideFrontPreviewAngle(), 90)
-        XCTAssertEqual(OrientationPolicy.cycleDebugWideFrontPreviewAngle(), 180)
-        XCTAssertEqual(OrientationPolicy.cycleDebugWideFrontPreviewAngle(), 270)
-        XCTAssertNil(OrientationPolicy.cycleDebugWideFrontPreviewAngle())
+        XCTAssertEqual(OrientationPolicy.cycleWideFrontPreviewAngle(), 0)
+        XCTAssertEqual(OrientationPolicy.cycleWideFrontPreviewAngle(), 90)
+        XCTAssertEqual(OrientationPolicy.cycleWideFrontPreviewAngle(), 180)
+        XCTAssertEqual(OrientationPolicy.cycleWideFrontPreviewAngle(), 270)
+        XCTAssertNil(OrientationPolicy.cycleWideFrontPreviewAngle())
     }
 
     func testAngleCyclerOverridesWideFrontRowOnly() {
@@ -279,7 +279,7 @@ final class DeviceGenerationHintTests: XCTestCase {
             }
         }
 
-        OrientationPolicy.debugWideFrontPreviewAngleOverride = 90
+        OrientationPolicy.wideFrontPreviewAngleOverride = 90
         // Wide-front row honors the override…
         XCTAssertEqual(
             OrientationPolicy.previewRotationAngle(
@@ -302,7 +302,7 @@ final class DeviceGenerationHintTests: XCTestCase {
         )
 
         // Clearing the override returns wide-front to the named placeholder.
-        OrientationPolicy.debugWideFrontPreviewAngleOverride = nil
+        OrientationPolicy.wideFrontPreviewAngleOverride = nil
         XCTAssertEqual(
             OrientationPolicy.previewRotationAngle(
                 for: .classic, bufferShape: .landscape, device: .wideFrontSensor
