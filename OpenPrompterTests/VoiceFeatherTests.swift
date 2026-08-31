@@ -172,4 +172,64 @@ final class VoiceFeatherTests: XCTestCase {
             "At wide feather + steady reading pace, the momentum term must close the gap to within 25pt. Pre-2.0.9 the pure-P controller equilibrated around 125pt behind. Lag=\(lag)pt, target=\(finalTarget), offset=\(scroller.offset)."
         )
     }
+
+    // MARK: - Catch-up floor (minVelocity)
+
+    /// With a far-away target and a wide (slow) feather, the smoothed
+    /// P-velocity ramps up gently. The catch-up floor must override that
+    /// ramp so the very first tick already advances at the floor rate.
+    @MainActor
+    func test_minVelocity_floorAppliesFromFirstTick() {
+        let scroller = AutoScroller()
+        let dt: TimeInterval = 1.0 / 60.0
+        scroller.voiceTrackingTick(
+            target: 800,
+            dt: dt,
+            maxOffset: 5000,
+            featherFraction: 0.5,      // slowest ramp
+            maxVelocity: 400,
+            minVelocity: 240
+        )
+        XCTAssertEqual(
+            scroller.offset,
+            240 * dt,
+            accuracy: 0.001,
+            "First tick with a big lag must advance at the floor rate, not the smoothed P rate. offset=\(scroller.offset)."
+        )
+    }
+
+    /// The floor must never push the scroll PAST the target: when the
+    /// remaining distance is smaller than one floor-step, the floor
+    /// stands down and the normal (smooth) approach governs. Asserts
+    /// the offset never overshoots during the approach, then that the
+    /// controller still converges.
+    @MainActor
+    func test_minVelocity_neverOvershootsTarget() {
+        let scroller = AutoScroller()
+        scroller.seek(to: 799, maxOffset: 5000)
+        let dt: TimeInterval = 1.0 / 60.0
+        var maxSeen: CGFloat = 0
+        for _ in 0..<600 {
+            scroller.voiceTrackingTick(
+                target: 800,
+                dt: dt,
+                maxOffset: 5000,
+                featherFraction: 0.5,
+                maxVelocity: 400,
+                minVelocity: 240
+            )
+            maxSeen = max(maxSeen, scroller.offset)
+        }
+        XCTAssertLessThanOrEqual(
+            maxSeen,
+            800.001,
+            "The floor must never carry the offset past the target. maxSeen=\(maxSeen)."
+        )
+        XCTAssertEqual(
+            scroller.offset,
+            800,
+            accuracy: 0.5,
+            "Given time, the controller still converges on the target. offset=\(scroller.offset)."
+        )
+    }
 }

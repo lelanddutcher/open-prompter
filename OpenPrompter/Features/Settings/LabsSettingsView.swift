@@ -75,6 +75,11 @@ struct LabsSettingsView: View {
     @State private var selfTestAlertMessage: String = ""
     @State private var selfTestAlertVisible: Bool = false
 
+    /// On-prompter voice-follow diagnostics overlay. Plain UserDefaults key
+    /// (not a PrefKey) — a DEBUG diagnostic surface, not a user preference.
+    /// Default ON so dogfood builds show the readout unless opted out.
+    @AppStorage("debug.voice.followDiagnostics")
+    private var voiceFollowDiagnostics: Bool = true
     #endif
 
     /// Mirrors `OrientationPolicy.wideFrontPreviewAngleOverride` so the
@@ -143,6 +148,8 @@ struct LabsSettingsView: View {
                 // entirely on iOS < 26 (the toggle would be a no-op).
                 speechAnalyzerEngineRow
 
+                // Voice-follow diagnostics overlay toggle — DEBUG only.
+                voiceFollowDiagnosticsRow
                 #endif
 
                 // Wide-front preview angle-cycler — SHIPS IN RELEASE (#7/#8).
@@ -217,6 +224,18 @@ struct LabsSettingsView: View {
             .foregroundStyle(Theme.dim)
     }
 
+
+    /// Voice-follow diagnostics overlay toggle (DEBUG). Gates the three-line
+    /// on-prompter readout (match verdict / aim path / chase state) used for
+    /// on-device diagnosis of the voice-follow pipeline. Default ON; flip off
+    /// for a clean prompter screen.
+    @ViewBuilder
+    private var voiceFollowDiagnosticsRow: some View {
+        Toggle("voice-follow diagnostics", isOn: $voiceFollowDiagnostics)
+        Text("debug only. shows the three-line match/aim/chase readout on the prompter while voice tracking is active — the tool used to diagnose the read-line stranding fix. harmless to leave on; never ships in release builds.")
+            .font(.system(size: 12))
+            .foregroundStyle(Theme.dim)
+    }
 
     private func runSelfTest() {
         selfTestRunning = true

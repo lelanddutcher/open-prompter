@@ -27,6 +27,7 @@ struct ReadingSettingsView: View {
     @State private var appearance: Prefs.Appearance = Prefs.appearance
     @State private var prompterFont: String = Prefs.prompterFont.rawValue
     @State private var showReadingProgressBar: Bool = Prefs.showReadingProgressBar
+    @State private var voiceFollowSpeed: Double = Prefs.voiceFollowSpeedFactor
 
     var body: some View {
         Form {
@@ -94,6 +95,19 @@ struct ReadingSettingsView: View {
                 }
                 Slider(value: $defaultFont, in: 32...160, step: 4)
                     .onChange(of: defaultFont) { _, new in Prefs.defaultFont = new }
+            }
+
+            Section("voice following") {
+                HStack {
+                    Text("chase speed")
+                    Spacer()
+                    Text("\(Int(voiceFollowSpeed))×")
+                }
+                Slider(value: $voiceFollowSpeed, in: 3...16, step: 1)
+                    .onChange(of: voiceFollowSpeed) { _, new in Prefs.voiceFollowSpeedFactor = new }
+                Text("caps how fast the prompter chases your voice, as a multiple of font size per second (6× ≈ 4 lines/sec). when the word you're reading falls below mid-screen, a catch-up floor kicks in at up to 60% of this speed so the scroll recovers briskly. applies live to an open prompter.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.dim)
             }
 
             Section("mirror") {
