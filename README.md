@@ -127,7 +127,24 @@ set your development team in signing, then run on a simulator or device.
 
 ## contributing
 
-PRs welcome. issues tagged `good-first-issue` are a safe entry point. see [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the workflow, code style, and the areas that most need care — the iPhone 17 + iOS 26 camera orientation quirks, the voice-tracking algorithm, and the recording / writer state machine.
+PRs welcome. issues tagged `good-first-issue` are a safe entry point.
+
+thanks to the people who've shipped fixes and filed the reports that made them
+possible — most of this app's hardware bugs were found on devices we don't own:
+
+- [@aseelye](https://github.com/aseelye) — picture-in-picture preview
+  orientation on wide-front-sensor iPhones (#8), and the voice-follow
+  auto-scroll rework: finishing the READ-line approach before silence releases
+  the scroll, the catch-up floor, and a tunable chase speed (#9)
+- [@cjones1025c](https://github.com/cjones1025c) — bluetooth 10-key remote
+  bindings (#5)
+- [@haooodev](https://github.com/haooodev), [@k3n0x2](https://github.com/k3n0x2),
+  [@rloginovsky](https://github.com/rloginovsky) — the preview-rotation reports
+  across iPhone 13/14/15 that pinned down #2 and #7
+- [@jbrennan-gsu](https://github.com/jbrennan-gsu) — voice tracking failing to
+  start on iPad (#10)
+
+see [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the workflow, code style, and the areas that most need care — the iPhone 17 + iOS 26 camera orientation quirks, the voice-tracking algorithm, and the recording / writer state machine.
 
 ## support the project
 
