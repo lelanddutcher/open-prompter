@@ -39,6 +39,8 @@ struct LibraryView: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
+            .padListWidth()
+            .frame(maxWidth: .infinity)
             .background(Theme.bg)
             .navigationTitle("scripts")
             .navigationBarTitleDisplayMode(.inline)

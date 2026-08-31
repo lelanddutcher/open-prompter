@@ -153,6 +153,8 @@ struct ReadingSettingsView: View {
                     .foregroundStyle(Theme.dim)
             }
         }
+        .padListWidth()
+        .frame(maxWidth: .infinity)
         .navigationTitle("reading")
         .navigationBarTitleDisplayMode(.inline)
     }

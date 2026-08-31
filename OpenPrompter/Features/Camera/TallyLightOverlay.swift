@@ -49,6 +49,21 @@ struct TallyLightOverlay: View {
     /// user can distinguish a recording state from a mirror state at a glance.
     private static let tallyRed = Color(red: 0xFF / 255, green: 0x1F / 255, blue: 0x1F / 255)
 
+    /// Corner radius for the tally border.
+    ///
+    /// `UIScreen.main` is the DISPLAY, not this app's window. As a "Designed
+    /// for iPad" app on Apple Silicon this runs in a freely resizable window
+    /// whose corners have nothing to do with the Mac's display radius, and
+    /// `UIScreen.main` is deprecated for multi-scene besides. Use the screen
+    /// backing the active window scene; fall back to a square corner when
+    /// there is no scene rather than inheriting a phone-shaped radius.
+    static var hostCornerRadius: CGFloat {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+        guard let screen = scene?.screen else { return 0 }
+        return screen.displayCornerRadius
+    }
+
     var body: some View {
         if isActive {
             // Reduce-Motion: solid frame, no pulse. Otherwise drive opacity
@@ -71,7 +86,7 @@ struct TallyLightOverlay: View {
         // — close enough to feel like the device border at 4pt thickness.
         // On square-corner devices `cornerRadius` is 0 and the rounded
         // rectangle collapses back to a hard rectangle.
-        RoundedRectangle(cornerRadius: UIScreen.main.displayCornerRadius, style: .continuous)
+        RoundedRectangle(cornerRadius: Self.hostCornerRadius, style: .continuous)
             .strokeBorder(Self.tallyRed, lineWidth: thickness)
             .opacity(opacity)
             .ignoresSafeArea()

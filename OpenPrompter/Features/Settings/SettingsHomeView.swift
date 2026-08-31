@@ -125,6 +125,8 @@ struct SettingsHomeView: View {
                                     monitor: appState.keyboardMonitor
                                 )
                             }
+                            .padListWidth()
+                            .frame(maxWidth: .infinity)
                             .navigationTitle("bluetooth remote")
                             .navigationBarTitleDisplayMode(.inline)
                         } label: {

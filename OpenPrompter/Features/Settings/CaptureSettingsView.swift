@@ -61,6 +61,8 @@ struct CaptureSettingsView: View {
                 RecordingSettingsView(routeMonitor: appState.audioRouteMonitor)
             }
         }
+        .padListWidth()
+        .frame(maxWidth: .infinity)
         .navigationTitle("camera & recording")
         .navigationBarTitleDisplayMode(.inline)
         // The route monitor must be running for the recording "current source"

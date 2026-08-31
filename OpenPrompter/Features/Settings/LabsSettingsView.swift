@@ -161,6 +161,8 @@ struct LabsSettingsView: View {
                 wideFrontPreviewAngleRow
             }
         }
+        .padListWidth()
+        .frame(maxWidth: .infinity)
         .navigationTitle("labs")
         .navigationBarTitleDisplayMode(.inline)
         #if DEBUG

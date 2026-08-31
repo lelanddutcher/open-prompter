@@ -42,4 +42,17 @@ extension View {
     func padContentWidth(_ maxWidth: CGFloat = 620) -> some View {
         frame(maxWidth: maxWidth)
     }
+
+    /// Measure for LISTS and FORMS, which tolerate more width than prose but
+    /// must still not run edge-to-edge.
+    ///
+    /// Verified on a 13-inch iPad simulator: an uncapped `List` stretched a
+    /// single script row across the full 1032pt, stranding its status dot at
+    /// the far edge with a dead gap in between. A "Designed for iPad" app on
+    /// Apple Silicon runs in a freely resizable window, so this gets worse,
+    /// not better, on macOS. 760pt keeps a row scannable in one eye movement
+    /// at any window size.
+    func padListWidth(_ maxWidth: CGFloat = 760) -> some View {
+        frame(maxWidth: maxWidth)
+    }
 }

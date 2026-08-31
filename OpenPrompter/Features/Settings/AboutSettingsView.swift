@@ -61,6 +61,8 @@ struct AboutSettingsView: View {
                 }
             }
         }
+        .padListWidth()
+        .frame(maxWidth: .infinity)
         .navigationTitle("about")
         .navigationBarTitleDisplayMode(.inline)
     }

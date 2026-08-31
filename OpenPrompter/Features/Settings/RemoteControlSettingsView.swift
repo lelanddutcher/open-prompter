@@ -339,6 +339,8 @@ struct RemoteCaptureSheet: View {
                     return .handled
                 }
             }
+            .padListWidth()
+            .frame(maxWidth: .infinity)
             .navigationTitle("remap")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
