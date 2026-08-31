@@ -28,6 +28,12 @@ import AVFoundation
 import Foundation
 import Observation
 import Speech
+import os
+
+/// Voice start/stop failure log (GitHub #10).
+fileprivate let voiceLogTracker = Logger(
+    subsystem: "app.openprompter.ios", category: "voice"
+)
 
 /// Speech-recognition authorization status, decoupled from
 /// `SFSpeechRecognizerAuthorizationStatus` so tests don't have to
@@ -368,17 +374,41 @@ final class VoiceTracker {
             if startBackend(analyzer, contextualStrings: biasVocabulary) {
                 self.speechBackend = analyzer
                 isActive = true
+                lastFailureReason = nil
                 return true
             }
             // Synchronous refusal (SpeechTranscriber.isAvailable == false).
             // Fall through to SF immediately.
         }
 
+        // GitHub #10 pre-flight — a WEAK gate, deliberately kept small.
+        //
+        // Measured on an iPad A16 simulator reproducing #10 exactly:
+        //   isAvailable = true, supportsOnDeviceRecognition = TRUE,
+        //   and the task still died with
+        //   `kLSRErrorDomain 300: Failed to initialize recognizer`.
+        //
+        // So `supportsOnDeviceRecognition` does NOT predict whether the local
+        // recognizer will actually initialize; it can report true while the
+        // offline model is absent. This check therefore catches only the
+        // honest-false case. The REAL handling for #10 is the error mapping in
+        // `userFacingMessage(forBackendError:)` below, which runs after the
+        // task fails. Do not delete this, but do not trust it either.
+        if let probe = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
+           !probe.supportsOnDeviceRecognition {
+            lastFailureReason = "On-device dictation isn't available on this device, and Open Prompter never sends audio off-device. Turn on Settings → General → Keyboard → Enable Dictation, then try again. On a managed or school device this may be blocked by policy."
+            return false
+        }
+
         let sf = SFSpeechBackend()
         if startBackend(sf, contextualStrings: biasVocabulary) {
             self.speechBackend = sf
             isActive = true
+            lastFailureReason = nil
             return true
+        }
+        if lastFailureReason == nil {
+            lastFailureReason = "Voice tracking couldn't claim the microphone. Close other apps using the mic and try again."
         }
         return false
     }
@@ -405,8 +435,8 @@ final class VoiceTracker {
             onUnavailable: { [weak self] in
                 self?.fallBackToSFBackend()
             },
-            onError: { [weak self] in
-                self?.handleBackendError()
+            onError: { [weak self] reason in
+                self?.handleBackendError(reason)
             }
         )
     }
@@ -456,14 +486,45 @@ final class VoiceTracker {
     /// flipping OFF. `isActive` stays true across the swap. Only when the SF
     /// backend ITSELF hard-fails is there nothing left to try — then we
     /// deactivate (matches the shipped SF error branch). (V3 Design 05 §6.2.)
-    private func handleBackendError() {
+    /// Turn a raw backend error string into something a user can act on.
+    ///
+    /// GitHub #10: the reporter's overlay "briefly appears and then
+    /// immediately closes" with every permission granted. Reproduced on an
+    /// iPad A16 simulator: the recognition task fails a beat after start with
+    /// `kLSRErrorDomain 300 (Failed to initialize recognizer)` — the on-device
+    /// (Local Speech Recognition) engine could not spin up, typically because
+    /// the offline dictation model for the locale is not present. We require
+    /// on-device (`requiresOnDeviceRecognition = true`) because the app
+    /// promises audio never leaves the device, so there is no silent server
+    /// fallback to take. The honest resolution is to say what is wrong.
+    nonisolated static func userFacingMessage(forBackendError raw: String) -> String {
+        if raw.contains("kLSRErrorDomain") || raw.lowercased().contains("failed to initialize recognizer") {
+            return "Voice tracking needs Apple's on-device speech model, and it couldn't start on this device. Open Settings → General → Keyboard → Dictation, turn it on, and make sure English is downloaded — then try again. Open Prompter only uses on-device speech, so it never falls back to sending audio to a server."
+        }
+        if raw.lowercased().contains("no speech") || raw.contains("1110") {
+            return "Voice tracking didn't hear any speech. Check the microphone isn't muted or in use by another app."
+        }
+        return "Voice tracking stopped unexpectedly (\(raw)). Try again, or turn it off and on."
+    }
+
+    private func handleBackendError(_ reason: String) {
         if let current = speechBackend, !(current is SFSpeechBackend) {
             fallBackToSFBackend()
             return
         }
         tearDownRecognition()
         isActive = false
+        // GitHub #10: record WHY. Previously voice just switched itself off
+        // with no trace, which is indistinguishable from a UI bug in a user
+        // report. The view surfaces this instead of silently closing.
+        lastFailureReason = Self.userFacingMessage(forBackendError: reason)
+        voiceLogTracker.error("voice deactivated: \(reason, privacy: .public)")
     }
+
+    /// Why voice tracking last refused to run, or nil if it has not failed
+    /// this session. Set on a hard backend failure and cleared on a
+    /// successful `start()`. Drives the user-facing message (GitHub #10).
+    private(set) var lastFailureReason: String?
 
     /// Reset the cursor to the start of the script. Use when tracking
     /// has gotten lost and the user wants to start over. Keeps the

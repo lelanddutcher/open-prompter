@@ -73,7 +73,7 @@ final class SpeechAnalyzerBackend: SpeechBackend {
         onTranscription: @escaping @MainActor (String) -> Void,
         onFinal: @escaping @MainActor () -> Void,
         onUnavailable: @escaping @MainActor () -> Void,
-        onError: @escaping @MainActor () -> Void
+        onError: @escaping @MainActor (String) -> Void
     ) -> Bool {
         // Cheapest synchronous gate. If the framework says the transcriber
         // is unavailable on this device, don't even claim the mic — let
@@ -109,7 +109,7 @@ final class SpeechAnalyzerBackend: SpeechBackend {
         onTranscription: @escaping @MainActor (String) -> Void,
         onFinal: @escaping @MainActor () -> Void,
         onUnavailable: @escaping @MainActor () -> Void,
-        onError: @escaping @MainActor () -> Void
+        onError: @escaping @MainActor (String) -> Void
     ) async {
         // `bringUp` is MainActor-isolated (the whole type is @MainActor), so
         // callbacks and property writes here run on the main actor directly.
@@ -229,7 +229,7 @@ final class SpeechAnalyzerBackend: SpeechBackend {
                 }
                 await backend?.deliver { onFinal() }
             } catch {
-                await backend?.deliver { onError() }
+                await backend?.deliver { onError("SpeechAnalyzer: \(String(describing: error))") }
             }
         }
     }

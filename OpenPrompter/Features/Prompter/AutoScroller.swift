@@ -122,6 +122,33 @@ final class AutoScroller {
     ///   it responds on frame 1, and only while `distance > 0` (never
     ///   pushes backward or past the target — the clamp below still
     ///   governs).
+    /// Catch-up floor for voice follow, as a pure function so it can be
+    /// tested without standing up a View.
+    ///
+    /// `lag` is how far the acknowledged word sits BELOW the READ line. The
+    /// floor ramps in from zero once the lag passes `halfway` (the midpoint
+    /// between READ and mid-screen) and reaches 60% of `maxVelocity` a quarter
+    /// of a viewport later.
+    ///
+    /// `halfway` is clamped at zero on purpose. It is derived as
+    /// `viewportHeight/2 - readY`, which goes NEGATIVE once the user drags the
+    /// READ line past mid-screen (it is draggable to 0.95). Unclamped, that
+    /// makes the ramp start below zero lag — pinning the floor on permanently
+    /// and replacing the gentle P-controller with a constant chase for anyone
+    /// who prefers a low READ line.
+    nonisolated static func catchUpFloor(
+        lag: CGFloat,
+        readY: CGFloat,
+        viewportHeight: CGFloat,
+        maxVelocity: CGFloat
+    ) -> CGFloat {
+        guard viewportHeight > 0 else { return 0 }
+        let halfway = max(0, viewportHeight * 0.5 - readY)
+        guard lag > halfway else { return 0 }
+        let urgency = min(1, (lag - halfway) / (viewportHeight * 0.25))
+        return maxVelocity * 0.6 * urgency
+    }
+
     func voiceTrackingTick(
         target: CGFloat,
         dt: TimeInterval,

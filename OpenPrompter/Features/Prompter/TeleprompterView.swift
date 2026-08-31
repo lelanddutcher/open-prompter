@@ -666,6 +666,15 @@ struct TeleprompterView: View {
                 }
             }
         }
+        // GitHub #10: voice turning itself OFF after a successful start is
+        // the exact reported symptom ("overlay appears, then immediately
+        // closes"). It was silent. Now a hard backend failure carries a
+        // reason and we surface it the moment isActive drops on its own.
+        .onChange(of: appState.voiceTracker.isActive) { wasActive, isActive in
+            guard wasActive, !isActive,
+                  let reason = appState.voiceTracker.lastFailureReason else { return }
+            appState.userFacingError = reason
+        }
         .onChange(of: remoteEnabled) { _, newValue in
             // Settings flipped the master toggle while the prompter is on
             // screen. Start / stop the long-lived sources so the change
@@ -1687,8 +1696,11 @@ struct TeleprompterView: View {
         // AVAudioEngine tap, so start() does not depend on the recorder's
         // shared-mic bring-up below.
         guard tracker.start() else {
-            appState.userFacingError =
-                "Couldn't start voice tracking. Try again in a moment."
+            // GitHub #10: prefer the specific reason the tracker recorded.
+            // The old blanket message was indistinguishable from a transient
+            // hiccup, so users retried forever against a permanent condition.
+            appState.userFacingError = tracker.lastFailureReason
+                ?? "Couldn't start voice tracking. Try again in a moment."
             return
         }
         // Bring up the recorder's shared mic path for a SIMULTANEOUS
@@ -1868,7 +1880,17 @@ struct TeleprompterView: View {
             // nils the target on touch, so scroll-back stays free.
             let elapsedSinceMatch = Date().timeIntervalSince(appState.voiceTracker.lastMatchTime)
             if elapsedSinceMatch > 1.0, let pendingTarget = vm.voiceTargetOffset {
-                if abs(pendingTarget - vm.scroller.offset) < 4 {
+                // Compare against the REACHABLE target. `voiceTargetOffset` is
+                // only `max(0, …)` — it is never clamped to `maxScrollOffset`,
+                // and `maxScrollOffset` is `contentHeight - viewportHeight/2`.
+                // On the last screen of a script the raw target therefore sits
+                // up to `viewportHeight × (0.5 - readFraction)` BEYOND anything
+                // the scroller can reach — 360pt at the default READ position.
+                // Comparing the raw value meant `< 4` was never true there, so
+                // the release never fired and the voice target was left set
+                // with velocity un-reset. Clamp first.
+                let reachable = min(pendingTarget, vm.maxScrollOffset)
+                if abs(reachable - vm.scroller.offset) < 4 {
                     vm.voiceTargetOffset = nil
                     vm.scroller.resetVoiceVelocity()
                 }
@@ -1901,13 +1923,12 @@ struct TeleprompterView: View {
                 // scroll recovers briskly instead of asymptoting
                 // toward the target. Above mid-screen the plain
                 // P-controller feel is unchanged.
-                let readY = vm.viewportHeight * CGFloat(voiceReadFraction)
-                let lag = target - vm.scroller.offset
-                let halfway = vm.viewportHeight * 0.5 - readY
-                let urgency = lag > halfway
-                    ? min(1, (lag - halfway) / (vm.viewportHeight * 0.25))
-                    : 0
-                let minVelocity = maxVel * 0.6 * urgency
+                let minVelocity = AutoScroller.catchUpFloor(
+                    lag: target - vm.scroller.offset,
+                    readY: vm.viewportHeight * CGFloat(voiceReadFraction),
+                    viewportHeight: vm.viewportHeight,
+                    maxVelocity: maxVel
+                )
                 // FEATHER distance drives the controller's responsiveness:
                 // tighter feather → snappier P-gain + higher velocityAlpha
                 // (cursor stays in lockstep with recognized words);

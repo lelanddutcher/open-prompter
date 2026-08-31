@@ -23,6 +23,15 @@
 
 import AVFoundation
 import Foundation
+import os
+
+/// Voice-tracking start/failure log. GitHub #10: a fully-permissioned iPad
+/// showed the overlay for a frame and then closed it with nothing recorded
+/// anywhere, because the recognizer's NSError was discarded at the callback.
+/// Everything that can refuse to start now says so here.
+fileprivate let voiceLog = Logger(
+    subsystem: "app.openprompter.ios", category: "voice"
+)
 import Speech
 
 /// Abstracts "produce a stream of recognized words from the mic."
@@ -53,6 +62,11 @@ protocol SpeechBackend: AnyObject {
     /// - `onUnavailable`: this backend can't run — retry with SF. Called at
     ///   most once, before any `onWords`. `SFSpeechBackend` never calls it.
     /// - `onError`: a hard failure after start so VoiceTracker deactivates.
+    ///   Carries a short human-readable reason. GitHub #10: this used to be
+    ///   `() -> Void`, so the underlying `NSError` was discarded at the call
+    ///   site and the voice overlay just vanished with nothing logged — the
+    ///   failure was undiagnosable from a user report. The reason is logged
+    ///   and surfaced to the user.
     @discardableResult
     func start(
         locale: Locale,
@@ -61,7 +75,7 @@ protocol SpeechBackend: AnyObject {
         onTranscription: @escaping @MainActor (String) -> Void,
         onFinal: @escaping @MainActor () -> Void,
         onUnavailable: @escaping @MainActor () -> Void,
-        onError: @escaping @MainActor () -> Void
+        onError: @escaping @MainActor (String) -> Void
     ) -> Bool
 
     /// Tear down recognition + release the audio session claim. Idempotent.
@@ -97,16 +111,25 @@ final class SFSpeechBackend: SpeechBackend {
         onTranscription: @escaping @MainActor (String) -> Void,
         onFinal: @escaping @MainActor () -> Void,
         onUnavailable: @escaping @MainActor () -> Void,
-        onError: @escaping @MainActor () -> Void
+        onError: @escaping @MainActor (String) -> Void
     ) -> Bool {
         // SFSpeechBackend never calls onUnavailable — its availability is
         // knowable synchronously (the guard below), so it either starts or
         // returns false. `onUnavailable` is the analyzer backend's seam.
-        guard let recognizer = SFSpeechRecognizer(locale: locale),
-              recognizer.isAvailable else {
+        guard let recognizer = SFSpeechRecognizer(locale: locale) else {
+            voiceLog.error("SF: no recognizer for locale \(locale.identifier, privacy: .public)")
+            return false
+        }
+        guard recognizer.isAvailable else {
+            voiceLog.error("SF: recognizer unavailable for \(locale.identifier, privacy: .public)")
             return false
         }
         self.recognizer = recognizer
+        // GitHub #10 diagnostic: on-device support is NOT implied by
+        // `isAvailable` (that can be true via the server path). We require
+        // on-device, so log the discrepancy — this is the single most likely
+        // reason a fully-permissioned device refuses to start.
+        voiceLog.info("SF: supportsOnDeviceRecognition=\(recognizer.supportsOnDeviceRecognition, privacy: .public) locale=\(locale.identifier, privacy: .public)")
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
@@ -134,15 +157,24 @@ final class SFSpeechBackend: SpeechBackend {
             } else {
                 resultSnapshot = nil
             }
-            let hadError = (error != nil)
+            // Snapshot the error as a plain string: NSError is not Sendable,
+            // and the whole point of #10 is that this value used to be thrown
+            // away here.
+            let errorReason: String?
+            if let error = error as NSError? {
+                errorReason = "\(error.domain) \(error.code): \(error.localizedDescription)"
+            } else {
+                errorReason = nil
+            }
 
             Task { @MainActor in
                 if let snap = resultSnapshot {
                     onTranscription(snap.formatted)
                     onWords(snap.segments)
                 }
-                if hadError {
-                    onError()
+                if let reason = errorReason {
+                    voiceLog.error("SF task error: \(reason, privacy: .public)")
+                    onError(reason)
                 } else if resultSnapshot?.isFinal == true {
                     onFinal()
                 }
@@ -154,6 +186,7 @@ final class SFSpeechBackend: SpeechBackend {
         // captures the mic directly (2.0.4 architecture). Claim the shared
         // audio session through the coordinator first.
         if !startAudioEngineTap(request: request) {
+            voiceLog.error("SF: audio engine tap refused to start")
             stop()
             return false
         }
