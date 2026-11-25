@@ -13,6 +13,7 @@ a teleprompter that supports markdown files and every "Pro" feature you need to 
 [![App Store](https://img.shields.io/badge/app%20store-shipping-3fee7a?style=flat-square)](https://apps.apple.com/us/app/open-prompter/id6763611915)
 [![Website](https://img.shields.io/badge/site-openprompter.app-3fee7a?style=flat-square)](https://openprompter.app)
 [![Buy Me a Coffee](https://img.shields.io/badge/buy%20me%20a%20coffee-ffdd00?style=flat-square&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/lelanddutcher)
+[![As seen on Open Source Alternatives](https://www.opensourcealternatives.to/badge-osa.svg)](https://www.opensourcealternatives.to)
 
 <p align="center">
   <img src="docs/readme-hero.svg" alt="Open Prompter — animated phone mockup with scrolling script, READ/FEATHER cursors, PiP camera, and audio meter" width="340">
